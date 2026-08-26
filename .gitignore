@@ -1,0 +1,16 @@
+.DS_Store
+
+# Local sample index and UI config (machine-specific)
+SampleMapBrowser.json
+SampleMapData.json
+SampleMapData.cache.lua
+.samplemap_player_status.json
+
+# Magenta Groove MIDI Dataset cache
+.groove_midi/
+
+# Per-track Sample Map Player configs (rewritten at runtime)
+SampleMapPlayerData/
+
+__pycache__/
+*.pyc

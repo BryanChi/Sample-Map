@@ -1,0 +1,9 @@
+desc:Sample Map Preview Bus
+author:bryan
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@sample
+// Pass-through used as a dedicated preview tap

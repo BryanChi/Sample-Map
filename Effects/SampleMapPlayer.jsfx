@@ -1,0 +1,540 @@
+desc:Sample Map Player
+author:bryan
+tags: MIDI drums sampler
+// Per-track sampler for Sample Map Browser. Plays layered samples with
+// start offset, pitch, and the track volume envelope. MIDI note filter
+// plus a trigger slider for UI hits. Falls back to SampleMapMIDI gmem.
+
+slider1:midi_lo=36<0,127,1>MIDI lo
+slider2:midi_hi=36<0,127,1>MIDI hi
+slider3:pitch=0<-24,24,0.01>Pitch (st)
+slider4:gain=1<0,4,0.001>Gain
+slider5:trigger=0<0,1000000,1>Trigger
+slider6:reload=0<0,1000000,1>Reload
+slider7:instance_id=0<0,4095,1>Instance
+slider8:vel=100<1,127,1>Trigger velocity
+slider9:overlap=0<0,1,1{Off,On}>Overlap
+slider10:root=36<0,127,1>Root note
+slider11:loaded=0<0,6,1>Loaded layers
+
+filename:0,SampleMapPlayerData/placeholder.txt
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+options:gmem=SampleMapMIDI maxmem=16777216
+
+@init
+ext_noinit = 1;
+
+MAX_LAYERS = 6;
+MAX_VOICES = 8;
+MAX_ENV = 32;
+MAX_SEC = 8;
+RING_CAP = 64;
+RING_BASE = 16;
+
+L_START = 0;
+L_LEN = 8;
+L_DELAY = 16;
+L_FADEIN = 24;
+L_FADEOUT = 32;
+L_VOL = 40;
+L_FRAMES = 48;
+L_BUF = 56;
+L_USED = 64;
+
+V_ON = 80;
+V_AGE = 90;
+V_VEL = 100;
+V_RATE = 110;
+V_NOTE = 120;
+V_KILL = 130;
+V_END = 140;
+V_WAIT = 150;
+
+E_T = 200;
+E_AMP = 240;
+E_CURVE = 280;
+
+MEM_BASE = 65536;
+SCRATCH = 32768;
+
+n_layers = 0;
+n_env = 0;
+last_reload = -1;
+last_trigger = trigger;
+last_instance = -1;
+last_srate = 0;
+last_gserial = -1;
+gmem_primed = 0;
+midi_this_block = 0;
+cfg_pitch = 0;
+cfg_gain = 1;
+voice_end_max = 0.2;
+
+function alloc_layer_bufs()
+(
+  max_frames = (MAX_SEC * srate)|0;
+  max_frames < 2048 ? max_frames = 2048;
+  layer_stride = max_frames * 2;
+  mem_next = MEM_BASE;
+  i = 0;
+  loop(MAX_LAYERS,
+    L_BUF[i] = mem_next;
+    mem_next += layer_stride;
+    L_USED[i] = 0;
+    L_FRAMES[i] = 0;
+    i += 1;
+  );
+);
+
+function env_ease(u, curve)
+(
+  u < 0 ? u = 0 : u > 1 ? u = 1;
+  abs(curve) < 0.0005 ? u : (
+    k = 1 + abs(curve) * 6;
+    curve > 0 ? pow(u, k) : (1 - pow(1 - u, k));
+  );
+);
+
+function env_eval(t)
+local(i, found, got, span, u, last_i)
+(
+  n_env <= 0 ? 1 : (
+    t <= E_T[0] ? E_AMP[0] : (
+      last_i = n_env - 1;
+      t >= E_T[last_i] ? E_AMP[last_i] : (
+        found = E_AMP[last_i];
+        got = 0;
+        i = 1;
+        loop(n_env - 1,
+          !got && t <= E_T[i] ? (
+            span = E_T[i] - E_T[i - 1];
+            span < 0.0000001 ? span = 0.0000001;
+            u = (t - E_T[i - 1]) / span;
+            found = E_AMP[i - 1] + (E_AMP[i] - E_AMP[i - 1]) * env_ease(u, E_CURVE[i - 1]);
+            got = 1;
+          );
+          i += 1;
+        );
+        found;
+      );
+    );
+  );
+);
+
+function layer_path_same(idx)
+(
+  idx == 0 ? strcmp(#lp0, #path) == 0 : (
+    idx == 1 ? strcmp(#lp1, #path) == 0 : (
+      idx == 2 ? strcmp(#lp2, #path) == 0 : (
+        idx == 3 ? strcmp(#lp3, #path) == 0 : (
+          idx == 4 ? strcmp(#lp4, #path) == 0 : strcmp(#lp5, #path) == 0
+        )
+      )
+    )
+  );
+);
+
+function layer_path_store(idx)
+(
+  idx == 0 ? strcpy(#lp0, #path) : (
+    idx == 1 ? strcpy(#lp1, #path) : (
+      idx == 2 ? strcpy(#lp2, #path) : (
+        idx == 3 ? strcpy(#lp3, #path) : (
+          idx == 4 ? strcpy(#lp4, #path) : strcpy(#lp5, #path)
+        )
+      )
+    )
+  );
+);
+
+function read_layer_file(idx)
+local(fh, nch, sr, avail, frames, out_n, src_i, frac, s0, s1, d, si, in_i, out_i, ptr, tmp)
+(
+  idx < 0 || idx >= MAX_LAYERS ? 0 : (
+    L_USED[idx] = 0;
+    L_FRAMES[idx] = 0;
+    strlen(#path) <= 0 ? 0 : (
+      fh = file_open(#path);
+      fh < 0 ? 0 : (
+        nch = 0;
+        sr = 0;
+        file_riff(fh, nch, sr);
+        nch < 1 ? nch = 1;
+        sr < 1 ? sr = srate;
+        avail = file_avail(fh);
+        avail < 2 ? (
+          file_close(fh);
+          0;
+        ) : (
+          avail > 4000000 ? avail = 4000000;
+          tmp = SCRATCH;
+          file_mem(fh, tmp, avail);
+          file_close(fh);
+          frames = (avail / nch)|0;
+          frames < 1 ? 0 : (
+            out_n = (frames * srate / sr)|0;
+            out_n > max_frames ? out_n = max_frames;
+            out_n < 1 ? out_n = 1;
+            ptr = L_BUF[idx];
+            out_i = 0;
+            loop(out_n,
+              src_i = out_i * sr / srate;
+              si = src_i|0;
+              frac = src_i - si;
+              si >= frames - 1 ? (
+                si = frames - 1;
+                frac = 0;
+              );
+              nch >= 2 ? (
+                in_i = si * nch;
+                s0 = tmp[in_i];
+                s1 = tmp[in_i + 1];
+                si + 1 < frames ? (
+                  s0 += (tmp[in_i + nch] - tmp[in_i]) * frac;
+                  s1 += (tmp[in_i + nch + 1] - tmp[in_i + 1]) * frac;
+                );
+              ) : (
+                s0 = tmp[si];
+                si + 1 < frames ? s0 += (tmp[si + 1] - tmp[si]) * frac;
+                s1 = s0;
+              );
+              d = ptr + out_i * 2;
+              d[0] = s0;
+              d[1] = s1;
+              out_i += 1;
+            );
+            L_FRAMES[idx] = out_n;
+            L_USED[idx] = 1;
+            1;
+          );
+        );
+      );
+    );
+  );
+);
+
+function rstrip_magic()
+local(n, c, keep)
+(
+  keep = 1;
+  while (keep) (
+    n = strlen(#magic);
+    n <= 0 ? keep = 0 : (
+      c = str_getchar(#magic, n - 1);
+      (c == 10 || c == 13 || c == 32 || c == 9) ? str_setlen(#magic, n - 1) : keep = 0;
+    );
+  );
+);
+
+function rstrip_path()
+local(n, c, keep)
+(
+  keep = 1;
+  while (keep) (
+    n = strlen(#path);
+    n <= 0 ? keep = 0 : (
+      c = str_getchar(#path, n - 1);
+      (c == 10 || c == 13 || c == 32 || c == 9) ? str_setlen(#path, n - 1) : keep = 0;
+    );
+  );
+);
+
+function parse_config(fh)
+local(i, ok, start, len, delay, fadein, fadeout, vol)
+(
+  ok = 0;
+  file_string(fh, #magic);
+  rstrip_magic();
+  strcmp(#magic, "SMP1") == 0 ? (
+    file_var(fh, cfg_pitch);
+    file_var(fh, midi_lo);
+    file_var(fh, midi_hi);
+    file_var(fh, root);
+    file_var(fh, cfg_gain);
+    file_var(fh, overlap);
+    file_var(fh, n_env);
+    file_var(fh, n_layers);
+    n_env |= 0;
+    n_layers |= 0;
+    n_env < 0 ? n_env = 0;
+    n_env > MAX_ENV ? n_env = MAX_ENV;
+    n_layers < 0 ? n_layers = 0;
+    n_layers > MAX_LAYERS ? n_layers = MAX_LAYERS;
+    i = 0;
+    loop(n_env,
+      file_var(fh, E_T[i]);
+      file_var(fh, E_AMP[i]);
+      file_var(fh, E_CURVE[i]);
+      i += 1;
+    );
+    i = n_layers;
+    loop(MAX_LAYERS - n_layers,
+      L_USED[i] = 0;
+      L_FRAMES[i] = 0;
+      i += 1;
+    );
+    loaded = 0;
+    voice_end_max = 0.05;
+    i = 0;
+    loop(n_layers,
+      file_var(fh, start);
+      file_var(fh, len);
+      file_var(fh, delay);
+      file_var(fh, fadein);
+      file_var(fh, fadeout);
+      file_var(fh, vol);
+      file_string(fh, #path);
+      strlen(#path) <= 0 ? file_string(fh, #path);
+      rstrip_path();
+      L_START[i] = max(0, start);
+      L_LEN[i] = max(0, len);
+      L_DELAY[i] = max(0, delay);
+      L_FADEIN[i] = max(0, fadein);
+      L_FADEOUT[i] = max(0, fadeout);
+      L_VOL[i] = max(0, vol);
+      keep = layer_path_same(i) && L_USED[i] && L_FRAMES[i] > 0;
+      keep || read_layer_file(i) ? (
+        keep ? 0 : layer_path_store(i);
+        loaded += 1;
+        L_LEN[i] <= 0.0001 ? L_LEN[i] = L_FRAMES[i] / srate;
+        L_START[i] * srate >= L_FRAMES[i] ? L_START[i] = 0;
+        remain = (L_FRAMES[i] / srate) - L_START[i];
+        remain < 0.001 ? remain = 0.001;
+        L_LEN[i] > remain ? L_LEN[i] = remain;
+        endt = L_DELAY[i] + L_LEN[i];
+        endt > voice_end_max ? voice_end_max = endt;
+      );
+      i += 1;
+    );
+    n_env >= 1 ? (
+      E_T[n_env - 1] > voice_end_max ? voice_end_max = E_T[n_env - 1];
+    );
+    pitch = cfg_pitch;
+    gain = cfg_gain;
+    ok = 1;
+  );
+  ok;
+);
+
+function load_config()
+local(fh)
+(
+  sprintf(#cfg, "SampleMapPlayerData/%d.txt", instance_id|0);
+  fh = file_open(#cfg);
+  fh < 0 ? (
+    sprintf(#cfg, "Effects/SampleMapPlayerData/%d.txt", instance_id|0);
+    fh = file_open(#cfg);
+  );
+  fh < 0 ? (
+    sprintf(#cfg, "Data/SampleMapPlayerData/%d.txt", instance_id|0);
+    fh = file_open(#cfg);
+  );
+  fh < 0 ? fh = file_open(0);
+  fh >= 0 ? (
+    file_text(fh, 1);
+    parse_config(fh);
+    file_close(fh);
+  );
+);
+
+function stop_voice(v)
+(
+  V_ON[v] ? V_KILL[v] = 24;
+);
+
+function steal_all()
+local(v)
+(
+  v = 0;
+  loop(MAX_VOICES,
+    stop_voice(v);
+    v += 1;
+  );
+);
+
+function start_voice_at(note, velocity, wait)
+local(v, free, oldest, age, rate_st)
+(
+  note < midi_lo || note > midi_hi ? 0 : (
+    velocity < 1 ? 0 : (
+      overlap < 0.5 ? steal_all();
+      free = -1;
+      oldest = 0;
+      age = -1;
+      v = 0;
+      loop(MAX_VOICES,
+        !V_ON[v] ? (
+          free < 0 ? free = v;
+        ) : (
+          age < 0 || V_AGE[v] > age ? (
+            age = V_AGE[v];
+            oldest = v;
+          );
+        );
+        v += 1;
+      );
+      free < 0 ? free = oldest;
+      rate_st = pitch + (note - root);
+      rate_st < -24 ? rate_st = -24;
+      rate_st > 24 ? rate_st = 24;
+      V_ON[free] = 1;
+      V_AGE[free] = 0;
+      V_VEL[free] = velocity / 127;
+      V_RATE[free] = pow(2, rate_st / 12);
+      V_NOTE[free] = note;
+      V_KILL[free] = 0;
+      V_WAIT[free] = max(0, wait|0);
+      V_END[free] = voice_end_max / max(0.05, V_RATE[free]);
+      1;
+    );
+  );
+);
+
+function start_voice(note, velocity)
+(
+  start_voice_at(note, velocity, 0);
+);
+
+function layer_sample(idx, sec, rate)
+local(pos, si, frac, ptr, maxp, a, b)
+(
+  L_USED[idx] <= 0 ? 0 : (
+    pos = (L_START[idx] + sec) * srate * rate;
+    maxp = L_FRAMES[idx] - 2;
+    pos < 0 || pos >= maxp ? 0 : (
+      si = pos|0;
+      frac = pos - si;
+      ptr = L_BUF[idx] + si * 2;
+      a = ptr[0] + (ptr[2] - ptr[0]) * frac;
+      b = ptr[1] + (ptr[3] - ptr[1]) * frac;
+      spl_l += a;
+      spl_r += b;
+      1;
+    );
+  );
+);
+
+function play_voice(v)
+local(t, amp, i, local_t, fade, dur, fi, fo)
+(
+  V_WAIT[v] > 0 ? (
+    V_WAIT[v] -= 1;
+    0;
+  ) : (
+  t = V_AGE[v] / srate;
+  amp = V_VEL[v] * gain * env_eval(t);
+  V_KILL[v] > 0 ? (
+    amp *= V_KILL[v] / 24;
+    V_KILL[v] -= 1;
+    V_KILL[v] <= 0 ? V_ON[v] = 0;
+  );
+  amp > 0.0000001 ? (
+    i = 0;
+    loop(n_layers,
+      L_USED[i] ? (
+        local_t = t - L_DELAY[i];
+        dur = L_LEN[i];
+        (local_t >= 0 && local_t < dur) ? (
+          fade = 1;
+          fi = L_FADEIN[i];
+          fo = L_FADEOUT[i];
+          fi > 0 && local_t < fi ? fade *= local_t / fi;
+          fo > 0 && local_t > dur - fo ? fade *= (dur - local_t) / fo;
+          fade > 0 ? (
+            spl_l = 0;
+            spl_r = 0;
+            layer_sample(i, local_t, V_RATE[v]);
+            out_l += spl_l * amp * L_VOL[i] * fade;
+            out_r += spl_r * amp * L_VOL[i] * fade;
+          );
+        );
+      );
+      i += 1;
+    );
+  );
+  V_AGE[v] += 1;
+  t >= V_END[v] && V_KILL[v] <= 0 ? V_ON[v] = 0;
+  );
+);
+
+function poll_gmem()
+local(serial, i, base, es, note, velocity)
+(
+  serial = gmem[0];
+  !gmem_primed ? (
+    last_gserial = serial;
+    gmem_primed = 1;
+  ) : (
+    serial > last_gserial ? (
+      i = 0;
+      loop(RING_CAP,
+        base = RING_BASE + i * 4;
+        es = gmem[base + 3];
+        (es > last_gserial && es <= serial && gmem[base + 2] > 0.5) ? (
+          note = gmem[base]|0;
+          velocity = gmem[base + 1]|0;
+          start_voice(note, velocity);
+        );
+        i += 1;
+      );
+      last_gserial = serial;
+    );
+  );
+);
+
+strcpy(#lp0, "");
+strcpy(#lp1, "");
+strcpy(#lp2, "");
+strcpy(#lp3, "");
+strcpy(#lp4, "");
+strcpy(#lp5, "");
+alloc_layer_bufs();
+last_srate = srate;
+
+@slider
+instance_id != last_instance || reload != last_reload ? (
+  last_instance = instance_id;
+  last_reload = reload;
+  load_config();
+);
+trigger != last_trigger ? (
+  last_trigger = trigger;
+  start_voice(root, vel);
+);
+
+@block
+srate != last_srate ? (
+  last_srate = srate;
+  alloc_layer_bufs();
+  load_config();
+);
+
+midi_this_block = 0;
+while (midirecv(offset, msg1, msg2, msg3)) (
+  status = msg1 & $xF0;
+  is_on = (status == $x90 && msg3 > 0);
+  is_on ? (
+    midi_this_block = 1;
+    midiq_note = msg2;
+    midiq_vel = msg3;
+    midiq_off = offset;
+    start_voice_at(midiq_note, midiq_vel, offset);
+  );
+  midisend(offset, msg1, msg2, msg3);
+);
+
+@sample
+out_l = 0;
+out_r = 0;
+v = 0;
+loop(MAX_VOICES,
+  V_ON[v] ? play_voice(v);
+  v += 1;
+);
+spl0 += out_l;
+spl1 += out_r;
