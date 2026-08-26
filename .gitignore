@@ -9,6 +9,9 @@ SampleMapData.cache.lua
 # Magenta Groove MIDI Dataset cache
 .groove_midi/
 
+# Installed updater stamp (written by SampleMapUpdate.lua)
+version.txt
+
 # Per-track Sample Map Player configs (rewritten at runtime)
 SampleMapPlayerData/
 

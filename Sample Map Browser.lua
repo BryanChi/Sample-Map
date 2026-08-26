@@ -19,9 +19,16 @@ end
 
 -- --- Script state ------------------------------------------------------------
 local SCRIPT_NAME = "Sample Map Browser"
-local _, script_path = r.get_action_context()
-local SCRIPT_DIR = (script_path and script_path:match("^(.+)[/\\][^/\\]+$"))
+-- Resolve from this file's path without extra locals (main chunk is at Lua's 200-local limit).
+local SCRIPT_DIR = (select(2, r.get_action_context()) or ""):match("^(.+)[/\\][^/\\]+$")
   or (r.GetResourcePath() .. "/Scripts/Sample Map")
+SAMPLE_MAP_SCRIPT_DIR = SCRIPT_DIR
+do
+  local ok_update = pcall(dofile, SCRIPT_DIR .. "/SampleMapUpdate.lua")
+  if not ok_update then
+    -- Updater is optional; the rest of the script still runs.
+  end
+end
 local CONFIG_DIR = SCRIPT_DIR
 local CONFIG_PATH = CONFIG_DIR .. "/SampleMapBrowser.json"
 local DATA_PATH = SCRIPT_DIR .. "/SampleMapData.json"  -- Cached sample index (JSON, compatibility)
@@ -49295,6 +49302,29 @@ function render_header()
     state.settings_open = not state.settings_open
   end
 
+  if SampleMapUpdateState and SampleMapUpdateState.show_update_icon then
+    r.ImGui_SameLine(ctx)
+    local update_img = get_vfx_icon and get_vfx_icon("Update")
+    local clicked = false
+    if update_img and r.ImGui_ImageButton then
+      r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Button(), 0x00000000)
+      r.ImGui_PushStyleColor(ctx, r.ImGui_Col_ButtonHovered(), 0xFFFFFF22)
+      r.ImGui_PushStyleColor(ctx, r.ImGui_Col_ButtonActive(), 0xFFFFFF18)
+      local ok_img, img_clicked = pcall(r.ImGui_ImageButton, ctx, "##sample_map_update_icon", update_img, 16, 16)
+      r.ImGui_PopStyleColor(ctx, 3)
+      clicked = ok_img and img_clicked
+    elseif r.ImGui_MenuItem(ctx, "Update") then
+      clicked = true
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      local latest = SampleMapUpdateState.latest_release_tag or "new version"
+      r.ImGui_SetTooltip(ctx, "Update available: " .. tostring(latest) .. "\nOpen Settings → Updates")
+    end
+    if clicked and SampleMapOpenUpdateSettings then
+      SampleMapOpenUpdateSettings()
+    end
+  end
+
   local midi_h = 18
   local midi_w = seq_midi_arm_button_width(midi_h)
   local knob_sz = 16
@@ -49447,6 +49477,11 @@ function settings_section_should_show(label)
       end
     end
     return false
+  end
+  if label == "Updates" then
+    return settings_matches(
+      "Update", "GitHub", "Download", "version", "Check for updates", "install"
+    )
   end
   return false
 end
@@ -50197,6 +50232,16 @@ function render_settings()
       if settings_section("Keyboard Shortcuts", true) then
         r.ImGui_Spacing(ctx)
         settings_render_keyboard_shortcuts()
+        r.ImGui_Spacing(ctx)
+      end
+    end
+
+    if DrawSampleMapUpdateSettings and settings_section_should_show("Updates") then
+      any_section = true
+      local updates_default_open = SampleMapUpdateState and SampleMapUpdateState.show_update_icon
+      if settings_section("Updates", updates_default_open) then
+        r.ImGui_Spacing(ctx)
+        DrawSampleMapUpdateSettings(ctx)
         r.ImGui_Spacing(ctx)
       end
     end
@@ -51834,6 +51879,9 @@ function loop()
   end
 
   if not loading then
+    if SampleMapAutoCheckForUpdates then
+      SampleMapAutoCheckForUpdates()
+    end
     process_scan_slice()
     process_waveform_slice(6.0)
 
