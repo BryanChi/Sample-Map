@@ -334,7 +334,18 @@ function SampleMapPerformUpdate()
     if entry.resource then
       local_path = resource .. sep .. (entry.dest or entry.url):gsub("/", sep)
     else
-      local_path = dir .. sep .. (entry.dest or entry.url):gsub("/", sep)
+      local rel = (entry.dest or entry.url):gsub("/", sep)
+      local_path = dir .. sep .. rel
+      -- Installer copies action scripts as CRS_<name>. If that file exists,
+      -- update it instead of writing a second unprefixed copy.
+      if rel:match("%.lua$") and not rel:match("[/\\]") and not rel:match("^CRS_") then
+        local crs_path = dir .. sep .. "CRS_" .. rel
+        local fh = io.open(crs_path, "rb")
+        if fh then
+          fh:close()
+          local_path = crs_path
+        end
+      end
     end
     local ok, err = download_file(full_url, local_path)
     if ok then
