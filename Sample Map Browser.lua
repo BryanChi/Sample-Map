@@ -7419,22 +7419,25 @@ end
 
 -- --- UI kit: modern minimal custom-drawn controls ---------------------------
 -- Palette keyed to accent #1EFF5E (hue ~137°). Neutrals are charcoal with a
--- faint forest cast so the UI never reads as blue-gray.
+-- faint forest cast so the UI never reads as blue-gray. Surfaces step up in
+-- small, even increments (bg → panel → surface → elevated) so nested areas
+-- read as layers without needing heavy borders.
 UI_THEME = {
-  bg            = 0x101410FF,
-  bg_panel      = 0x141A16FF,
-  surface       = 0x1A211DFF,
-  surface_hvr   = 0x242E28FF,
-  surface_act   = 0x151A17FF,
-  elevated      = 0x1F2722FF,
-  border        = 0x2A342EFF,
+  bg            = 0x0E120FFF,
+  bg_panel      = 0x131915FF,
+  surface       = 0x19201BFF,
+  surface_hvr   = 0x232C26FF,
+  surface_act   = 0x141A16FF,
+  elevated      = 0x1E2621FF,
+  border        = 0x26302AFF,
+  border_soft   = 0x1E2622FF,
   border_hvr    = 0x3D5446FF,
   text          = 0xE8EEEAFF,
-  text_dim      = 0x8B968EFF,
-  text_mute     = 0x5C655FFF,
-  popup_bg      = 0x161C18F5,
-  title_bg      = 0x0C0F0DFF,
-  title_bg_act  = 0x121614FF,
+  text_dim      = 0x95A098FF,
+  text_mute     = 0x5F6962FF,
+  popup_bg      = 0x151B17F8,
+  title_bg      = 0x0B0E0CFF,
+  title_bg_act  = 0x101411FF,
   accent        = 0x1EFF5EFF,
   accent_hvr    = 0x62FF8AFF,
   accent_fill   = 0x0E2A18FF,
@@ -7447,7 +7450,50 @@ UI_THEME = {
   success_hvr   = 0x244830FF,
   folder        = 0x2A5A34FF,
   folder_hvr    = 0x3A7544FF,
+  grid_line     = 0x8FB39A1C,
+  grid_text     = 0x8FA396A0,
 }
+
+-- Shared sizing so toolbars, tabs and section headers line up across views.
+UI_METRICS = {
+  toolbar_h     = 28,
+  toolbar_gap   = 10,
+  section_h     = 30,
+  radius_panel  = 8,
+  radius_ctrl   = 6,
+}
+
+-- Thin vertical rule between toolbar groups; keeps related controls visually
+-- clustered without spending horizontal room on labels.
+function ui_toolbar_divider(h, gap)
+  h = h or UI_METRICS.toolbar_h
+  gap = gap or UI_METRICS.toolbar_gap
+  r.ImGui_SameLine(ctx, 0, gap)
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local inset = math.floor(h * 0.22)
+  r.ImGui_DrawList_AddLine(dl, x + 0.5, y + inset, x + 0.5, y + h - inset, UI_THEME.border, 1.0)
+  r.ImGui_Dummy(ctx, 1, h)
+  r.ImGui_SameLine(ctx, 0, gap)
+end
+
+-- Small uppercase caption used to group related settings / menu sections.
+function ui_group_caption(text)
+  r.ImGui_Dummy(ctx, 1, 2)
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local label = string.upper(text or "")
+  local tw, th = r.ImGui_CalcTextSize(ctx, label)
+  r.ImGui_DrawList_AddText(dl, x + 2, y, UI_THEME.text_mute, label)
+  local avail = r.ImGui_GetContentRegionAvail(ctx)
+  local line_x0 = x + tw + 12
+  local line_x1 = x + (avail or 0) - 2
+  if line_x1 > line_x0 then
+    local ly = y + th * 0.5
+    r.ImGui_DrawList_AddLine(dl, line_x0, ly, line_x1, ly, UI_THEME.border_soft, 1.0)
+  end
+  r.ImGui_Dummy(ctx, 1, th + 2)
+end
 
 function ui_push_theme()
   local n_col, n_var = 0, 0
@@ -7478,6 +7524,7 @@ function ui_push_theme()
   col(r.ImGui_Col_BorderShadow, 0x00000000)
   col(r.ImGui_Col_Text, T.text)
   col(r.ImGui_Col_TextDisabled, T.text_mute)
+  col(r.ImGui_Col_TextSelectedBg, 0x1EFF5E40)
   col(r.ImGui_Col_TitleBg, T.title_bg)
   col(r.ImGui_Col_TitleBgActive, T.title_bg_act)
   col(r.ImGui_Col_TitleBgCollapsed, T.title_bg)
@@ -7497,25 +7544,31 @@ function ui_push_theme()
   col(r.ImGui_Col_CheckMark, T.accent)
   col(r.ImGui_Col_SliderGrab, T.accent)
   col(r.ImGui_Col_SliderGrabActive, T.accent_hvr)
-  col(r.ImGui_Col_ResizeGrip, 0x1EFF5E33)
-  col(r.ImGui_Col_ResizeGripHovered, 0x1EFF5E77)
+  col(r.ImGui_Col_ResizeGrip, 0x1EFF5E22)
+  col(r.ImGui_Col_ResizeGripHovered, 0x1EFF5E66)
   col(r.ImGui_Col_ResizeGripActive, T.accent)
   col(r.ImGui_Col_ScrollbarBg, 0x0C0F0D00)
-  col(r.ImGui_Col_ScrollbarGrab, 0x3A4A4088)
+  col(r.ImGui_Col_ScrollbarGrab, 0x3A4A4070)
   col(r.ImGui_Col_ScrollbarGrabHovered, 0x5A6A60AA)
   col(r.ImGui_Col_ScrollbarGrabActive, T.accent)
   col(r.ImGui_Col_Tab, T.surface)
   col(r.ImGui_Col_TabHovered, T.surface_hvr)
   col(r.ImGui_Col_TabActive, T.accent_fill)
+  col(r.ImGui_Col_TableHeaderBg, T.elevated)
+  col(r.ImGui_Col_TableBorderStrong, T.border)
+  col(r.ImGui_Col_TableBorderLight, T.border_soft)
+  col(r.ImGui_Col_TableRowBgAlt, 0xFFFFFF06)
+  col(r.ImGui_Col_DragDropTarget, T.accent)
+  col(r.ImGui_Col_ModalWindowDimBg, 0x000000A0)
   col(r.ImGui_Col_PlotHistogram, T.accent)
   col(r.ImGui_Col_NavHighlight, 0x00000000)
 
   var1(r.ImGui_StyleVar_WindowRounding, 10)
-  var1(r.ImGui_StyleVar_ChildRounding, 8)
-  var1(r.ImGui_StyleVar_PopupRounding, 8)
-  var1(r.ImGui_StyleVar_FrameRounding, 6)
+  var1(r.ImGui_StyleVar_ChildRounding, UI_METRICS.radius_panel)
+  var1(r.ImGui_StyleVar_PopupRounding, UI_METRICS.radius_panel)
+  var1(r.ImGui_StyleVar_FrameRounding, UI_METRICS.radius_ctrl)
   var1(r.ImGui_StyleVar_GrabRounding, 4)
-  var1(r.ImGui_StyleVar_TabRounding, 6)
+  var1(r.ImGui_StyleVar_TabRounding, UI_METRICS.radius_ctrl)
   var1(r.ImGui_StyleVar_ScrollbarRounding, 8)
   var1(r.ImGui_StyleVar_WindowBorderSize, 1)
   var1(r.ImGui_StyleVar_ChildBorderSize, 0)
@@ -9030,7 +9083,14 @@ function seq_debug_region_snapshot()
   return table.concat(parts, "|")
 end
 
+-- Development trace logging. Off by default: it appends to hard-coded
+-- files and several call sites run every frame.
+SEQ_DEBUG_LOG = false
+
 function seq_debug_ndjson(hypothesisId, location, message, data)
+  if not SEQ_DEBUG_LOG then
+    return
+  end
   local function esc(s)
     return tostring(s or ""):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n")
   end
@@ -42693,7 +42753,7 @@ function render_seq_note_edit_mode_bar(btn_h)
 end
 
 function render_seq_top_toolbar()
-  local btn_h = 26
+  local btn_h = UI_METRICS.toolbar_h
   local inner_h = btn_h - 6
   local pocket_pad = 4
   local inner_gap = 3
@@ -50332,7 +50392,7 @@ end
 
 function render_view_tab_switcher()
   local icon_size = 15
-  local btn_h = 28
+  local btn_h = UI_METRICS.toolbar_h
   local pad_x = 10
   local icon_text_gap = 6
   local tab_gap = 3
@@ -50574,7 +50634,7 @@ function render_sample_map_tab_bar()
 end
 
 function render_sample_map_toolbar()
-  if draw_ui_button("map_layout_edit", "Layout", nil, 28, {
+  if draw_ui_button("map_layout_edit", "Layout", nil, UI_METRICS.toolbar_h, {
     compact = true,
     selected = state.map_ui_edit == true,
     style = state.map_ui_edit and "primary" or "default",
@@ -50591,9 +50651,9 @@ function render_sample_map_toolbar()
       r.ImGui_SetTooltip(ctx, "Edit Sample Map layout.\nMove modules and resize their edges.")
     end
   end
-  r.ImGui_SameLine(ctx, 0, 10)
+  ui_toolbar_divider()
   render_map_y_axis_combo()
-  r.ImGui_SameLine(ctx, 0, 10)
+  ui_toolbar_divider()
   render_filter_input()
   render_folder_filter_chips()
   render_tag_filters()
@@ -51794,124 +51854,161 @@ function render_filter_input()
   r.ImGui_PopStyleVar(ctx)
 end
 
+-- Logs every sample's coordinates and summary ranges (Tools → Debug).
+function debug_log_sample_coordinates()
+  log("=== DEBUG: Sample Coordinates ===")
+  log("Total samples: " .. #state.samples)
+  if #state.samples > 0 then
+    local x_min, x_max = state.samples[1].x or 0.5, state.samples[1].x or 0.5
+    local y_min, y_max = state.samples[1].y or 0.5, state.samples[1].y or 0.5
+    local freq_min, freq_max = state.samples[1].dominant_freq or 440.0, state.samples[1].dominant_freq or 440.0
+    local rms_min, rms_max = state.samples[1].rms_energy or 0.0, state.samples[1].rms_energy or 0.0
+    local size_min, size_max = state.samples[1].file_size or 0, state.samples[1].file_size or 0
+    for i, s in ipairs(state.samples) do
+      local x = s.x or 0.5
+      local y = s.y or 0.5
+      local freq = s.dominant_freq or 440.0
+      local rms = s.rms_energy or 0.0
+      local size = s.file_size or 0
+      log(string.format("Sample %d: name='%s', freq=%.1f Hz, bright=%.1f, weight=%.2f, rms=%.6f, size=%d bytes, x=%.6f, y=%.6f",
+          i, s.name or "unknown", freq, s.brightness or 0, s.sub_weight or 0, rms, size, x, y))
+      x_min = math.min(x_min, x)
+      x_max = math.max(x_max, x)
+      y_min = math.min(y_min, y)
+      y_max = math.max(y_max, y)
+      freq_min = math.min(freq_min, freq)
+      freq_max = math.max(freq_max, freq)
+      rms_min = math.min(rms_min, rms)
+      rms_max = math.max(rms_max, rms)
+      size_min = math.min(size_min, size)
+      size_max = math.max(size_max, size)
+    end
+    log("--- Summary ---")
+    log(string.format("X range: %.6f to %.6f (span: %.6f)", x_min, x_max, x_max - x_min))
+    log(string.format("Y range: %.6f to %.6f (span: %.6f)", y_min, y_max, y_max - y_min))
+    log(string.format("Frequency range: %.1f Hz to %.1f Hz", freq_min, freq_max))
+    log(string.format("RMS range: %.6f to %.6f", rms_min, rms_max))
+    log(string.format("File size range: %d to %d bytes", size_min, size_max))
+  else
+    log("No samples to debug")
+  end
+  log("=== End Debug ===")
+end
+
+function clear_all_folders_and_samples()
+  local msg = "Remove every scan folder and clear the sample index?\n\n"
+    .. "Your audio files are not touched, but the map will be empty until you add folders and rescan."
+  if r.ShowMessageBox(msg, "Clear library", 4) ~= 6 then
+    return
+  end
+  state.folders = {}
+  filter_samples_by_folders()  -- This will clear samples and tag data
+  state.scan_queue = {}
+  state.scan_running = false
+  state.scan_started = 0
+  clear_sample_cache()
+  save_config()
+  log("Cleared folders and samples")
+end
+
+function menu_item_tooltip(text)
+  if text and r.ImGui_IsItemHovered(ctx) then
+    r.ImGui_SetTooltip(ctx, text)
+  end
+end
+
 function render_header()
   if not r.ImGui_BeginMenuBar(ctx) then
     return
   end
 
+  -- Library: scanning and the index itself.
   if r.ImGui_BeginMenu(ctx, "Library") then
     if state.scan_running then
       if r.ImGui_MenuItem(ctx, "Stop Scan") then
         stop_scan()
       end
-      if r.ImGui_IsItemHovered(ctx) then
-        r.ImGui_SetTooltip(ctx, "Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.")
-      end
+      menu_item_tooltip("Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.")
     else
-      if r.ImGui_MenuItem(ctx, "Rescan") then
+      local label = (#state.scan_queue > 0) and "Resume Scan" or "Rescan"
+      if r.ImGui_MenuItem(ctx, label) then
         start_scan()
       end
-      if r.ImGui_IsItemHovered(ctx) then
-        if #state.scan_queue > 0 then
-          r.ImGui_SetTooltip(ctx, string.format(
-            "Continue the unfinished scan (%d file(s) left).\nAlready indexed samples are kept.",
-            #state.scan_queue
-          ))
-        else
-          r.ImGui_SetTooltip(ctx, "Scan folders for new files.\nAlready indexed samples are skipped.")
-        end
+      if #state.scan_queue > 0 then
+        menu_item_tooltip(string.format(
+          "Continue the unfinished scan (%d file(s) left).\nAlready indexed samples are kept.",
+          #state.scan_queue
+        ))
+      else
+        menu_item_tooltip("Scan folders for new files.\nAlready indexed samples are skipped.")
       end
     end
-    if r.ImGui_MenuItem(ctx, "Scan for Incomplete") then
-      enqueue_incomplete_analysis()
+    if r.ImGui_MenuItem(ctx, "Manage Scan Folders…") then
+      state.settings_open = true
+      state.settings_section_open = state.settings_section_open or {}
+      state.settings_section_open["Scan Folders"] = true
     end
-    if r.ImGui_MenuItem(ctx, "Scan for Effective Range") then
-      enqueue_effective_range_analysis()
-    end
-    if r.ImGui_MenuItem(ctx, "Scan for Transient/Sustain") then
-      enqueue_transient_sustain_analysis()
-    end
-    if r.ImGui_MenuItem(ctx, "Scan for Loop / One-shot") then
-      enqueue_playback_type_analysis()
-    end
-    if r.ImGui_MenuItem(ctx, "Scan for Weight") then
-      enqueue_weight_analysis()
-    end
-    if r.ImGui_IsItemHovered(ctx) then
-      r.ImGui_SetTooltip(ctx, "Recompute weight only (skips crop, loop/one-shot, and transients).\nUse this after the weight formula changes.")
-    end
+
     r.ImGui_Separator(ctx)
+    if r.ImGui_BeginMenu(ctx, "Re-analyze") then
+      if r.ImGui_MenuItem(ctx, "Incomplete Samples") then
+        enqueue_incomplete_analysis()
+      end
+      menu_item_tooltip("Analyze samples that are missing any analysis data.")
+      r.ImGui_Separator(ctx)
+      if r.ImGui_MenuItem(ctx, "Effective Range") then
+        enqueue_effective_range_analysis()
+      end
+      if r.ImGui_MenuItem(ctx, "Transient / Sustain") then
+        enqueue_transient_sustain_analysis()
+      end
+      if r.ImGui_MenuItem(ctx, "Loop / One-shot") then
+        enqueue_playback_type_analysis()
+      end
+      if r.ImGui_MenuItem(ctx, "Weight") then
+        enqueue_weight_analysis()
+      end
+      menu_item_tooltip("Recompute weight only (skips crop, loop/one-shot, and transients).\nUse this after the weight formula changes.")
+      r.ImGui_EndMenu(ctx)
+    end
+
+    r.ImGui_Separator(ctx)
+    if r.ImGui_MenuItem(ctx, "Clear All Folders and Samples…") then
+      clear_all_folders_and_samples()
+    end
+    r.ImGui_EndMenu(ctx)
+  end
+
+  -- View: which panels are visible and how tags are laid out.
+  if r.ImGui_BeginMenu(ctx, "View") then
+    local map_floating = state.sample_map_floating
+    local seq_floating = state.sequencer_floating
+    if r.ImGui_MenuItem(ctx, "Sample Map", nil, state.active_view == "sample_map" and not map_floating) then
+      if map_floating then
+        dock_floating_view("sample_map")
+      end
+      state.active_view = "sample_map"
+      save_config()
+    end
+    if r.ImGui_MenuItem(ctx, "Sequencer", nil, state.active_view == "sequencer" and not seq_floating) then
+      if seq_floating then
+        dock_floating_view("sequencer")
+      end
+      state.active_view = "sequencer"
+      save_config()
+    end
     if r.ImGui_MenuItem(ctx, "File Explorer", nil, state.explorer_open) then
       state.explorer_open = not state.explorer_open
       save_config()
     end
     r.ImGui_Separator(ctx)
-    if r.ImGui_MenuItem(ctx, "Clear All Folders and Samples") then
-      state.folders = {}
-      filter_samples_by_folders()  -- This will clear samples and tag data
-      state.scan_queue = {}
-      state.scan_running = false
-      state.scan_started = 0
-      clear_sample_cache()
-      save_config()
-      log("Cleared folders and samples")
+    if r.ImGui_MenuItem(ctx, "Sample Map in Separate Window", nil, map_floating and true or false) then
+      if map_floating then dock_floating_view("sample_map") else pop_out_view("sample_map") end
     end
-    r.ImGui_EndMenu(ctx)
-  end
-
-  if r.ImGui_BeginMenu(ctx, "Tools") then
-    if r.ImGui_MenuItem(ctx, "Copy Scan Logs") then
-      local logs_text = get_scan_logs_text()
-      if logs_text and logs_text ~= "" then
-        r.ImGui_SetClipboardText(ctx, logs_text)
-        log("Scan logs copied to clipboard (" .. tostring(#state.scan_logs) .. " entries)")
-      else
-        log("No scan logs to copy")
-      end
+    if r.ImGui_MenuItem(ctx, "Sequencer in Separate Window", nil, seq_floating and true or false) then
+      if seq_floating then dock_floating_view("sequencer") else pop_out_view("sequencer") end
     end
-    if r.ImGui_MenuItem(ctx, "Debug Sample Coordinates") then
-      log("=== DEBUG: Sample Coordinates ===")
-      log("Total samples: " .. #state.samples)
-      if #state.samples > 0 then
-        local x_min, x_max = state.samples[1].x or 0.5, state.samples[1].x or 0.5
-        local y_min, y_max = state.samples[1].y or 0.5, state.samples[1].y or 0.5
-        local freq_min, freq_max = state.samples[1].dominant_freq or 440.0, state.samples[1].dominant_freq or 440.0
-        local rms_min, rms_max = state.samples[1].rms_energy or 0.0, state.samples[1].rms_energy or 0.0
-        local size_min, size_max = state.samples[1].file_size or 0, state.samples[1].file_size or 0
-        for i, s in ipairs(state.samples) do
-          local x = s.x or 0.5
-          local y = s.y or 0.5
-          local freq = s.dominant_freq or 440.0
-          local rms = s.rms_energy or 0.0
-          local size = s.file_size or 0
-          log(string.format("Sample %d: name='%s', freq=%.1f Hz, bright=%.1f, weight=%.2f, rms=%.6f, size=%d bytes, x=%.6f, y=%.6f",
-              i, s.name or "unknown", freq, s.brightness or 0, s.sub_weight or 0, rms, size, x, y))
-          x_min = math.min(x_min, x)
-          x_max = math.max(x_max, x)
-          y_min = math.min(y_min, y)
-          y_max = math.max(y_max, y)
-          freq_min = math.min(freq_min, freq)
-          freq_max = math.max(freq_max, freq)
-          rms_min = math.min(rms_min, rms)
-          rms_max = math.max(rms_max, rms)
-          size_min = math.min(size_min, size)
-          size_max = math.max(size_max, size)
-        end
-        log("--- Summary ---")
-        log(string.format("X range: %.6f to %.6f (span: %.6f)", x_min, x_max, x_max - x_min))
-        log(string.format("Y range: %.6f to %.6f (span: %.6f)", y_min, y_max, y_max - y_min))
-        log(string.format("Frequency range: %.1f Hz to %.1f Hz", freq_min, freq_max))
-        log(string.format("RMS range: %.6f to %.6f", rms_min, rms_max))
-        log(string.format("File size range: %d to %d bytes", size_min, size_max))
-      else
-        log("No samples to debug")
-      end
-      log("=== End Debug ===")
-    end
-    r.ImGui_EndMenu(ctx)
-  end
-
-  if r.ImGui_BeginMenu(ctx, "View") then
+    r.ImGui_Separator(ctx)
     if r.ImGui_BeginMenu(ctx, "Collapse Children Tags") then
       local mode = state.collapse_children_tags or "off"
       if r.ImGui_MenuItem(ctx, "Off", nil, mode == "off") then
@@ -51929,6 +52026,26 @@ function render_header()
           "On when the window is %.0f px wide or narrower.\nChange this width in Settings.",
           threshold
         ))
+      end
+      r.ImGui_EndMenu(ctx)
+    end
+    r.ImGui_EndMenu(ctx)
+  end
+
+  -- Tools: diagnostics.
+  if r.ImGui_BeginMenu(ctx, "Tools") then
+    if r.ImGui_MenuItem(ctx, "Copy Scan Logs") then
+      local logs_text = get_scan_logs_text()
+      if logs_text and logs_text ~= "" then
+        r.ImGui_SetClipboardText(ctx, logs_text)
+        log("Scan logs copied to clipboard (" .. tostring(#state.scan_logs) .. " entries)")
+      else
+        log("No scan logs to copy")
+      end
+    end
+    if r.ImGui_BeginMenu(ctx, "Debug") then
+      if r.ImGui_MenuItem(ctx, "Log Sample Coordinates") then
+        debug_log_sample_coordinates()
       end
       r.ImGui_EndMenu(ctx)
     end
@@ -52167,7 +52284,7 @@ function settings_section(label, default_open)
   local searching = settings_search_active()
   local open = searching or (state.settings_section_open[label] and true or false)
   local w = r.ImGui_GetContentRegionAvail(ctx)
-  local h = 28
+  local h = UI_METRICS.section_h
   r.ImGui_InvisibleButton(ctx, "##sec_" .. label, w, h)
   local hovered = r.ImGui_IsItemHovered(ctx)
   local active = r.ImGui_IsItemActive(ctx)
@@ -52178,13 +52295,16 @@ function settings_section(label, default_open)
   local x0, y0 = r.ImGui_GetItemRectMin(ctx)
   local x1, y1 = r.ImGui_GetItemRectMax(ctx)
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  local bg = open and UI_THEME.accent_fill or (hovered and UI_THEME.surface_hvr or UI_THEME.surface)
-  local border = open and UI_THEME.accent or (hovered and UI_THEME.border_hvr or UI_THEME.border)
-  ui_draw_panel(dl, x0, y0, x1, y1, 7.0, bg, border, hovered, active)
+  local bg = hovered and UI_THEME.surface_hvr or (open and UI_THEME.elevated or UI_THEME.surface)
+  local border = hovered and UI_THEME.border_hvr or UI_THEME.border
+  ui_draw_panel(dl, x0, y0, x1, y1, UI_METRICS.radius_ctrl, bg, border, hovered, active)
+  if open then
+    r.ImGui_DrawList_AddRectFilled(dl, x0 + 1, y0 + 6, x0 + 4, y1 - 6, UI_THEME.accent, 1.5)
+  end
   local cy = (y0 + y1) * 0.5 + (active and 1.0 or 0.0)
-  ui_button_draw_icon(dl, open and "chev_down" or "chev_right", x0 + 14, cy, 14, open and UI_THEME.accent_hvr or UI_THEME.text_dim)
+  ui_button_draw_icon(dl, open and "chev_down" or "chev_right", x0 + 16, cy, 14, open and UI_THEME.accent_hvr or UI_THEME.text_dim)
   local tw, th = r.ImGui_CalcTextSize(ctx, label)
-  r.ImGui_DrawList_AddText(dl, x0 + 28, cy - th * 0.5, open and UI_THEME.text or UI_THEME.text_dim, label)
+  r.ImGui_DrawList_AddText(dl, x0 + 30, cy - th * 0.5, open and UI_THEME.text or UI_THEME.text_dim, label)
   state.settings_filter_section_title_hit = searching and settings_matches(label)
   return open
 end
@@ -52794,12 +52914,45 @@ function settings_render_keyboard_shortcuts()
   end
 end
 
+-- Settings are grouped by what they affect; each group gets a caption and
+-- its sections stay individually collapsible (search expands everything).
+function settings_groups()
+  local groups = {
+    { caption = "Library", sections = {
+      { label = "Scan Folders", open = true, draw = settings_render_scan_folders },
+    } },
+    { caption = "Sample Map", sections = {
+      { label = "Map", open = true, draw = settings_render_map },
+      { label = "Dot Appearance", open = false, draw = settings_render_dot_appearance },
+    } },
+    { caption = "Tags", sections = {
+      { label = "Tag Layout", open = false, draw = settings_render_tag_layout },
+      { label = "Tag Colors", open = false, draw = settings_render_tag_colors },
+    } },
+    { caption = "Sequencer", sections = {
+      { label = "Sequencer Controls", open = true, draw = settings_render_sequencer_controls },
+    } },
+    { caption = "General", sections = {
+      { label = "Keyboard Shortcuts", open = false, draw = settings_render_keyboard_shortcuts },
+    } },
+  }
+  if DrawSampleMapUpdateSettings then
+    local general = groups[#groups].sections
+    general[#general + 1] = {
+      label = "Updates",
+      open = SampleMapUpdateState and SampleMapUpdateState.show_update_icon,
+      draw = function() DrawSampleMapUpdateSettings(ctx) end,
+    }
+  end
+  return groups
+end
+
 function render_settings()
   if not state.settings_open then
     return
   end
 
-  r.ImGui_SetNextWindowSize(ctx, 560, 640, r.ImGui_Cond_FirstUseEver())
+  r.ImGui_SetNextWindowSize(ctx, 580, 680, r.ImGui_Cond_FirstUseEver())
   local visible, open = r.ImGui_Begin(ctx, "Settings", true, r.ImGui_WindowFlags_None())
 
   if visible then
@@ -52809,88 +52962,44 @@ function render_settings()
     settings_render_search()
     r.ImGui_Spacing(ctx)
 
-    local any_section = false
-    if settings_section_should_show("Scan Folders") then
-      any_section = true
-      if settings_section("Scan Folders", true) then
+    -- Scrollable body; search stays pinned above and the footer below.
+    local _, avail_y = r.ImGui_GetContentRegionAvail(ctx)
+    local footer_h = 30
+    local body_open = r.ImGui_BeginChild(ctx, "settings_body", 0, math.max(80, avail_y - footer_h))
+    if body_open then
+      local any_section = false
+      for _, group in ipairs(settings_groups()) do
+        local shown = {}
+        for _, sec in ipairs(group.sections) do
+          if settings_section_should_show(sec.label) then
+            shown[#shown + 1] = sec
+          end
+        end
+        if #shown > 0 then
+          any_section = true
+          ui_group_caption(group.caption)
+          for _, sec in ipairs(shown) do
+            if settings_section(sec.label, sec.open) then
+              r.ImGui_Spacing(ctx)
+              r.ImGui_Indent(ctx, 6)
+              sec.draw()
+              r.ImGui_Unindent(ctx, 6)
+              r.ImGui_Spacing(ctx)
+            end
+          end
+          r.ImGui_Spacing(ctx)
+        end
+      end
+
+      if settings_search_active() and not any_section then
         r.ImGui_Spacing(ctx)
-        settings_render_scan_folders()
-        r.ImGui_Spacing(ctx)
+        r.ImGui_TextColored(ctx, UI_THEME.text_dim, "No settings match your search.")
       end
     end
+    imgui_end_child(body_open)
 
-    if settings_section_should_show("Map") then
-      any_section = true
-      if settings_section("Map", true) then
-        r.ImGui_Spacing(ctx)
-        settings_render_map()
-        r.ImGui_Spacing(ctx)
-      end
-    end
-
-    if settings_section_should_show("Dot Appearance") then
-      any_section = true
-      if settings_section("Dot Appearance", false) then
-        r.ImGui_Spacing(ctx)
-        settings_render_dot_appearance()
-        r.ImGui_Spacing(ctx)
-      end
-    end
-
-    if settings_section_should_show("Tag Layout") then
-      any_section = true
-      if settings_section("Tag Layout", false) then
-        r.ImGui_Spacing(ctx)
-        settings_render_tag_layout()
-        r.ImGui_Spacing(ctx)
-      end
-    end
-
-    if settings_section_should_show("Tag Colors") then
-      any_section = true
-      if settings_section("Tag Colors", false) then
-        r.ImGui_Spacing(ctx)
-        settings_render_tag_colors()
-        r.ImGui_Spacing(ctx)
-      end
-    end
-
-    if settings_section_should_show("Sequencer Controls") then
-      any_section = true
-      if settings_section("Sequencer Controls", true) then
-        r.ImGui_Spacing(ctx)
-        settings_render_sequencer_controls()
-        r.ImGui_Spacing(ctx)
-      end
-    end
-
-    if settings_section_should_show("Keyboard Shortcuts") then
-      any_section = true
-      if settings_section("Keyboard Shortcuts", true) then
-        r.ImGui_Spacing(ctx)
-        settings_render_keyboard_shortcuts()
-        r.ImGui_Spacing(ctx)
-      end
-    end
-
-    if DrawSampleMapUpdateSettings and settings_section_should_show("Updates") then
-      any_section = true
-      local updates_default_open = SampleMapUpdateState and SampleMapUpdateState.show_update_icon
-      if settings_section("Updates", updates_default_open) then
-        r.ImGui_Spacing(ctx)
-        DrawSampleMapUpdateSettings(ctx)
-        r.ImGui_Spacing(ctx)
-      end
-    end
-
-    if settings_search_active() and not any_section then
-      r.ImGui_Spacing(ctx)
-      r.ImGui_TextColored(ctx, UI_THEME.text_dim, "No settings match your search.")
-    end
-
-    r.ImGui_Spacing(ctx)
     r.ImGui_Separator(ctx)
-  r.ImGui_TextColored(ctx, UI_THEME.text_mute, "Settings are saved globally and persist across projects.")
+    r.ImGui_TextColored(ctx, UI_THEME.text_mute, "Settings are saved globally and persist across projects.")
 
     r.ImGui_PopStyleVar(ctx, 2)
   end
@@ -52918,11 +53027,11 @@ function draw_map_status_overlay(dl, x0, y0, width, height)
   local lines = {}
   if #state.scan_queue > 0 and not state.scan_running then
     lines[#lines + 1] = string.format(
-      "Scan paused — %d file(s) left. Press Rescan to continue (won't start over).",
+      "Scan paused — %d file(s) left. Library → Resume Scan continues where it left off.",
       #state.scan_queue
     )
   elseif #state.samples == 0 then
-    lines[#lines + 1] = "Press Rescan to populate the map."
+    lines[#lines + 1] = "Use Library → Rescan to populate the map."
     if #state.folders > 0 then
       lines[#lines + 1] = "Folders configured: " .. #state.folders
     end
@@ -52973,13 +53082,31 @@ function draw_map_status_overlay(dl, x0, y0, width, height)
     return
   end
 
+  -- Compact translucent card in the bottom-left corner: first line is the
+  -- primary status, the rest are secondary notes.
   local line_h = 16.0
-  local padding = 8.0
-  local text_y = y0 + height - (#lines * line_h) - padding
+  local margin = 10.0
+  local pad_x, pad_y = 10.0, 6.0
+  local max_w = 0
+  for _, line in ipairs(lines) do
+    max_w = math.max(max_w, (r.ImGui_CalcTextSize(ctx, line)))
+  end
+  local card_w = math.min(max_w + pad_x * 2, math.max(40, width - margin * 2))
+  local card_h = #lines * line_h + pad_y * 2 - 2
+  local cx0 = x0 + margin
+  local cy1 = y0 + height - margin
+  local cy0 = cy1 - card_h
+  if r.ImGui_DrawList_PushClipRect then
+    r.ImGui_DrawList_PushClipRect(dl, x0, y0, x0 + width, y0 + height, true)
+  end
+  r.ImGui_DrawList_AddRectFilled(dl, cx0, cy0, cx0 + card_w, cy1, 0x0B0E0CD0, UI_METRICS.radius_ctrl)
+  r.ImGui_DrawList_AddRect(dl, cx0 + 0.5, cy0 + 0.5, cx0 + card_w - 0.5, cy1 - 0.5, UI_THEME.border, UI_METRICS.radius_ctrl, 0, 1.0)
   for i, line in ipairs(lines) do
-    local ty = text_y + (i - 1) * line_h
-    r.ImGui_DrawList_AddText(dl, x0 + padding + 1, ty + 1, 0x000000AA, line)
-    r.ImGui_DrawList_AddText(dl, x0 + padding, ty, 0xCCCCCCFF, line)
+    local ty = cy0 + pad_y + (i - 1) * line_h
+    r.ImGui_DrawList_AddText(dl, cx0 + pad_x, ty, i == 1 and UI_THEME.text or UI_THEME.text_dim, line)
+  end
+  if r.ImGui_DrawList_PopClipRect then
+    r.ImGui_DrawList_PopClipRect(dl)
   end
 end
 
@@ -53218,9 +53345,9 @@ function draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_w
       len_max_log = math.log(60.0) / log10   -- 60 seconds
     end
     
-    -- Subtle grid color (semi-transparent gray)
-    local grid_color = 0x40404040  -- RRGGBBAA: gray with ~25% opacity
-    local text_color = 0x80808080  -- RRGGBBAA: lighter gray with ~50% opacity for text
+    -- Subtle theme-tinted grid so it sits behind the dots without competing
+    local grid_color = UI_THEME.grid_line
+    local text_color = UI_THEME.grid_text
     
     -- Draw evenly spaced horizontal Y-axis grid lines
     local y_axis = map_y_axis_id()
@@ -54432,6 +54559,9 @@ function render_library_loading_view()
       r.ImGui_DrawList_AddRectFilled(dl, bx + 1, by + 1, bx + fill_w - 1, by + bar_h - 1, UI_THEME.accent, 3.0)
     end
     r.ImGui_Dummy(ctx, bar_w, bar_h)
+    local pct = string.format("%d%%", math.floor(math.max(0, math.min(1, progress)) * 100 + 0.5))
+    local pct_h = select(2, r.ImGui_CalcTextSize(ctx, pct))
+    r.ImGui_DrawList_AddText(dl, bx + bar_w + 10, by + (bar_h - pct_h) * 0.5, UI_THEME.text_mute, pct)
     local sub = "Preparing the map — first run builds a faster cache for next launch"
     local sub_w = select(1, r.ImGui_CalcTextSize(ctx, sub))
     r.ImGui_SetCursorPos(ctx, math.max(20, (avail_x - sub_w) * 0.5), start_y + 48)
@@ -54594,30 +54724,12 @@ function loop()
         if r.ImGui_SetScrollX then
           r.ImGui_SetScrollX(ctx, 0)
         end
-        -- #region agent log
-        do
-          local sx = (r.ImGui_GetScrollX and r.ImGui_GetScrollX(ctx)) or -1
-          local smax = (r.ImGui_GetScrollMaxX and r.ImGui_GetScrollMaxX(ctx)) or -1
-          local wx = (r.ImGui_GetWindowPos and select(1, r.ImGui_GetWindowPos(ctx))) or -1
-          local prev = state._seq_dbg_main_sx
-          if prev == nil or math.abs(sx - (prev or 0)) > 0.5 or math.abs(smax - (state._seq_dbg_main_smax or 0)) > 0.5 then
-            seq_debug_ndjson("B", "loop:main_content", "main_content scroll", {
-              scroll_x = sx, scroll_max_x = smax, win_x = wx,
-              active_view = tostring(state.active_view or ""),
-              runId = "post-fix",
-              fix = "main_content_noscroll",
-            })
-            state._seq_dbg_main_sx = sx
-            state._seq_dbg_main_smax = smax
-          end
-        end
-        -- #endregion
         r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 4, 3)
         r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FramePadding(), 5, 3)
         render_view_tab_switcher()
         if state.scan_running then
-          r.ImGui_SameLine(ctx, 0, 10)
-          if draw_ui_button("scan_stop_toolbar", "Stop scan", nil, 28, { style = "danger", compact = true }) then
+          r.ImGui_SameLine(ctx, 0, UI_METRICS.toolbar_gap)
+          if draw_ui_button("scan_stop_toolbar", "Stop scan", nil, UI_METRICS.toolbar_h, { style = "danger", compact = true }) then
             stop_scan()
           end
           if r.ImGui_IsItemHovered(ctx) then
@@ -54629,10 +54741,10 @@ function loop()
         local seq_in_main = state.active_view == "sequencer" and not state.sequencer_floating
 
         if map_in_main then
-          r.ImGui_SameLine(ctx, 0, 10)
+          ui_toolbar_divider()
           render_sample_map_toolbar()
         elseif seq_in_main then
-          r.ImGui_SameLine(ctx, 0, 10)
+          ui_toolbar_divider()
           render_seq_top_toolbar()
         end
         r.ImGui_PopStyleVar(ctx, 2)
@@ -54643,10 +54755,15 @@ function loop()
           render_sequencer_with_explorer()
           seq_stem_import_install_os_drop_overlay()
         else
-          local _, empty_y = r.ImGui_GetContentRegionAvail(ctx)
-          r.ImGui_Dummy(ctx, 1, math.max(12, empty_y * 0.28))
-          r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Sample Map and Sequencer are in separate windows.")
-          r.ImGui_TextColored(ctx, UI_THEME.text_mute, "Close a window or click its tab to dock it back.")
+          local empty_x, empty_y = r.ImGui_GetContentRegionAvail(ctx)
+          local line1 = "Sample Map and Sequencer are in separate windows."
+          local line2 = "Close a window or click its tab to dock it back."
+          local base_x = r.ImGui_GetCursorPosX(ctx)
+          r.ImGui_Dummy(ctx, 1, math.max(12, empty_y * 0.32))
+          r.ImGui_SetCursorPosX(ctx, base_x + math.max(0, (empty_x - (r.ImGui_CalcTextSize(ctx, line1))) * 0.5))
+          r.ImGui_TextColored(ctx, UI_THEME.text_dim, line1)
+          r.ImGui_SetCursorPosX(ctx, base_x + math.max(0, (empty_x - (r.ImGui_CalcTextSize(ctx, line2))) * 0.5))
+          r.ImGui_TextColored(ctx, UI_THEME.text_mute, line2)
         end
       end
       imgui_end_child(main_open)

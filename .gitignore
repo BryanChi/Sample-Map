@@ -17,3 +17,6 @@ SampleMapPlayerData/
 
 __pycache__/
 *.pyc
+
+# Editor / agent debug traces
+.cursor/
