@@ -25,6 +25,13 @@ REAPER script that scans audio folders into an interactive 2D sample map, with a
    - `Sample Map Browser.lua`
    - `Sample Map - Quick swap for selected item.lua` (optional companion)
 
+## Using the UI
+
+- **Library** menu: rescan / resume, manage scan folders, and *Re-analyze* passes (effective range, transients, loop / one-shot, weight).
+- **View** menu: switch between Sample Map and Sequencer, toggle the File Explorer, or pop either view into its own window.
+- **Tools** menu: copy scan logs and debug helpers.
+- **Settings** are grouped by area (Library, Sample Map, Tags, Sequencer, General) and searchable.
+
 ## Layout
 
 | Path | Role |
