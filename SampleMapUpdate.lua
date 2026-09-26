@@ -225,6 +225,8 @@ end
 local FILES_TO_UPDATE = {
   { url = "Sample Map Browser.lua" },
   { url = "Sample Map - Quick swap for selected item.lua" },
+  { url = "CRS_Extract drum pattern and put into sample map sequencer.lua" },
+  { url = "SampleMapStemImport.lua" },
   { url = "SampleMapAnalyzer.py" },
   { url = "SampleMapDrumAI.py" },
   { url = "SampleMapGrooveMIDI.py" },

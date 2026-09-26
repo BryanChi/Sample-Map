@@ -29,6 +29,12 @@ do
     -- Updater is optional; the rest of the script still runs.
   end
 end
+do
+  local ok_stem = pcall(dofile, SCRIPT_DIR .. "/SampleMapStemImport.lua")
+  if not ok_stem then
+    -- Stem-split import is optional until Stem Split is installed.
+  end
+end
 local CONFIG_DIR = SCRIPT_DIR
 local CONFIG_PATH = CONFIG_DIR .. "/SampleMapBrowser.json"
 local DATA_PATH = SCRIPT_DIR .. "/SampleMapData.json"  -- Cached sample index (JSON, compatibility)
@@ -38,6 +44,7 @@ local DATA_LUA_PATH = SCRIPT_DIR .. "/SampleMapData.cache.lua"  -- Fast Lua tabl
 -- New module-level helpers/constants should be globals or live on `state`, not `local`.
 SEQ_ICON_DIR = SCRIPT_DIR .. "/assets/behringer-icons/png"
 VFX_ICON_DIR = SCRIPT_DIR .. "/assets/vertical-fx-icons"
+FXD_ICON_DIR = SCRIPT_DIR .. "/assets/fx-device-icons"
 -- Bump when genre/loop/library-folder inference rules change and caches must be re-tagged.
 local TAG_SCHEMA_VERSION = 4
 local LIBRARY_LOAD_SLICE_MS = 10.0
@@ -573,8 +580,12 @@ local state = {
   seq_skip_ingest = false,          -- true after script writes arrange items
   seq_self_write_count = nil,       -- change-count at last self arrange write
   seq_ingest_pending_count = nil,   -- wait until arrange change count is stable
+  seq_ingest_pending_at = nil,      -- time_precise when pending count last changed
+  seq_ingest_hold_parent = false,   -- true while arrange selection defers parent geometry
   seq_ingest_save_due = nil,        -- debounce timer for ingest → config save
   seq_parent_items_ensured = false, -- created MIDI parent-track region items
+  seq_stem_import = nil,            -- Live OS-drop stem→drum→sequencer job
+  seq_stem_import_hover = false,    -- OS audio file is hovered over the sequencer
 }
 
 local ctx = nil
@@ -2581,8 +2592,12 @@ function reset_seq_project_state()
   state.seq_skip_ingest = false
   state.seq_self_write_count = nil
   state.seq_ingest_pending_count = nil
+  state.seq_ingest_pending_at = nil
+  state.seq_ingest_hold_parent = false
   state.seq_ingest_save_due = nil
   state.seq_parent_items_ensured = false
+  state.seq_stem_import = nil
+  state.seq_stem_import_hover = false
   if seq_undo_clear_history then
     seq_undo_clear_history()
   end
@@ -7701,6 +7716,9 @@ function ui_button_draw_icon(dl, icon, cx, cy, size, color)
     r.ImGui_DrawList_AddLine(dl, cx - h * 0.35, cy - h * 0.55, cx + h * 0.05, cy + h * 0.45, color, stroke)
     r.ImGui_DrawList_AddLine(dl, cx + h * 0.05, cy + h * 0.45, cx + h * 0.85, cy - h * 0.20, color, stroke)
   elseif icon == "popout" then
+    if draw_fxd_icon and draw_fxd_icon(dl, "Expand", cx, cy, size, color) then
+      return
+    end
     local hw, hh = size * 0.28, size * 0.28
     r.ImGui_DrawList_AddRect(dl, cx - hw, cy - hh * 0.10, cx + hw * 0.42, cy + hh, color, 1.5, 0, stroke)
     r.ImGui_DrawList_AddLine(dl, cx - hw * 0.02, cy - hh * 0.08, cx + hw * 0.88, cy - hh * 0.88, color, stroke)
@@ -8994,9 +9012,81 @@ end
 -- Only EndChild when the matching BeginChild returned true.
 function imgui_end_child(opened)
   if opened then
+    -- Trailing SetCursorScreenPos() without an item asserts on EndChild.
+    r.ImGui_Dummy(ctx, 0, 0)
     r.ImGui_EndChild(ctx)
   end
 end
+
+-- #region agent log
+function seq_debug_region_snapshot()
+  local parts = {}
+  for _, reg in ipairs(state.seq_regions or {}) do
+    local s = reg.start_qn or 0.0
+    local len = get_seq_region_length_qn(reg)
+    parts[#parts + 1] = string.format("%s@%.3f:b%s:L%.3f:p%s",
+      tostring(reg.id), s, tostring(reg.length_bars or 0), len, tostring(reg.pattern_id or ""))
+  end
+  return table.concat(parts, "|")
+end
+
+function seq_debug_ndjson(hypothesisId, location, message, data)
+  local function esc(s)
+    return tostring(s or ""):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n")
+  end
+  local dparts = {}
+  if type(data) == "table" then
+    for k, v in pairs(data) do
+      if type(v) == "number" then
+        dparts[#dparts + 1] = string.format('"%s":%.6g', esc(k), v)
+      elseif type(v) == "boolean" then
+        dparts[#dparts + 1] = string.format('"%s":%s', esc(k), v and "true" or "false")
+      else
+        dparts[#dparts + 1] = string.format('"%s":"%s"', esc(k), esc(v))
+      end
+    end
+  end
+  local ts = math.floor(((r.time_precise and r.time_precise()) or 0) * 1000)
+  local line = string.format(
+    '{"sessionId":"6cdc3e","hypothesisId":"%s","location":"%s","message":"%s","timestamp":%d,"data":{%s}}\n',
+    esc(hypothesisId), esc(location), esc(message), ts, table.concat(dparts, ",")
+  )
+  local paths = {
+    "/Users/b/Library/Application Support/REAPER/Scripts/Sample Map/.cursor/debug-ce7574.log",
+    "/Users/b/Library/Application Support/REAPER/Scripts/Sample Map/.cursor/debug-6cdc3e.log",
+  }
+  for i = 1, #paths do
+    local ok, f = pcall(io.open, paths[i], "a")
+    if ok and f then
+      f:write(line)
+      f:close()
+    end
+  end
+end
+
+function seq_debug_pack_close_hits(arr, limit_s, max_n)
+  limit_s = limit_s or 0.18
+  max_n = max_n or 12
+  if type(arr) ~= "table" then
+    return 0, ""
+  end
+  local n, parts = 0, {}
+  for i = 2, #arr do
+    local t0 = tonumber(arr[i - 1].time) or 0
+    local t1 = tonumber(arr[i].time) or 0
+    local dt = t1 - t0
+    if dt >= 0 and dt < limit_s then
+      n = n + 1
+      if #parts < max_n then
+        local w0 = tonumber(arr[i - 1].weight) or tonumber(arr[i - 1].raw) or 0
+        local w1 = tonumber(arr[i].weight) or tonumber(arr[i].raw) or 0
+        parts[#parts + 1] = string.format("%.4f-%.4f dt=%.4f w=%.3f/%.3f", t0, t1, dt, w0, w1)
+      end
+    end
+  end
+  return n, table.concat(parts, " | ")
+end
+-- #endregion
 
 function imgui_same_line_if_fits(needed_w, gap)
   gap = gap or select(1, r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing()))
@@ -12019,6 +12109,9 @@ function seq_assign_region_track_sample(region, slot, sample, persist)
   for i = 1, #targets do
     seq_set_region_own_track_sample(targets[i], slot, rec)
   end
+  if seq_release_sliced_notes_for_sample_change then
+    seq_release_sliced_notes_for_sample_change(slot, targets, sample)
+  end
   if clear_seq_vary_rank_cache then
     clear_seq_vary_rank_cache()
   end
@@ -12035,6 +12128,48 @@ function seq_assign_region_track_sample(region, slot, sample, persist)
     end
     seq_pcm_take_src_end()
     r.UpdateArrange()
+    -- #region agent log
+    do
+      local item_src, item_off, frozen, resolved = "", -1, "", ""
+      local pattern = get_seq_pattern(region.pattern_id, false)
+      local track_notes = get_track_note_table(pattern, slot.id, false)
+      if type(track_notes) == "table" then
+        for step_key, note in pairs(track_notes) do
+          if type(note) == "table" and seq_note_in_region(region, note, step_key) then
+            frozen = tostring(note.frozen_sample_path or ""):match("([^/\\]+)$") or ""
+            local rp = seq_resolve_note_sample and select(1, seq_resolve_note_sample(note, slot, nil, region, slot.id, step_key))
+            resolved = tostring(rp or ""):match("([^/\\]+)$") or ""
+            break
+          end
+        end
+      end
+      local tr = get_seq_slot_target_track and get_seq_slot_target_track(slot)
+      if tr then
+        for item_idx = 0, r.CountTrackMediaItems(tr) - 1 do
+          local item = r.GetTrackMediaItem(tr, item_idx)
+          if item and seq_item_is_owned(item, region.id) then
+            local take = r.GetActiveTake(item)
+            if take then
+              item_off = r.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS") or -1
+              local src = r.GetMediaItemTake_Source(take)
+              if src and r.GetMediaSourceFileName then
+                local _, src_path = r.GetMediaSourceFileName(src, "")
+                item_src = tostring(src_path or ""):match("([^/\\]+)$") or ""
+              end
+            end
+            break
+          end
+        end
+      end
+      seq_debug_ndjson("H4", "seq_assign_region_track_sample", "after sync", {
+        want = sample and tostring(sample.path or ""):match("([^/\\]+)$") or "",
+        frozen = frozen,
+        resolved = resolved,
+        item_src = item_src,
+        startoffs = item_off,
+      })
+    end
+    -- #endregion
   end
   if persist ~= false then
     save_config()
@@ -12044,6 +12179,13 @@ end
 
 function seq_assign_sample_for_context(slot, sample, persist)
   local region = seq_sample_assign_region()
+  -- #region agent log
+  seq_debug_ndjson("H4", "seq_assign_sample_for_context", "assign", {
+    via_region = region and 1 or 0,
+    name = sample and (sample.name or "") or "",
+    path = sample and tostring(sample.path or ""):match("([^/\\]+)$") or "",
+  })
+  -- #endregion
   if region then
     return seq_assign_region_track_sample(region, slot, sample, persist)
   end
@@ -12379,28 +12521,32 @@ function map_tab_display_label(tab)
   return map_tab_label(tab)
 end
 
-function pop_out_active_view()
-  if state.active_view == "sample_map" then
+function pop_out_view(view)
+  if view == "sample_map" then
     if state.sample_map_floating then
       return
     end
     snapshot_active_map_tab()
     state.sample_map_floating = true
-    if not state.sequencer_floating then
+    if state.active_view == "sample_map" and not state.sequencer_floating then
       state.active_view = "sequencer"
     end
-  elseif state.active_view == "sequencer" then
+  elseif view == "sequencer" then
     if state.sequencer_floating then
       return
     end
     state.sequencer_floating = true
-    if not state.sample_map_floating then
+    if state.active_view == "sequencer" and not state.sample_map_floating then
       state.active_view = "sample_map"
     end
   else
     return
   end
   save_config()
+end
+
+function pop_out_active_view()
+  pop_out_view(state.active_view)
 end
 
 function dock_floating_view(view)
@@ -12906,6 +13052,20 @@ function find_sample_for_tag(tag_name)
   if needle == "" then
     return nil
   end
+  local by_tag = state.samples_by_tag
+  if type(by_tag) == "table" and next(by_tag) ~= nil then
+    local lib_tag = find_library_tag and find_library_tag(needle)
+    local list = (lib_tag and by_tag[lib_tag]) or by_tag[needle] or by_tag[tag_name]
+    if type(list) == "table" then
+      for i = 1, #list do
+        local sample = list[i]
+        if not sample_scan_folder_unavailable(sample) then
+          return sample
+        end
+      end
+    end
+    return nil
+  end
   for _, sample in ipairs(state.samples) do
     if sample_has_tag(sample, needle) and not sample_scan_folder_unavailable(sample) then
       return sample
@@ -13033,10 +13193,17 @@ function seq_prune_missing_reaper_tracks()
   return true
 end
 
-function seq_sync_track_order_from_arrange()
+function seq_sync_track_order_from_arrange(force)
   if state.seq_track_reorder_drag or seq_undo_applying then
     return false
   end
+  local now = r.time_precise and r.time_precise() or 0
+  if not force then
+    if (now - (state.seq_order_sync_last_t or 0)) < 0.12 then
+      return false
+    end
+  end
+  state.seq_order_sync_last_t = now
   seq_prune_missing_reaper_tracks()
   if state.seq_skip_order_sync then
     state.seq_skip_order_sync = nil
@@ -14701,24 +14868,86 @@ end
 function seq_minimap_ensure_samples(pop, slot)
   local tag = seq_minimap_filter_tag(slot)
   local lib_n = #(state.samples or {})
-  if pop.samples and pop.tag == tag and pop.lib_n == lib_n then
+  local epoch = state.tag_index_epoch or 0
+  if pop.samples and pop.tag == tag and pop.lib_n == lib_n and pop.tag_epoch == epoch then
     return
   end
-  pop.tag = tag
-  pop.lib_n = lib_n
+  -- #region agent log
+  local t0 = r.time_precise and r.time_precise() or 0
+  local src = "scan"
+  -- #endregion
+
+  -- Reuse a process-wide list for the same tag so Shift+V reopen is instant.
+  local cache = state._seq_minimap_sample_cache
+  if cache and cache.tag == tag and cache.lib_n == lib_n and cache.epoch == epoch and cache.list then
+    pop.tag = tag
+    pop.lib_n = lib_n
+    pop.tag_epoch = epoch
+    pop.samples = cache.list
+    -- #region agent log
+    seq_debug_ndjson("A", "seq_minimap_ensure_samples", "rebuild", {
+      ms = ((r.time_precise and r.time_precise() or 0) - t0) * 1000,
+      lib_n = lib_n, list_n = #cache.list, tag = tag or "", src = "global_cache",
+      runId = "post-fix",
+    })
+    -- #endregion
+    return
+  end
+
   local list = {}
-  for i = 1, lib_n do
-    local s = state.samples[i]
-    if s and s.path and s.x and s.y
-      and not sample_scan_folder_unavailable(s)
-      and (tag == "" or sample_has_tag(s, tag)) then
-      if not s._render_color then
-        s._render_color = get_sample_dot_color(s)
+  local by_tag = (tag ~= "" and state.samples_by_tag) and state.samples_by_tag[tag] or nil
+  if by_tag then
+    -- #region agent log
+    src = "by_tag"
+    -- #endregion
+    for i = 1, #by_tag do
+      local s = by_tag[i]
+      if s and s.path and s.x and s.y and not sample_scan_folder_unavailable(s) then
+        if not s._render_color then
+          s._render_color = get_sample_dot_color(s)
+        end
+        list[#list + 1] = s
       end
-      list[#list + 1] = s
+    end
+  else
+    -- #region agent log
+    src = (tag == "") and "all" or "scan"
+    -- #endregion
+    local samples = state.samples or {}
+    for i = 1, #samples do
+      local s = samples[i]
+      if s and s.path and s.x and s.y and not sample_scan_folder_unavailable(s) then
+        local ok = (tag == "")
+        if not ok then
+          ok = (s._tag_set and s._tag_set[tag]) or sample_has_tag(s, tag)
+        end
+        if ok then
+          if not s._render_color then
+            s._render_color = get_sample_dot_color(s)
+          end
+          list[#list + 1] = s
+        end
+      end
     end
   end
+
+  pop.tag = tag
+  pop.lib_n = lib_n
+  pop.tag_epoch = epoch
   pop.samples = list
+  state._seq_minimap_sample_cache = {
+    tag = tag,
+    lib_n = lib_n,
+    epoch = epoch,
+    list = list,
+  }
+  -- #region agent log
+  seq_debug_ndjson("A", "seq_minimap_ensure_samples", "rebuild", {
+    ms = ((r.time_precise and r.time_precise() or 0) - t0) * 1000,
+    lib_n = lib_n, list_n = #list, tag = tag or "", src = src,
+    cand_n = by_tag and #by_tag or lib_n, runId = "post-fix",
+  })
+  -- #endregion
 end
 
 function seq_minimap_center_on(pop, sample, w, h)
@@ -14839,9 +15068,15 @@ function seq_assign_sample_to_note_targets(targets, sample)
   if not sample or not sample.path or not targets or #targets == 0 then
     return false
   end
+  -- #region agent log
+  local t_all = r.time_precise and r.time_precise() or 0
+  -- #endregion
   local own = seq_undo_own_begin("Swap note sample")
   local changed = false
   local synced = {}
+  -- #region agent log
+  local t_pin = r.time_precise and r.time_precise() or 0
+  -- #endregion
   for i = 1, #targets do
     local t = targets[i]
     local region = get_seq_region_by_id(t.region_id)
@@ -14859,22 +15094,53 @@ function seq_assign_sample_to_note_targets(targets, sample)
       end
     end
   end
+  -- #region agent log
+  local ms_pin = ((r.time_precise and r.time_precise() or 0) - t_pin) * 1000
+  local ms_sync, ms_save, ms_preview = 0, 0, 0
+  local sync_patterns = 0
+  -- #endregion
   if changed then
     if r.PreventUIRefresh then
       r.PreventUIRefresh(1)
     end
+    -- #region agent log
+    local t_sync = r.time_precise and r.time_precise() or 0
+    -- #endregion
     for pattern_id, slots in pairs(synced) do
       for _, slot in pairs(slots) do
+        -- #region agent log
+        sync_patterns = sync_patterns + 1
+        -- #endregion
         sync_seq_pattern_track(pattern_id, slot, { skip_arrange = true, force_rebuild = true })
       end
     end
+    -- #region agent log
+    ms_sync = ((r.time_precise and r.time_precise() or 0) - t_sync) * 1000
+    -- #endregion
     if r.PreventUIRefresh then
       r.PreventUIRefresh(-1)
     end
     r.UpdateArrange()
+    -- #region agent log
+    local t_save = r.time_precise and r.time_precise() or 0
+    -- #endregion
     save_config()
+    -- #region agent log
+    ms_save = ((r.time_precise and r.time_precise() or 0) - t_save) * 1000
+    -- #endregion
   end
+  -- #region agent log
+  local t_prev = r.time_precise and r.time_precise() or 0
+  -- #endregion
   preview_sample(sample)
+  -- #region agent log
+  ms_preview = ((r.time_precise and r.time_precise() or 0) - t_prev) * 1000
+  seq_debug_ndjson("D,E", "seq_assign_sample_to_note_targets", "assign cost", {
+    ms_total = ((r.time_precise and r.time_precise() or 0) - t_all) * 1000,
+    ms_pin = ms_pin, ms_sync = ms_sync, ms_save = ms_save, ms_preview = ms_preview,
+    n_targets = #targets, changed = changed, sync_patterns = sync_patterns,
+  })
+  -- #endregion
   if own then
     end_seq_undo("Swap note sample")
   end
@@ -14882,6 +15148,9 @@ function seq_assign_sample_to_note_targets(targets, sample)
 end
 
 function seq_begin_note_sample_pick()
+  -- #region agent log
+  local t0 = r.time_precise and r.time_precise() or 0
+  -- #endregion
   if seq_ingest_busy and seq_ingest_busy() then
     return false
   end
@@ -14924,6 +15193,12 @@ function seq_begin_note_sample_pick()
     place_at_mouse = true,
     pin_anchor = true,
   })
+  -- #region agent log
+  seq_debug_ndjson("C", "seq_begin_note_sample_pick", "open begin", {
+    ms = ((r.time_precise and r.time_precise() or 0) - t0) * 1000,
+    n_targets = #targets, slot_id = slot and slot.id or -1,
+  })
+  -- #endregion
   return true
 end
 
@@ -14999,6 +15274,11 @@ function seq_open_minimap_popup(slot, recenter, opts)
   pop.opened_at = now
   pop.idle_since = now
   pop.need_center = (not same) or (recenter ~= false)
+  if opts.place_at_mouse then
+    -- Force a fresh at-cursor place; don't reuse a prior fixed spot.
+    pop.fixed_wx = nil
+    pop.fixed_wy = nil
+  end
   if not same then
     pop.samples = nil
     pop.tag = nil
@@ -15006,6 +15286,11 @@ function seq_open_minimap_popup(slot, recenter, opts)
     pop.press_x = nil
     pop.dragging = false
     pop.pan_drag = false
+    pop.fixed_wx = nil
+    pop.fixed_wy = nil
+    -- #region agent log
+    pop._dbg_frames = 0
+    -- #endregion
   end
   if mode ~= "notes" then
     pop.targets = nil
@@ -15022,6 +15307,9 @@ function render_seq_minimap_popup()
   if not pop then
     return
   end
+  -- #region agent log
+  local t_frame = r.time_precise and r.time_precise() or 0
+  -- #endregion
   local slot = nil
   for _, s in ipairs(state.seq_tracks or {}) do
     if s.id == pop.slot_id then
@@ -15051,7 +15339,13 @@ function render_seq_minimap_popup()
     pop.anchor = anchor
   end
 
+  -- #region agent log
+  local t_ens = r.time_precise and r.time_precise() or 0
+  -- #endregion
   pcall(seq_minimap_ensure_samples, pop, slot)
+  -- #region agent log
+  local ms_ensure = ((r.time_precise and r.time_precise() or 0) - t_ens) * 1000
+  -- #endregion
 
   local now = r.time_precise()
   local keep = pop.hovered or pop.pan_drag or pop.dragging or pop.press_x
@@ -15074,27 +15368,48 @@ function render_seq_minimap_popup()
   local pad = 6.0
   local win_w = map_w + pad * 2
   local win_h = map_h + pad * 2
-  local wx = (anchor.x or 0) + (anchor.w or 0) * 0.5 - win_w * 0.5
-  local wy = (anchor.y or 0) + (anchor.h or 0) + 8.0
   local wr = state.main_window_rect
-  if wr then
-    wx = math.max(wr.x + 8, math.min(wx, wr.x + wr.w - win_w - 8))
-    if wy + win_h > wr.y + wr.h - 8 then
-      wy = (anchor.y or wy) - win_h - 8
-    end
-    wy = math.max(wr.y + 8, math.min(wy, wr.y + wr.h - win_h - 8))
-  end
-
-  if pop.place_at_mouse and r.ImGui_GetMousePos then
-    local mx, my = r.ImGui_GetMousePos(ctx)
-    wx = (mx or wx) - win_w * 0.5
-    wy = (my or wy) - 24
-    pop.place_at_mouse = nil
+  local wx, wy
+  if pop.fixed_wx and pop.fixed_wy then
+    -- Stay put after the first place_at_mouse / pinned open.
+    wx, wy = pop.fixed_wx, pop.fixed_wy
+  else
+    wx = (anchor.x or 0) + (anchor.w or 0) * 0.5 - win_w * 0.5
+    wy = (anchor.y or 0) + (anchor.h or 0) + 8.0
     if wr then
       wx = math.max(wr.x + 8, math.min(wx, wr.x + wr.w - win_w - 8))
+      if wy + win_h > wr.y + wr.h - 8 then
+        wy = (anchor.y or wy) - win_h - 8
+      end
       wy = math.max(wr.y + 8, math.min(wy, wr.y + wr.h - win_h - 8))
     end
+
+    if pop.place_at_mouse and r.ImGui_GetMousePos then
+      local mx, my = r.ImGui_GetMousePos(ctx)
+      wx = (mx or wx) - win_w * 0.5
+      wy = (my or wy) - 24
+      if wr then
+        wx = math.max(wr.x + 8, math.min(wx, wr.x + wr.w - win_w - 8))
+        wy = math.max(wr.y + 8, math.min(wy, wr.y + wr.h - win_h - 8))
+      end
+      pop.place_at_mouse = nil
+    end
+    if pop.pin_anchor or pop.mode == "notes" then
+      pop.fixed_wx, pop.fixed_wy = wx, wy
+    end
   end
+  -- #region agent log
+  if (pop._dbg_frames or 0) < 3 then
+    seq_debug_ndjson("F", "render_seq_minimap_popup", "pos", {
+      frame = (pop._dbg_frames or 0) + 1,
+      wx = wx, wy = wy,
+      fixed = (pop.fixed_wx ~= nil),
+      place = pop.place_at_mouse and true or false,
+      mode = pop.mode or "track",
+      runId = "post-fix",
+    })
+  end
+  -- #endregion
 
   if pop.need_center then
     seq_minimap_center_on(pop, find_sample_by_path(pop.origin_path or (seq_effective_slot_sample_path and select(1, seq_effective_slot_sample_path(slot, seq_sample_assign_region and seq_sample_assign_region()))) or slot.sample_path), map_w, map_h)
@@ -15203,6 +15518,10 @@ function render_seq_minimap_popup()
   end
   draw_seq_minimap_rulers(dl, pop, mx0, my0, map_w, map_h, alpha, false)
 
+  -- #region agent log
+  local t_dots = r.time_precise and r.time_precise() or 0
+  local drawn = 0
+  -- #endregion
   for i = 1, #samples do
     local s = samples[i]
     local sx = mx0 + map_w * 0.5 + pan_x + map_w * ((s.x or 0.5) - 0.5) * zoom
@@ -15219,6 +15538,9 @@ function render_seq_minimap_popup()
       else
         r.ImGui_DrawList_AddCircleFilled(dl, sx, sy, dot_r, col, 8)
       end
+      -- #region agent log
+      drawn = drawn + 1
+      -- #endregion
       if hovered then
         local dx = mx - sx
         local dy = my - sy
@@ -15229,6 +15551,9 @@ function render_seq_minimap_popup()
       end
     end
   end
+  -- #region agent log
+  local ms_dots = ((r.time_precise and r.time_precise() or 0) - t_dots) * 1000
+  -- #endregion
 
   local function draw_focus(e, radius, ring)
     if not e then
@@ -15320,6 +15645,20 @@ function render_seq_minimap_popup()
 
   r.ImGui_End(ctx)
   pop_minimap_alpha()
+  -- #region agent log
+  pop._dbg_frames = (pop._dbg_frames or 0) + 1
+  if pop._dbg_frames <= 3 or (pop._dbg_frames % 30) == 0 then
+    seq_debug_ndjson("B", "render_seq_minimap_popup", "frame cost", {
+      frame = pop._dbg_frames,
+      ms_frame = ((r.time_precise and r.time_precise() or 0) - t_frame) * 1000,
+      ms_ensure = ms_ensure,
+      ms_dots = ms_dots,
+      list_n = #samples,
+      drawn = drawn,
+      mode = pop.mode or "track",
+    })
+  end
+  -- #endregion
 end
 
 PREVIEW_HISTORY_ROW_H = 20
@@ -15738,6 +16077,36 @@ vfx_icon_images = {
   attached_ctx = nil,
 }
 
+-- Icons copied from BryanChi FX Devices (src/Images).
+FXD_ICON_FILES = {
+  Expand = "expand.png",
+  OpenInNewWin = "open-in-new-window.png",
+  AddList = "add-list.png",
+  Copy = "copy.png",
+  Paste = "paste.png",
+  Save = "save.png",
+  Trash = "trash.png",
+  Undo = "undo.png",
+  Pin = "pin.png",
+  Pinned = "pinned.png",
+  Folder = "folder.png",
+  FolderOpen = "folder_open.png",
+  FolderAdd = "folder_add.png",
+  FolderList = "folder_list.png",
+  Sine = "sinewave.png",
+  SmallScale = "small_scale_white.png",
+  ModIcon = "Modulation Icon.png",
+  ModIconHollow = "Modulation Icon hollow.png",
+  ModulationArrow = "ModulationArrow.png",
+  MouseL = "MouseL.png",
+  MouseR = "MouseR.png",
+}
+
+fxd_icon_images = {
+  by_name = {},
+  attached_ctx = nil,
+}
+
 function ensure_vfx_icons()
   if not ctx or not r.ImGui_CreateImage or not r.ImGui_Attach then
     return false
@@ -15768,6 +16137,63 @@ end
 function get_vfx_icon(name)
   ensure_vfx_icons()
   return vfx_icon_images.by_name[name]
+end
+
+function ensure_fxd_icons()
+  if not ctx or not r.ImGui_CreateImage or not r.ImGui_Attach then
+    return false
+  end
+  local cached = fxd_icon_images.by_name.Expand
+  if fxd_icon_images.attached_ctx == ctx
+      and cached
+      and r.ImGui_ValidatePtr
+      and r.ImGui_ValidatePtr(cached, "ImGui_Image*") then
+    return true
+  end
+
+  fxd_icon_images.by_name = {}
+  for name, filename in pairs(FXD_ICON_FILES) do
+    local path = FXD_ICON_DIR .. "/" .. filename
+    local ok, img = pcall(r.ImGui_CreateImage, path)
+    if ok and img then
+      local ok_attach = pcall(r.ImGui_Attach, ctx, img)
+      if ok_attach then
+        fxd_icon_images.by_name[name] = img
+      end
+    end
+  end
+  fxd_icon_images.attached_ctx = ctx
+  return fxd_icon_images.by_name.Expand ~= nil
+end
+
+function get_fxd_icon(name)
+  ensure_fxd_icons()
+  return fxd_icon_images.by_name[name]
+end
+
+function draw_fxd_icon(dl, name, cx, cy, size, tint)
+  if not dl or not name or not r.ImGui_DrawList_AddImage then
+    return false
+  end
+  local img = get_fxd_icon(name)
+  if not img then
+    return false
+  end
+  if r.ImGui_ValidatePtr and not r.ImGui_ValidatePtr(img, "ImGui_Image*") then
+    fxd_icon_images.attached_ctx = nil
+    img = get_fxd_icon(name)
+    if not img then
+      return false
+    end
+  end
+  local half = (size or 12) * 0.5
+  r.ImGui_DrawList_AddImage(
+    dl, img,
+    cx - half, cy - half, cx + half, cy + half,
+    0.0, 0.0, 1.0, 1.0,
+    tint or 0xFFFFFFFF
+  )
+  return true
 end
 
 function ensure_seq_role_icons()
@@ -16664,6 +17090,8 @@ function seq_get_arrange_geometry()
     if type(w) == "number" and type(h) == "number" then
       geo.view_w = math.abs(w)
       geo.view_h = math.abs(h)
+      geo.client_w = geo.view_w
+      geo.client_h = geo.view_h
     end
   end
 
@@ -16675,6 +17103,14 @@ function seq_get_arrange_geometry()
     -- pageSize is the visible arrange height in the same space as I_TCPY
     if type(page) == "number" and page > 8 then
       geo.view_h = page
+      geo.v_page = page
+    end
+    local hpos, hpage = seq_js_unpack4(r.JS_Window_GetScrollInfo(hwnd, "h"))
+    if type(hpage) == "number" then
+      geo.h_page = hpage
+    end
+    if type(hpos) == "number" then
+      geo.h_pos = hpos
     end
   end
 
@@ -17266,6 +17702,28 @@ function seq_render_link_parent_overlay()
     local geo = seq_get_arrange_geometry()
     local t0, t1 = get_arrange_view_range()
     if geo and geo.view_w and geo.view_h and t0 and t1 then
+      -- #region agent log
+      local zoom = (r.GetHZoomLevel and r.GetHZoomLevel()) or 0
+      local hz_w = (t1 - t0) * zoom
+      local now = (r.time_precise and r.time_precise()) or 0
+      if not seq_dbg_link_hl_t or (now - seq_dbg_link_hl_t) > 0.35 then
+        seq_dbg_link_hl_t = now
+        seq_debug_ndjson("A", "seq_render_link_parent_overlay", "arrange width compare", {
+          view_w = geo.view_w or -1,
+          client_w = geo.client_w or -1,
+          h_page = geo.h_page or -1,
+          hz_w = hz_w,
+          zoom = zoom,
+          t0 = t0,
+          t1 = t1,
+          t_span = t1 - t0,
+          view_minus_hz = (geo.view_w or 0) - hz_w,
+          h_page_minus_hz = (geo.h_page or 0) - hz_w,
+          view_h = geo.view_h or -1,
+          v_page = geo.v_page or -1,
+        })
+      end
+      -- #endregion
       for _, reg in ipairs(state.seq_regions or {}) do
         if seq_region_in_link_group(reg, hover) and reg.parent_item_guid then
           local item = seq_find_item_by_guid(reg.parent_item_guid)
@@ -17273,6 +17731,58 @@ function seq_render_link_parent_overlay()
           if item and track then
             local x0, y0, x1, y1 = seq_item_imgui_rect(nil, item, track, 0, 0, geo.view_w, geo.view_h, t0, t1)
             if x0 then
+              -- #region agent log
+              local pos = r.GetMediaItemInfo_Value(item, "D_POSITION") or 0
+              local len = r.GetMediaItemInfo_Value(item, "D_LENGTH") or 0
+              local hz_x0 = (pos - t0) * zoom
+              local hz_x1 = (pos + len - t0) * zoom
+              local now2 = (r.time_precise and r.time_precise()) or 0
+              if not seq_dbg_link_item_t or (now2 - seq_dbg_link_item_t) > 0.35 then
+                seq_dbg_link_item_t = now2
+                local hit_at_lin, hit_at_hz = -1, -1
+                if r.GetItemFromPoint and geo.l and geo.t then
+                  local mid_y = (y0 + y1) * 0.5
+                  local sx_lin = geo.l + x0 + 2
+                  local sx_hz = geo.l + hz_x0 + 2
+                  local sy = geo.t + mid_y
+                  local it_lin = r.GetItemFromPoint(sx_lin, sy, false)
+                  local it_hz = r.GetItemFromPoint(sx_hz, sy, false)
+                  hit_at_lin = (it_lin == item) and 1 or 0
+                  hit_at_hz = (it_hz == item) and 1 or 0
+                end
+                seq_debug_ndjson("B", "seq_render_link_parent_overlay", "item x mapping", {
+                  pos = pos,
+                  len = len,
+                  lin_x0 = x0,
+                  lin_x1 = x1,
+                  hz_x0 = hz_x0,
+                  hz_x1 = hz_x1,
+                  dx0 = x0 - hz_x0,
+                  dx1 = x1 - hz_x1,
+                  hit_at_lin = hit_at_lin,
+                  hit_at_hz = hit_at_hz,
+                  floor_dx = math.floor(x0 + 0.5) - x0,
+                })
+                -- Probe: does item start at lin_x0 or further right?
+                if r.GetItemFromPoint and geo.l and geo.t then
+                  local mid_y = (y0 + y1) * 0.5
+                  local sy = geo.t + mid_y
+                  local first_hit = -1
+                  for dx = 0, 40 do
+                    local it = r.GetItemFromPoint(geo.l + x0 + dx, sy, false)
+                    if it == item then
+                      first_hit = dx
+                      break
+                    end
+                  end
+                  seq_debug_ndjson("C", "seq_render_link_parent_overlay", "item start probe from lin_x0", {
+                    first_hit_dx = first_hit,
+                    lin_x0 = x0,
+                    hz_x0 = hz_x0,
+                  })
+                end
+              end
+              -- #endregion
               seq_arrange_hl_add(x0, y0, x1, y1, seq_lice_color(255, 229, 153), 0.33, seq_lice_color(255, 229, 153))
             end
           end
@@ -23678,6 +24188,7 @@ function seq_ingest_parent_items()
     end
   end
 
+  local touched = {}
   for _, region in ipairs(state.seq_regions or {}) do
     local rec = claimed[region.id]
     if rec and rec.start_qn then
@@ -23689,6 +24200,16 @@ function seq_ingest_parent_items()
       local resized = new_bars ~= region.length_bars
       local renamed = rec.name and rec.name ~= "" and rec.name ~= (region.name or "")
       if moved or resized or renamed then
+        -- #region agent log
+        seq_debug_ndjson("E3", "arrange_parent_geometry", "mutate region", {
+          id = region.id, old_start = old_start, new_start = new_start,
+          old_bars = region.length_bars or 0, new_bars = new_bars,
+          new_len = new_len, moved = moved, resized = resized, renamed = renamed,
+          selected = (r.CountSelectedMediaItems and r.CountSelectedMediaItems(0)) or 0,
+          snap_before = seq_debug_region_snapshot(),
+          runId = "post-fix",
+        })
+        -- #endregion
         if moved then
           region.start_qn = new_start
         end
@@ -23698,54 +24219,35 @@ function seq_ingest_parent_items()
         if renamed then
           region.name = rec.name
         end
-        sort_seq_regions()
         if moved or resized then
-          if moved then
-            local child_selected = false
-            for _, slot in ipairs(state.seq_tracks or {}) do
-              local tr = get_seq_slot_target_track(slot)
-              if tr then
-                for i = 0, r.CountTrackMediaItems(tr) - 1 do
-                  local item = r.GetTrackMediaItem(tr, i)
-                  if item and seq_item_is_owned(item, region.id) and seq_ingest_item_selected(item) then
-                    child_selected = true
-                    break
-                  end
-                end
-              end
-              if child_selected then
-                break
-              end
-            end
-            if not child_selected then
-              local delta_qn = new_start - old_start
-              for _, slot in ipairs(state.seq_tracks or {}) do
-                local tr = get_seq_slot_target_track(slot)
-                if tr then
-                  for i = 0, r.CountTrackMediaItems(tr) - 1 do
-                    local item = r.GetTrackMediaItem(tr, i)
-                    if item and seq_item_is_owned(item, region.id) then
-                      local pos = r.GetMediaItemInfo_Value(item, "D_POSITION")
-                      local qn = time_to_qn(pos)
-                      local t2 = qn and qn_to_time(qn + delta_qn)
-                      if t2 then
-                        r.SetMediaItemPosition(item, t2, false)
-                      end
-                    end
-                  end
-                end
-              end
-            end
-          end
-          if rec.item then
-            seq_write_parent_item_ext(rec.item, region)
-          end
-        else
+          touched[#touched + 1] = region
+        elseif rec.item then
           seq_write_parent_item_ext(rec.item, region)
         end
         changed = true
       end
     end
+  end
+  if #touched > 0 then
+    sort_seq_regions()
+    -- Keep arrange-dropped positions; only shift other regions on conflict.
+    seq_evict_overlaps_keeping(touched)
+    for _, region in ipairs(touched) do
+      local rec = claimed[region.id]
+      if rec and rec.item then
+        -- Pin parent item to the arrange-authored start (evict must not move it).
+        seq_apply_parent_item_props(rec.item, region)
+      end
+      sync_seq_region(region)
+      -- #region agent log
+      seq_debug_ndjson("E3", "arrange_parent_geometry", "after sync", {
+        id = region.id, start = region.start_qn or 0, bars = region.length_bars or 0,
+        snap_after = seq_debug_region_snapshot(),
+        runId = "post-fix",
+      })
+      -- #endregion
+    end
+    seq_mark_self_arrange_write()
   end
 
   local to_delete = {}
@@ -23912,6 +24414,21 @@ function seq_stutter_count(note)
   return math.max(1, math.floor((note and note.stutter or 1) + 0.5))
 end
 
+-- Shallow note view with an effective stutter count for span/length math.
+-- Used when region humanize stutter expands a note without baking note.stutter.
+function seq_note_for_stutter_render(note, count)
+  count = math.max(1, math.floor((tonumber(count) or 1) + 0.5))
+  if type(note) ~= "table" or seq_stutter_count(note) == count then
+    return note
+  end
+  local view = {}
+  for k, v in pairs(note) do
+    view[k] = v
+  end
+  view.stutter = count
+  return view
+end
+
 function seq_stutter_span_qn(note, grid_qn)
   grid_qn = grid_qn or state.seq_grid_qn or 0.25
   local span = tonumber(note and note.length_qn)
@@ -23929,6 +24446,35 @@ function seq_stutter_span_qn(note, grid_qn)
     return math.max(grid_qn * 0.25, span)
   end
   return grid_qn
+end
+
+function seq_note_lod_length_qn(note, step_qn)
+  local span = seq_stutter_span_qn(note, step_qn)
+  if span then
+    return span
+  end
+  local len = tonumber(note and note.length_qn)
+  if type(len) == "number" and len > 1e-9 then
+    return len
+  end
+  return step_qn or 0.25
+end
+
+function seq_active_cell_has_visual_start(active, start_qn, col, step_qn)
+  local pack = seq_active_cell_notes(active)
+  if not pack then
+    return false
+  end
+  step_qn = step_qn or 0.25
+  local cell_qn = (start_qn or 0.0) + (col or 0) * step_qn
+  local cell_end = cell_qn + step_qn
+  for i = 1, #pack do
+    local vis = seq_entry_vis_qn(pack[i])
+    if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+      return true
+    end
+  end
+  return false
 end
 
 function seq_note_has_stutter_span(note, grid_qn)
@@ -24280,6 +24826,15 @@ function seq_set_note_param_value(note, key, value, hit_idx)
     hit[key] = value
     if key == "sample_vary" then
       seq_clear_frozen_sample(note, hit_idx)
+      -- Parent pins are inherited by hits without their own freeze. Clear the
+      -- note-level pin so live per-hit vary can resolve a new sample.
+      if (tonumber(value) or 0) > 0.000001 then
+        note.frozen_sample_path = nil
+        note.frozen_sample_name = nil
+        note.vary_origin_path = nil
+        note.vary_rgb = nil
+        note.picked_sample = nil
+      end
     end
     return true
   end
@@ -24375,22 +24930,34 @@ function seq_note_for_stutter_hit(note, hit_idx)
     return note
   end
   local hit = seq_stutter_hit_table(note, hit_idx)
+  local sample_vary = seq_note_param_value(note, "sample_vary", hit_idx) or 0.0
+  local hit_has_own_pin = hit and type(hit.frozen_sample_path) == "string" and hit.frozen_sample_path ~= ""
+  -- Live per-hit variation must not inherit the parent note's pinned sample;
+  -- that pin would win in resolve_seq_note_sample and ignore sample_vary.
+  local inherit_pin = hit_has_own_pin or not (sample_vary > 0.000001)
   return {
     enabled = note.enabled ~= false,
     sample_path = note.sample_path,
     sample_name = note.sample_name,
-    frozen_sample_path = (hit and hit.frozen_sample_path) or note.frozen_sample_path,
-    frozen_sample_name = (hit and hit.frozen_sample_name) or note.frozen_sample_name,
-    vary_origin_path = (hit and hit.vary_origin_path) or note.vary_origin_path,
-    vary_rgb = (hit and hit.vary_rgb) or note.vary_rgb,
-    picked_sample = (hit and hit.picked_sample) or note.picked_sample,
+    frozen_sample_path = hit_has_own_pin and hit.frozen_sample_path
+      or (inherit_pin and note.frozen_sample_path or nil),
+    frozen_sample_name = hit_has_own_pin and hit.frozen_sample_name
+      or (inherit_pin and note.frozen_sample_name or nil),
+    vary_origin_path = hit_has_own_pin and hit.vary_origin_path
+      or (inherit_pin and note.vary_origin_path or nil),
+    vary_rgb = hit_has_own_pin and hit.vary_rgb
+      or (inherit_pin and note.vary_rgb or nil),
+    picked_sample = (hit and hit.picked_sample)
+      or (inherit_pin and note.picked_sample or nil),
     volume = seq_note_param_value(note, "volume", hit_idx) or 1.0,
     pan = seq_note_param_value(note, "pan", hit_idx) or 0.0,
     pitch = seq_note_param_value(note, "pitch", hit_idx) or 0.0,
-    sample_vary = seq_note_param_value(note, "sample_vary", hit_idx) or 0.0,
+    sample_vary = sample_vary,
     offset_qn = seq_note_param_value(note, "offset_qn", hit_idx) or 0.0,
     stretch = seq_note_param_value(note, "stretch", hit_idx) or 1.0,
     start = seq_note_param_value(note, "start", hit_idx) or 0.0,
+    source_offset = (hit and type(hit.source_offset) == "number" and hit.source_offset)
+      or note.source_offset,
     length_qn = note.length_qn,
     decay_qn = note.decay_qn,
     fade_in_qn = note.fade_in_qn,
@@ -24518,12 +25085,27 @@ function seq_active_cells_put(active_cells, slot_id, col, entry, start_qn, step_
     return
   end
   cell.pack[#cell.pack + 1] = entry
-  seq_pack_sort_later_on_top(cell.pack)
-  local top = cell.pack[#cell.pack]
-  cell.key = top.key
-  cell.note = top.note
-  cell.region_id = top.region_id
-  cell.abs_qn = top.abs_qn
+end
+
+function seq_finish_active_cells(active_cells)
+  if not active_cells then
+    return
+  end
+  for _, cells in pairs(active_cells) do
+    for _, cell in pairs(cells) do
+      local pack = cell.pack
+      if pack and #pack >= 2 then
+        seq_pack_sort_later_on_top(pack)
+      end
+      local top = pack and pack[#pack]
+      if top then
+        cell.key = top.key
+        cell.note = top.note
+        cell.region_id = top.region_id
+        cell.abs_qn = top.abs_qn
+      end
+    end
+  end
 end
 
 function apply_seq_note_params(item, take, note)
@@ -31806,6 +32388,9 @@ function insert_seq_note_hit(tr, region, track_id, step_key, note, resolved_path
   end
   local max_len_sec = seq_sample_source_length_sec(resolved_path, resolved_sample)
   local startoffs = opts.startoffs
+  if startoffs == nil and note and type(note.source_offset) == "number" then
+    startoffs = note.source_offset
+  end
   if startoffs == nil then
     startoffs = get_sample_start_offset(resolved_sample)
   end
@@ -31873,6 +32458,33 @@ function insert_seq_note_hit(tr, region, track_id, step_key, note, resolved_path
       if startoffs > 0 then
         r.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", startoffs)
       end
+      -- #region agent log
+      if note and type(note.source_offset) == "number" then
+        state._stem_dbg_n = (state._stem_dbg_n or 0) + 1
+        if state._stem_dbg_n <= 8 then
+          local got = take and r.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS") or -1
+          local sample_start = get_sample_start_offset and get_sample_start_offset(resolved_sample) or 0
+          seq_debug_ndjson("B", "insert_seq_note_hit", "applied startoffs", {
+            n = state._stem_dbg_n,
+            src_off = note.source_offset or 0,
+            start_frac = seq_note_start_frac(note) or 0,
+            startoffs = startoffs or 0,
+            got_startoffs = got or -1,
+            sample_start = sample_start or 0,
+            max_len = max_len_sec or 0,
+            item_len = item_len or 0,
+            item_pos = start_time or 0,
+            expect_pos = qn_to_time(hit_start_qn) or -1,
+            hit_qn = hit_start_qn or 0,
+            note_path = tostring(note.sample_path or ""):match("([^/\\]+)$") or "",
+            frozen = tostring(note.frozen_sample_path or ""):match("([^/\\]+)$") or "",
+            resolved = tostring(resolved_path or ""):match("([^/\\]+)$") or "",
+            sample_path = resolved_sample and tostring(resolved_sample.path or ""):match("([^/\\]+)$") or "",
+            vary_f = tostring(note.vary_filter or ""),
+          })
+        end
+      end
+      -- #endregion
     end
   end
 
@@ -32059,6 +32671,9 @@ function insert_seq_note_item(region, slot, track_id, step_key, note)
 
   local grid_qn = state.seq_grid_qn or 0.25
   local stutter_count = seq_random_stutter_count(note, region, track_id, step_key)
+  -- Random stutter must drive hit offsets/lengths; painted note.stutter stays 1
+  -- until lock-bake, so span math on the raw note stacks every hit at t0.
+  local span_note = seq_note_for_stutter_render(note, stutter_count)
   local step_idx = tonumber(step_key) or 0
   if not seq_note_in_region(region, note, step_key, grid_qn) then
     return nil
@@ -32080,10 +32695,10 @@ function insert_seq_note_item(region, slot, track_id, step_key, note)
       hit_path, hit_sample = resolved_path, resolved_sample
     end
     local hit_len_qn = seq_effective_note_length_qn(
-      region, pattern, slot, track_id, step_idx, note, hit_sample, grid_qn, hit_idx
+      region, pattern, slot, track_id, step_idx, span_note, hit_sample, grid_qn, hit_idx
     )
     local hit_offset = hit_note.offset_qn or 0.0
-    local off0 = seq_stutter_hit_span(note, hit_idx, grid_qn)
+    local off0 = seq_stutter_hit_span(span_note, hit_idx, grid_qn)
     local hit_start_qn = cell_start_qn + groove_qn + hit_offset + (off0 or 0.0)
     if hit_start_qn < 0.0 then hit_start_qn = 0.0 end
     local apply_fade_in = (i == 0)
@@ -32652,7 +33267,9 @@ end
 function seq_mark_self_arrange_write()
   state.seq_skip_ingest = true
   if r.GetProjectStateChangeCount then
-    state.seq_self_write_count = r.GetProjectStateChangeCount(0)
+    local count = r.GetProjectStateChangeCount(0)
+    state.seq_self_write_count = count
+    state.seq_last_proj_change = count
   end
 end
 
@@ -32683,6 +33300,7 @@ function seq_ingest_busy()
     or seq_undo_is_open()
     or state.seq_random_knob_drag ~= nil
     or state.seq_random_sync_pending ~= nil
+    or state.seq_stem_import ~= nil
 end
 
 function seq_item_take_params(item)
@@ -32910,6 +33528,20 @@ function seq_note_from_arrange_item(slot, step_key, step_qn, src_note, vol, pan,
   note.pan = pan
   note.pitch = pitch
   return note
+end
+
+function seq_note_capture_source_offset(note, item)
+  if type(note) ~= "table" or not item then
+    return
+  end
+  local take = r.GetActiveTake(item)
+  if not take then
+    return
+  end
+  local offs = r.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
+  if type(offs) == "number" and offs > 0.0000005 then
+    note.source_offset = offs
+  end
 end
 
 function seq_ingest_timing_slop_qn(region, track_id, grid_qn)
@@ -33839,6 +34471,7 @@ function seq_ingest_region_from_arrange(region)
           note.qn_offset = qn_offset
           note.offset_qn = offset_qn
           note.step = math.floor((qn_offset / grid_qn) + 1e-9)
+          seq_note_capture_source_offset(note, rec.item)
           if rec.source_path and rec.source_path ~= "" then
             if not slot.sample_path or slot.sample_path == "" then
               note.sample_path = rec.source_path
@@ -33896,6 +34529,13 @@ function seq_ingest_region_from_arrange(region)
           end
           if seq_ingest_apply_item_length(existing, rec.item, region, pattern, slot, new_key, grid_qn, rec) then
             note_changed = true
+          end
+          do
+            local prev_off = existing.source_offset
+            seq_note_capture_source_offset(existing, rec.item)
+            if existing.source_offset ~= prev_off then
+              note_changed = true
+            end
           end
           if rec.source_path and rec.source_path ~= ""
              and seq_ingest_freeze_foreign_source(existing, slot, rec.source_path, region, slot.id, new_key) then
@@ -33979,48 +34619,93 @@ function ingest_seq_from_arrange()
     return
   end
 
-  local count = r.GetProjectStateChangeCount(0)
-  if state.seq_skip_ingest then
-    -- Ignore the change count from our own item writes, but do not swallow a
-    -- user edit that landed in the same defer (e.g. Delete right after a sync).
-    local self_count = state.seq_self_write_count
-    state.seq_skip_ingest = false
-    state.seq_self_write_count = nil
-    state.seq_ingest_pending_count = nil
-    if state.seq_last_proj_change == count then
-      return
-    end
-    if self_count and count <= self_count then
-      state.seq_last_proj_change = count
-      return
-    end
-    if not state.seq_last_proj_change then
-      state.seq_last_proj_change = self_count
-    end
-  end
+  -- Keep seq_skip_ingest while a sequencer edit is in progress. Consuming it
+  -- here used to drop the flag on the click frame, then a full arrange ingest
+  -- (~150ms) ran on mouse-up during the note animation.
   if seq_ingest_busy() then
     return
   end
-  if state.seq_last_proj_change == count then
+
+  local count = r.GetProjectStateChangeCount(0)
+  if state.seq_skip_ingest then
+    state.seq_skip_ingest = false
+    state.seq_self_write_count = nil
     state.seq_ingest_pending_count = nil
+    state.seq_ingest_pending_at = nil
+    state.seq_last_proj_change = count
+    return
+  end
+  -- Hold arrange ingest while the user is actively dragging selected items
+  -- (LMB down). After mouse-up, settle briefly then sync even if the item
+  -- stays selected — requiring a deselect click felt broken.
+  local selected_items = r.CountSelectedMediaItems and r.CountSelectedMediaItems(0) or 0
+  local now_t = (r.time_precise and r.time_precise()) or 0
+  local have_lmb, lmb_down = false, false
+  if r.JS_Mouse_GetState then
+    have_lmb = true
+    lmb_down = (r.JS_Mouse_GetState(1) & 1) ~= 0
+  end
+  if selected_items > 0 then
+    if state.seq_ingest_pending_count ~= count then
+      state.seq_ingest_pending_count = count
+      state.seq_ingest_pending_at = now_t
+      state.seq_ingest_hold_parent = true
+      -- #region agent log
+      seq_debug_ndjson("E4", "ingest_seq_from_arrange", "hold pending change", {
+        count = count, selected = selected_items, lmb = lmb_down and 1 or 0,
+        runId = "post-fix",
+      })
+      -- #endregion
+    end
+    if have_lmb and lmb_down then
+      state.seq_ingest_hold_parent = true
+      return
+    end
+    local waited = now_t - (state.seq_ingest_pending_at or now_t)
+    local settle = have_lmb and 0.15 or 0.40
+    if waited < settle then
+      state.seq_ingest_hold_parent = true
+      return
+    end
+    if state.seq_last_proj_change == count then
+      -- Already applied this arrange revision while selection remained.
+      state.seq_ingest_hold_parent = false
+      return
+    end
+    -- Mouse up + settled: fall through and ingest with selection still active.
+    -- #region agent log
+    seq_debug_ndjson("E4", "ingest_seq_from_arrange", "settle after mouse up", {
+      count = count, selected = selected_items, waited = waited, lmb = 0,
+      runId = "post-fix",
+    })
+    -- #endregion
+  end
+  local force_after_hold = state.seq_ingest_hold_parent == true
+  if force_after_hold then
+    state.seq_ingest_hold_parent = false
+  end
+  if state.seq_last_proj_change == count and not force_after_hold then
+    state.seq_ingest_pending_count = nil
+    state.seq_ingest_pending_at = nil
     if not state.seq_parent_items_ensured then
       state.seq_parent_items_ensured = true
       seq_ensure_all_region_parent_items()
     end
     return
   end
-  -- Wait until the change count stops moving so we ingest the settled
-  -- arrange positions, not an in-between mouse-drag frame. Discrete edits
-  -- (Delete/Cut) leave nothing selected — ingest those immediately.
-  local selected_items = r.CountSelectedMediaItems and r.CountSelectedMediaItems(0) or 0
-  if selected_items > 0 and state.seq_ingest_pending_count ~= count then
-    state.seq_ingest_pending_count = count
-    return
-  end
+  -- #region agent log
+  seq_debug_ndjson("E4", "ingest_seq_from_arrange", "commit ingest", {
+    count = count, selected = selected_items,
+    force_after_hold = force_after_hold,
+    waited = (state.seq_ingest_pending_at and (now_t - state.seq_ingest_pending_at)) or -1,
+    runId = "post-fix",
+  })
+  -- #endregion
   state.seq_ingest_pending_count = nil
+  state.seq_ingest_pending_at = nil
   state.seq_last_proj_change = count
 
-  seq_sync_track_order_from_arrange()
+  seq_sync_track_order_from_arrange(true)
 
   local parent_changed, parent_synced = seq_ingest_parent_items()
   if parent_changed then
@@ -34066,9 +34751,17 @@ update_seq_track_sample_assignments = function(slot, sample_path, sample_name, p
   opts = opts or {}
 
   clear_seq_vary_rank_cache()
+  if seq_release_sliced_notes_for_sample_change then
+    seq_release_sliced_notes_for_sample_change(slot, nil, {
+      path = sample_path,
+      name = sample_name or basename(sample_path),
+    })
+  end
 
   local touched_patterns = {}
   local track_key = tostring(slot.id)
+  local skipped_frozen = 0
+  local updated_notes = 0
   for pattern_id, pattern in pairs(state.seq_patterns) do
     if type(pattern) == "table" and type(pattern.notes) == "table" then
       local track_notes = pattern.notes[track_key]
@@ -34079,6 +34772,9 @@ update_seq_track_sample_assignments = function(slot, sample_path, sample_name, p
             note.sample_path = sample_path
             note.sample_name = sample_name or basename(sample_path)
             touched = true
+            updated_notes = updated_notes + 1
+          elseif type(note) == "table" then
+            skipped_frozen = skipped_frozen + 1
           end
         end
         if touched then
@@ -34087,6 +34783,13 @@ update_seq_track_sample_assignments = function(slot, sample_path, sample_name, p
       end
     end
   end
+  -- #region agent log
+  seq_debug_ndjson("H5", "update_seq_track_sample_assignments", "assign notes", {
+    updated = updated_notes,
+    skipped_frozen = skipped_frozen,
+    path = tostring(sample_path or ""):match("([^/\\]+)$") or "",
+  })
+  -- #endregion
 
   if next(touched_patterns) then
     seq_pcm_take_src_begin()
@@ -34135,7 +34838,16 @@ function create_seq_region(length_bars, copy_from, pooled, preferred_start_qn, i
   end
   local length_qn = get_seq_region_length_qn({ start_qn = start_qn, length_bars = region_length_bars })
   start_qn = math.max(0.0, start_qn)
-  if insert or (preferred_start_qn and seq_region_overlaps(start_qn, length_qn, nil)) then
+  local did_insert = insert or (preferred_start_qn and seq_region_overlaps(start_qn, length_qn, nil))
+  -- #region agent log
+  seq_debug_ndjson("D", "create_seq_region", "before place", {
+    bars = region_length_bars, start_qn = start_qn, length_qn = length_qn,
+    insert = did_insert and true or false, pooled = pooled and true or false,
+    copy_from = copy_from and copy_from.id or -1,
+    before = seq_debug_region_snapshot(),
+  })
+  -- #endregion
+  if did_insert then
     seq_shift_regions_from(start_qn, length_qn, nil)
   else
     start_qn = find_non_overlapping_region_start(start_qn, length_qn, nil)
@@ -34173,6 +34885,12 @@ function create_seq_region(length_bars, copy_from, pooled, preferred_start_qn, i
   table.insert(state.seq_regions, region)
   table.sort(state.seq_regions, function(a, b) return (a.start_qn or 0) < (b.start_qn or 0) end)
   state.selected_seq_region_id = region.id
+  -- #region agent log
+  seq_debug_ndjson("D", "create_seq_region", "created", {
+    id = region.id, start_qn = region.start_qn or 0, bars = region.length_bars or 0,
+    after = seq_debug_region_snapshot(),
+  })
+  -- #endregion
   save_config()
   if copy_from and pooled then
     sync_seq_pattern_regions(pattern_id)
@@ -34788,6 +35506,15 @@ function seq_shift_regions_from(from_qn, delta_qn, ignore_id)
   if #affected == 0 then
     return false
   end
+  -- #region agent log
+  local ids = {}
+  for _, reg in ipairs(affected) do ids[#ids + 1] = tostring(reg.id) end
+  seq_debug_ndjson("D", "seq_shift_regions_from", "shift", {
+    from_qn = from_qn, delta_qn = delta_qn, ignore = ignore_id or -1,
+    count = #affected, ids = table.concat(ids, ","),
+    before = seq_debug_region_snapshot(),
+  })
+  -- #endregion
   for _, reg in ipairs(affected) do
     remove_seq_rendered_items(reg)
     reg.start_qn = (reg.start_qn or 0.0) + delta_qn
@@ -34816,6 +35543,68 @@ function seq_pack_overlapping_regions()
   return changed
 end
 
+-- After an arrange edit, keep the edited region(s) pinned to the user's drop
+-- position and push any overlapping *other* regions out of the way. The old
+-- pack-all path moved the edited region itself, then sync yanked the parent
+-- item away from where it was dropped.
+function seq_evict_overlaps_keeping(keep_regions)
+  local keep = {}
+  for _, reg in ipairs(keep_regions or {}) do
+    if reg and reg.id ~= nil then
+      keep[reg.id] = true
+    end
+  end
+  if next(keep) == nil then
+    return false
+  end
+  local changed = false
+  for _ = 1, 64 do
+    sort_seq_regions()
+    local moved = false
+    local regs = state.seq_regions or {}
+    for i = 1, #regs do
+      local a = regs[i]
+      local a_start = a.start_qn or 0.0
+      local a_end = a_start + get_seq_region_length_qn(a)
+      for j = i + 1, #regs do
+        local b = regs[j]
+        local b_start = b.start_qn or 0.0
+        local b_end = b_start + get_seq_region_length_qn(b)
+        if a_start < b_end - 1e-4 and a_end > b_start + 1e-4 then
+          local victim, anchor_end
+          if keep[a.id] and not keep[b.id] then
+            victim, anchor_end = b, a_end
+          elseif keep[b.id] and not keep[a.id] then
+            victim, anchor_end = a, b_end
+          elseif not keep[a.id] and not keep[b.id] then
+            -- Neither was arrange-edited: classic pack (later moves).
+            victim, anchor_end = b, a_end
+          else
+            -- Both pinned from a multi-select arrange move: leave alone.
+            victim = nil
+          end
+          if victim and math.abs((victim.start_qn or 0.0) - anchor_end) > 1e-4 then
+            remove_seq_rendered_items(victim)
+            victim.start_qn = math.max(0.0, anchor_end)
+            sync_seq_region(victim)
+            moved = true
+            changed = true
+            break
+          end
+        end
+      end
+      if moved then
+        break
+      end
+    end
+    if not moved then
+      break
+    end
+  end
+  sort_seq_regions()
+  return changed
+end
+
 function seq_swap_region_positions(a, b)
   if not a or not b or a.id == b.id then
     return false
@@ -34825,6 +35614,13 @@ function seq_swap_region_positions(a, b)
   if math.abs(a_start - b_start) < 0.000001 then
     return false
   end
+  -- #region agent log
+  seq_debug_ndjson("B", "seq_swap_region_positions", "swap", {
+    a_id = a.id, b_id = b.id, a_start = a_start, b_start = b_start,
+    a_bars = a.length_bars or 0, b_bars = b.length_bars or 0,
+    before = seq_debug_region_snapshot(),
+  })
+  -- #endregion
   remove_seq_rendered_items(a)
   remove_seq_rendered_items(b)
   a.start_qn = b_start
@@ -34834,6 +35630,12 @@ function seq_swap_region_positions(a, b)
   save_config()
   sync_seq_region(a)
   sync_seq_region(b)
+  -- #region agent log
+  seq_debug_ndjson("B", "seq_swap_region_positions", "after pack", {
+    a_id = a.id, b_id = b.id, a_start = a.start_qn or 0, b_start = b.start_qn or 0,
+    after = seq_debug_region_snapshot(),
+  })
+  -- #endregion
   return true
 end
 
@@ -34863,12 +35665,20 @@ function seq_move_region_to(region, desired_start_qn)
   local length_qn = get_seq_region_length_qn(region)
   desired_start_qn = math.max(0.0, desired_start_qn)
   local delta = desired_start_qn - (region.start_qn or 0.0)
+  local old_start = region.start_qn or 0.0
   local new_start
   if delta < 0 then
     new_start = find_prev_non_overlapping_region_start(desired_start_qn, length_qn, region.id)
   else
     new_start = find_non_overlapping_region_start(desired_start_qn, length_qn, region.id)
   end
+  -- #region agent log
+  seq_debug_ndjson("B", "seq_move_region_to", "move resolve", {
+    id = region.id, old_start = old_start, desired = desired_start_qn,
+    resolved = new_start, len_qn = length_qn, delta = delta,
+    snap = seq_debug_region_snapshot(),
+  })
+  -- #endregion
   if math.abs(new_start - (region.start_qn or 0.0)) < 0.000001 then
     return false
   end
@@ -34885,25 +35695,42 @@ function seq_resize_region_end(region, new_end_qn, step_qn)
     return false
   end
   step_qn = step_qn or state.seq_grid_qn or 0.25
+  local req_end = new_end_qn
   new_end_qn = seq_snap_qn_for_region_drag(new_end_qn, step_qn)
   local reg_start = region.start_qn or 0.0
+  local old_bars = region.length_bars
+  local old_len = get_seq_region_length_qn(region)
   new_end_qn = math.max(new_end_qn, reg_start + step_qn)
+  local clipped_by = nil
   for _, other in ipairs(state.seq_regions) do
     if other.id ~= region.id then
       local other_start = other.start_qn or 0.0
       if other_start > reg_start and other_start < new_end_qn then
         new_end_qn = other_start
+        clipped_by = other.id
       end
     end
   end
   local length_qn = new_end_qn - reg_start
   if length_qn < step_qn then
+    -- #region agent log
+    seq_debug_ndjson("A", "seq_resize_region_end", "reject too short", {
+      id = region.id, req_end = req_end, end_qn = new_end_qn, length_qn = length_qn, step_qn = step_qn,
+    })
+    -- #endregion
     return false
   end
   local bars = seq_qn_length_to_bars(reg_start, length_qn)
   if bars == region.length_bars then
     return false
   end
+  -- #region agent log
+  seq_debug_ndjson("A", "seq_resize_region_end", "apply", {
+    id = region.id, start = reg_start, req_end = req_end, end_qn = new_end_qn,
+    old_bars = old_bars, new_bars = bars, old_len = old_len, new_len = length_qn,
+    clipped_by = clipped_by or -1, snap = seq_debug_region_snapshot(),
+  })
+  -- #endregion
   remove_seq_rendered_items(region)
   region.length_bars = bars
   save_config()
@@ -34916,25 +35743,42 @@ function seq_resize_region_start(region, new_start_qn, step_qn)
     return false
   end
   step_qn = step_qn or state.seq_grid_qn or 0.25
+  local req_start = new_start_qn
   local reg_end = (region.start_qn or 0.0) + get_seq_region_length_qn(region)
+  local old_start = region.start_qn or 0.0
+  local old_bars = region.length_bars
   new_start_qn = seq_snap_qn_for_region_drag(math.max(0.0, new_start_qn), step_qn)
   new_start_qn = math.min(new_start_qn, reg_end - step_qn)
+  local clipped_by = nil
   for _, other in ipairs(state.seq_regions) do
     if other.id ~= region.id then
       local other_end = (other.start_qn or 0.0) + get_seq_region_length_qn(other)
       if other_end > new_start_qn and other_end <= reg_end then
         new_start_qn = math.max(new_start_qn, other_end)
+        clipped_by = other.id
       end
     end
   end
   local length_qn = reg_end - new_start_qn
   if length_qn < step_qn then
+    -- #region agent log
+    seq_debug_ndjson("A", "seq_resize_region_start", "reject too short", {
+      id = region.id, req_start = req_start, start = new_start_qn, length_qn = length_qn,
+    })
+    -- #endregion
     return false
   end
   local bars = seq_qn_length_to_bars(new_start_qn, length_qn)
   if math.abs(new_start_qn - (region.start_qn or 0.0)) < 0.000001 and bars == region.length_bars then
     return false
   end
+  -- #region agent log
+  seq_debug_ndjson("A", "seq_resize_region_start", "apply", {
+    id = region.id, req_start = req_start, old_start = old_start, new_start = new_start_qn,
+    old_bars = old_bars, new_bars = bars, reg_end = reg_end, length_qn = length_qn,
+    clipped_by = clipped_by or -1, snap = seq_debug_region_snapshot(),
+  })
+  -- #endregion
   remove_seq_rendered_items(region)
   region.start_qn = new_start_qn
   region.length_bars = bars
@@ -35014,24 +35858,41 @@ end
 function seq_split_region(region, split_qn, step_qn)
   local snapped_qn, left_bars, right_bars = seq_split_qn_for_region(region, split_qn, step_qn)
   if not snapped_qn then
+    -- #region agent log
+    seq_debug_ndjson("C", "seq_split_region", "reject", {
+      id = region and region.id or -1, split_qn = split_qn or -1,
+      start = region and (region.start_qn or 0) or -1,
+      bars = region and (region.length_bars or 0) or -1,
+    })
+    -- #endregion
     return nil
   end
   local own = seq_undo_own_begin("Split sequencer region")
   step_qn = step_qn or state.seq_grid_qn or 0.25
   local grid_qn = state.seq_grid_qn or 0.25
   local split_step = math.max(1, math.floor(((snapped_qn - (region.start_qn or 0.0)) / grid_qn) + 0.5))
-
+  local linked = seq_region_is_linked(region) and true or false
   local src_pattern = get_seq_pattern(region.pattern_id, false)
+  local note_count_before = 0
+  if src_pattern and type(src_pattern.notes) == "table" then
+    for _, notes in pairs(src_pattern.notes) do
+      if type(notes) == "table" then
+        for _ in pairs(notes) do note_count_before = note_count_before + 1 end
+      end
+    end
+  end
+
   local new_pattern_id = alloc_seq_pattern()
   local cloned = clone_table_deep(src_pattern or { notes = {} })
   seq_remap_pattern_notes_from_step(cloned, split_step, grid_qn)
   state.seq_patterns[tostring(new_pattern_id)] = cloned
 
-  if not seq_region_is_linked(region) then
+  if not linked then
     seq_prune_pattern_notes_from_step(src_pattern, split_step, grid_qn)
   end
 
   remove_seq_rendered_items(region)
+  local old_bars = region.length_bars
   region.length_bars = left_bars
 
   local right = {
@@ -35050,6 +35911,14 @@ function seq_split_region(region, split_qn, step_qn)
   state.seq_region_next_id = state.seq_region_next_id + 1
   table.insert(state.seq_regions, right)
   sort_seq_regions()
+  -- #region agent log
+  seq_debug_ndjson("C", "seq_split_region", "applied", {
+    left_id = region.id, right_id = right.id, snapped = snapped_qn,
+    old_bars = old_bars, left_bars = left_bars, right_bars = right_bars,
+    split_step = split_step, linked = linked, notes_before = note_count_before,
+    snap = seq_debug_region_snapshot(),
+  })
+  -- #endregion
   save_config()
   sync_seq_region(region)
   sync_seq_region(right)
@@ -35352,6 +36221,7 @@ function seq_build_visible_active_cells(start_qn, end_qn, step_qn, step_count)
       end
     end
   end
+  seq_finish_active_cells(active_cells)
   return active_cells
 end
 
@@ -35918,17 +36788,73 @@ function draw_seq_note_probability_skip(dl, x0, y0, x1, y1, alpha)
   r.ImGui_DrawList_AddLine(dl, x1 - pad, y0 + pad, x0 + pad, y1 - pad, color, 1.6)
 end
 
+function seq_draw_unfocused_note_marks(dl, active, row_y0, row_y1, selected_region_id, step_qn, qn_to_x, start_qn, col, base_color)
+  local pack = seq_active_cell_notes(active)
+  if not pack then
+    return
+  end
+  local cell_qn = (start_qn or 0.0) + (col or 0) * (step_qn or 0.25)
+  local cell_end = cell_qn + (step_qn or 0.25)
+  local br, bg, bb = extract_rgb_rrgbbaa(base_color or get_sample_dot_color(nil))
+  local mark = build_color_rrgbbaa(br, bg, bb, 88)
+  local y0 = row_y0 + 4.0
+  local y1 = row_y1 - 4.0
+  for pi = 1, #pack do
+    local entry = pack[pi]
+    if type(entry) == "table" and type(entry.note) == "table"
+        and entry.region_id ~= selected_region_id then
+      local vis = seq_entry_vis_qn(entry)
+      if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+        local x0 = qn_to_x(vis) + 1.0
+        local x1 = qn_to_x(cell_end) - 1.0
+        if x1 > x0 + 1.0 then
+          r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, mark, 0)
+        end
+      end
+    end
+  end
+end
+
+function seq_draw_lane_notes_lod(dl, active, row_y0, row_y1, selected_region_id, step_qn, qn_to_x, start_qn, col, base_color)
+  local pack = seq_active_cell_notes(active)
+  if not pack then
+    return
+  end
+  local cell_qn = (start_qn or 0.0) + (col or 0) * (step_qn or 0.25)
+  local cell_end = cell_qn + (step_qn or 0.25)
+  local br, bg, bb = extract_rgb_rrgbbaa(base_color or get_sample_dot_color(nil))
+  local block_y0 = row_y0 + 4.0
+  local block_y1 = row_y1 - 4.0
+  for pi = 1, #pack do
+    local entry = pack[pi]
+    local note = entry and entry.note
+    if type(note) == "table" and entry.region_id == selected_region_id then
+      local vis = seq_entry_vis_qn(entry)
+      if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+        local draw_x0 = qn_to_x(vis)
+        local draw_x1 = math.max(draw_x0 + 1.0, qn_to_x(vis + seq_note_lod_length_qn(note, step_qn)))
+        r.ImGui_DrawList_AddRectFilled(
+          dl, draw_x0, block_y0, draw_x1, block_y1,
+          build_color_rrgbbaa(br, bg, bb, 220), 0
+        )
+      end
+    end
+  end
+end
+
 function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, selected_region_id, now_t, step_qn, qn_to_x, edit_def, edit_style, mx, my, hover_on_razor, hover_qn, start_qn, col)
   local pack = seq_active_cell_notes(active)
   if not pack then
     return
   end
-  seq_pack_sort_later_on_top(pack)
-  local hover_pick = (not hover_on_razor) and seq_pick_packed_note(active, hover_qn, start_qn, col, step_qn) or nil
+  local hover_pick = nil
+  if (not hover_on_razor) and type(hover_qn) == "number" and my >= row_y0 and my <= row_y1 then
+    hover_pick = seq_pick_packed_note(active, hover_qn, start_qn, col, step_qn)
+  end
   for pi = 1, #pack do
     local entry = pack[pi]
     local note = entry.note
-    if type(note) == "table" then
+    if type(note) == "table" and entry.region_id == selected_region_id then
       local note_qn = entry.abs_qn or 0.0
       local note_off = note.offset_qn or 0.0
       -- Occupancy cells exist so hit-testing can find spanning stutter notes.
@@ -35942,8 +36868,9 @@ function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, 
       if not (note_fx and note_fx.kind == "delete") then
       local fx_t = note_fx and note_fx.t or 1.0
       local prob_region = get_seq_region_by_id(entry.region_id)
+      local draw_note = (seq_stutter_count(note) > 1) and seq_note_for_stutter_hit(note, 1) or note
       local vary_amt = seq_random_vary_amount(note, prob_region, slot.id, entry.key, 1)
-      local resolved_path, resolved_sample = seq_resolve_note_sample(note, slot, vary_amt, prob_region, slot.id, entry.key)
+      local resolved_path, resolved_sample = seq_resolve_note_sample(draw_note, slot, vary_amt, prob_region, slot.id, entry.key)
       local origin_path = seq_note_vary_origin_path(note, slot, prob_region)
       local origin_sample = find_sample_by_path(origin_path)
       local base = get_sample_dot_color(origin_sample or resolved_sample or find_sample_by_path(resolved_path or origin_path))
@@ -36497,20 +37424,33 @@ function seq_preset_can_generate(style_key)
     return false
   end
   local assigned_roles = {}
+  local fp_parts = { tostring(state.tag_index_epoch or 0), tostring(#(state.samples or {})) }
   for _, slot in ipairs(state.seq_tracks) do
     if slot.sample_path then
-      assigned_roles[infer_seq_track_role(slot)] = true
+      local role = infer_seq_track_role(slot)
+      assigned_roles[role] = true
+      fp_parts[#fp_parts + 1] = role
     end
   end
+  local fp = table.concat(fp_parts, "|")
+  local cache = state.seq_preset_can_generate_cache
+  local key = tostring(style_key or "")
+  if cache and cache.fp == fp and cache[key] ~= nil then
+    return cache[key]
+  end
+  if not cache or cache.fp ~= fp then
+    cache = { fp = fp }
+    state.seq_preset_can_generate_cache = cache
+  end
+  local ok = false
   for _, role in ipairs(roles) do
-    if assigned_roles[role] then
-      return true
-    end
-    if find_sample_for_role(role) then
-      return true
+    if assigned_roles[role] or find_sample_for_role(role) then
+      ok = true
+      break
     end
   end
-  return false
+  cache[key] = ok
+  return ok
 end
 
 -- Ensure a sequencer track exists for each role the preset needs. Missing roles
@@ -37023,6 +37963,17 @@ function seq_kit_unfreeze_slot_notes(slot)
     local track_notes = type(pattern) == "table" and type(pattern.notes) == "table" and pattern.notes[track_key]
     if type(track_notes) == "table" then
       for _, note in pairs(track_notes) do
+        if type(note) == "table" and type(note.source_offset) == "number" then
+          note.source_offset = nil
+          if type(note.stutter_hits) == "table" then
+            for _, hit in pairs(note.stutter_hits) do
+              if type(hit) == "table" then
+                hit.source_offset = nil
+              end
+            end
+          end
+          cleared = true
+        end
         if seq_note_has_frozen_sample and seq_note_has_frozen_sample(note) then
           seq_clear_frozen_sample(note)
           cleared = true
@@ -37031,6 +37982,82 @@ function seq_kit_unfreeze_slot_notes(slot)
     end
   end
   return cleared
+end
+
+function seq_release_sliced_notes_for_sample_change(slot, regions, sample)
+  if not slot or slot.id == nil then
+    return 0
+  end
+  local new_path = sample and sample.path
+  local new_name = sample and (sample.name or (new_path and basename(new_path)))
+  local n_sliced = 0
+  local n_locked = 0
+  local track_key = tostring(slot.id)
+
+  local function visit(note)
+    if type(note) ~= "table" then
+      return
+    end
+    if type(note.source_offset) ~= "number" then
+      return
+    end
+    if seq_note_is_locked and seq_note_is_locked(note) then
+      n_locked = n_locked + 1
+      return
+    end
+    note.source_offset = nil
+    if type(note.stutter_hits) == "table" then
+      for _, hit in pairs(note.stutter_hits) do
+        if type(hit) == "table" then
+          hit.source_offset = nil
+        end
+      end
+    end
+    if not note.picked_sample then
+      seq_clear_frozen_sample(note)
+    end
+    if new_path and new_path ~= "" then
+      note.sample_path = new_path
+      note.sample_name = new_name
+    end
+    n_sliced = n_sliced + 1
+  end
+
+  if type(regions) == "table" and #regions > 0 then
+    for i = 1, #regions do
+      local region = regions[i]
+      local pattern = get_seq_pattern(region and region.pattern_id, false)
+      local track_notes = get_track_note_table(pattern, slot.id, false)
+      if type(track_notes) == "table" then
+        for step_key, note in pairs(track_notes) do
+          if seq_note_in_region(region, note, step_key) then
+            visit(note)
+          end
+        end
+      end
+    end
+  else
+    for _, pattern in pairs(state.seq_patterns or {}) do
+      local track_notes = type(pattern) == "table" and type(pattern.notes) == "table"
+        and pattern.notes[track_key]
+      if type(track_notes) == "table" then
+        for _, note in pairs(track_notes) do
+          visit(note)
+        end
+      end
+    end
+  end
+
+  -- #region agent log
+  seq_debug_ndjson("H4", "seq_release_sliced_notes", "release", {
+    sliced = n_sliced,
+    locked_skip = n_locked,
+    has_path = (new_path and new_path ~= "") and 1 or 0,
+    file = tostring(new_path or ""):match("([^/\\]+)$") or "",
+    n_reg = type(regions) == "table" and #regions or 0,
+  })
+  -- #endregion
+  return n_sliced
 end
 
 function seq_kit_assign_sample(slot, sample)
@@ -37180,14 +38207,34 @@ function seq_truncate_text_to_width(text, max_w)
   local tw = select(1, r.ImGui_CalcTextSize(ctx, text))
   if tw <= max_w then return text end
   local ell = "..."
-  local len = #text
-  while len > 0 do
-    len = len - 1
-    local candidate = text:sub(1, len) .. ell
+  local lo, hi = 0, #text
+  local best = ell
+  while lo <= hi do
+    local mid = math.floor((lo + hi) * 0.5)
+    local candidate = text:sub(1, mid) .. ell
     tw = select(1, r.ImGui_CalcTextSize(ctx, candidate))
-    if tw <= max_w then return candidate end
+    if tw <= max_w then
+      best = candidate
+      lo = mid + 1
+    else
+      hi = mid - 1
+    end
   end
-  return ell
+  return best
+end
+
+-- True when a still-to-be-submitted list row intersects the current clip rect.
+function seq_pattern_list_item_visible(row_h)
+  local w = math.max(1.0, r.ImGui_GetContentRegionAvail(ctx))
+  local h = math.max(1.0, row_h or 1.0)
+  if r.ImGui_IsRectVisibleEx then
+    local x, y = r.ImGui_GetCursorScreenPos(ctx)
+    return r.ImGui_IsRectVisibleEx(ctx, x, y, x + w, y + h)
+  end
+  if r.ImGui_IsRectVisible then
+    return r.ImGui_IsRectVisible(ctx, w, h)
+  end
+  return true
 end
 
 -- Small pill label for inline badges (e.g. variation # tags).
@@ -37660,9 +38707,13 @@ function seq_gmd_sidecar_path()
 end
 
 function seq_gmd_available()
+  if state.seq_gmd_script_present ~= nil then
+    return state.seq_gmd_script_present
+  end
   local fh = io.open(seq_gmd_sidecar_path(), "r")
-  if fh then fh:close() return true end
-  return false
+  state.seq_gmd_script_present = fh ~= nil
+  if fh then fh:close() end
+  return state.seq_gmd_script_present
 end
 
 -- Call the Groove MIDI sidecar. Returns decoded table on success, or nil + err.
@@ -37865,10 +38916,40 @@ function seq_gmd_rebuild_groups()
       end
     end
     group.subgenre_by_name = nil
+    group.template_style = seq_pattern_match_template_for_gmd(group)
+    group.search_hay = seq_gmd_group_search_hay(group)
   end
   state.seq_gmd_groups = order
   state.seq_gmd_group_by_name = by_primary
+  state.seq_pattern_browser_cache_key = nil
+  state.seq_pattern_browser_cache = nil
   return order
+end
+
+function seq_gmd_group_search_hay(group)
+  local parts = {
+    tostring(group.label or ""),
+    tostring(group.name or ""),
+    "groove midi",
+  }
+  local template = group.template_style
+  if type(template) == "table" then
+    parts[#parts + 1] = tostring(template.label or template.key or "")
+    parts[#parts + 1] = tostring(template.key or "")
+    for _, role in ipairs(seq_template_roles(template.key)) do
+      parts[#parts + 1] = SEQ_ROLE_LABELS[role] or role
+    end
+  end
+  for _, child in ipairs(group.children or {}) do
+    parts[#parts + 1] = tostring(child.label or "")
+    parts[#parts + 1] = tostring(child.subgenre or "")
+    local item = child.item
+    if type(item) == "table" then
+      parts[#parts + 1] = tostring(item.drummer or "")
+      parts[#parts + 1] = tostring(item.bpm or "")
+    end
+  end
+  return table.concat(parts, " "):lower()
 end
 
 function seq_gmd_find_group(style_name)
@@ -38130,33 +39211,31 @@ end
 function seq_pattern_browser_entries()
   local raw = tostring(state.seq_pattern_search or "")
   local q = raw:lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if state.seq_gmd_ready then
+    seq_gmd_refresh_list(false)
+  end
+  local cache_key = q .. "|" .. tostring(state.seq_gmd_ready) .. "|" .. tostring(state.seq_gmd_list_key or "")
+  if state.seq_pattern_browser_cache_key == cache_key and type(state.seq_pattern_browser_cache) == "table" then
+    return state.seq_pattern_browser_cache
+  end
+
   local entries = {}
   local used_templates = {}
 
   if state.seq_gmd_ready then
-    seq_gmd_refresh_list(false)
     for _, group in ipairs(state.seq_gmd_groups or {}) do
-      local template = seq_pattern_match_template_for_gmd(group)
-      local hay = tostring(group.label or "") .. " " .. tostring(group.name or "") .. " groove midi"
+      local template = group.template_style
+      if not template then
+        template = seq_pattern_match_template_for_gmd(group)
+        group.template_style = template
+      end
       if template then
         used_templates[template.key] = true
-        hay = hay .. " " .. tostring(template.label or template.key) .. " " .. tostring(template.key)
-        for _, role in ipairs(seq_template_roles(template.key)) do
-          hay = hay .. " " .. (SEQ_ROLE_LABELS[role] or role)
-        end
       end
-      for _, child in ipairs(group.children or {}) do
-        hay = hay .. " " .. tostring(child.label or "")
-        local item = child.item
-        if type(item) == "table" then
-          hay = hay
-            .. " "
-            .. tostring(child.subgenre or "")
-            .. " "
-            .. tostring(item.drummer or "")
-            .. " "
-            .. tostring(item.bpm or "")
-        end
+      local hay = group.search_hay
+      if not hay then
+        hay = seq_gmd_group_search_hay(group)
+        group.search_hay = hay
       end
       if seq_pattern_query_matches(q, hay) then
         entries[#entries + 1] = {
@@ -38197,6 +39276,8 @@ function seq_pattern_browser_entries()
     end
     return a.sort < b.sort
   end)
+  state.seq_pattern_browser_cache_key = cache_key
+  state.seq_pattern_browser_cache = entries
   return entries
 end
 
@@ -38225,7 +39306,6 @@ function render_seq_gmd_toolbar()
     r.ImGui_SameLine(ctx)
     r.ImGui_TextColored(ctx, UI_THEME.text_dim, tostring(state.seq_gmd_status_msg))
   end
-  seq_gmd_refresh_list(false)
 end
 
 -- Shared hover-dice strip used by nested child rows.
@@ -38261,6 +39341,20 @@ function render_seq_gmd_preset_row(region, group, template_style)
   local has_children = seq_gmd_group_has_children(group, template_style)
   state.seq_gmd_expanded = state.seq_gmd_expanded or {}
   local expanded = state.seq_gmd_expanded[group.name] == true
+  local after_gap = (expanded and has_children) and 2.0 or 5.0
+  if not seq_pattern_list_item_visible(row_h + after_gap) then
+    r.ImGui_Dummy(ctx, 0, row_h + after_gap)
+    if expanded and has_children then
+      if template_style then
+        render_seq_pattern_nested_template_row(region, template_style, id_safe)
+      end
+      for _, child in ipairs(group.children or {}) do
+        render_seq_gmd_pattern_row(region, child, id_safe)
+      end
+      r.ImGui_Dummy(ctx, 0, 4.0)
+    end
+    return
+  end
 
   local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
   local x1, y1 = x0 + row_w, y0 + row_h
@@ -38384,6 +39478,12 @@ end
 -- Hard-coded preset nested as the first child under a same-named Groove MIDI parent.
 function render_seq_pattern_nested_template_row(region, style_def, parent_id_safe)
   if type(style_def) ~= "table" or not style_def.key then return end
+  local row_h = 30.0
+  local gap = 2.0
+  if not seq_pattern_list_item_visible(row_h + gap) then
+    r.ImGui_Dummy(ctx, 0, row_h + gap)
+    return
+  end
   local style_key = style_def.key
   local id_safe = tostring(parent_id_safe or "gmd") .. "_tmpl_" .. tostring(style_key):gsub("[^%w]", "_")
   local selected = state.seq_pattern_source ~= "gmd" and state.seq_gen_style == style_key
@@ -38391,7 +39491,6 @@ function render_seq_pattern_nested_template_row(region, style_def, parent_id_saf
   local indent = 16.0
   local avail = r.ImGui_GetContentRegionAvail(ctx)
   local row_w = math.max(1.0, avail - indent)
-  local row_h = 30.0
   local left_pad = 8.0
   local right_pad = 6.0
   local btn_size = 18.0
@@ -38494,11 +39593,16 @@ end
 
 function render_seq_pattern_preset_row(region, style_def)
   local style_key = style_def.key
-  local selected = state.seq_pattern_source ~= "gmd" and state.seq_gen_style == style_key
-  local can_generate = region and seq_preset_can_generate(style_key)
   local avail_w = r.ImGui_GetContentRegionAvail(ctx)
   local row_w = math.max(1.0, avail_w)
   local row_h = 34.0
+  local after_gap = 5.0
+  if not seq_pattern_list_item_visible(row_h + after_gap) then
+    r.ImGui_Dummy(ctx, 0, row_h + after_gap)
+    return
+  end
+  local selected = state.seq_pattern_source ~= "gmd" and state.seq_gen_style == style_key
+  local can_generate = region and seq_preset_can_generate(style_key)
   local left_pad = 10.0
   local right_pad = 8.0
 
@@ -38807,11 +39911,16 @@ end
 
 function render_seq_gmd_pattern_row(region, child, parent_id_safe)
   if type(child) ~= "table" or type(child.item) ~= "table" then return end
+  local row_h = 30.0
+  local gap = 2.0
+  if not seq_pattern_list_item_visible(row_h + gap) then
+    r.ImGui_Dummy(ctx, 0, row_h + gap)
+    return
+  end
   local item = child.item
   local indent = 16.0
   local avail = r.ImGui_GetContentRegionAvail(ctx)
   local row_w = math.max(1.0, avail - indent)
-  local row_h = 30.0
   local left_pad = 8.0
   local right_pad = 6.0
   local id = tostring(item.id or child.index or "")
@@ -40892,17 +42001,45 @@ function seq_draw_stutter_param_slices(dl, note, note_qn, def, step_qn, qn_to_x,
   return true
 end
 
+function seq_draw_param_lane_notes_lod(dl, ctx, active, def, selected_region_id, start_qn, col, step_qn, qn_to_x, lane_top, lane_bot, is_stutter_lane, lane_style)
+  local pack = seq_active_cell_notes(active)
+  if not pack then
+    return
+  end
+  local cell_qn = (start_qn or 0.0) + (col or 0) * (step_qn or 0.25)
+  local cell_end = cell_qn + (step_qn or 0.25)
+  for pi = 1, #pack do
+    local entry = pack[pi]
+    local note = entry and entry.note
+    if type(note) == "table" and entry.region_id == selected_region_id then
+      local vis = seq_entry_vis_qn(entry)
+      if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+        local value = note[def.key]
+        if value == nil then value = def.default end
+        local item_x0 = qn_to_x(vis)
+        local item_x1 = math.max(item_x0 + 1.0, qn_to_x(vis + seq_note_lod_length_qn(note, step_qn)))
+        local selected = true
+        local accent = lane_style.accent
+        if is_stutter_lane then
+          draw_seq_stutter_lane_cell(dl, ctx, item_x0, item_x1, lane_top, lane_bot, seq_param_value_for_drag(def, value, step_qn), accent)
+        else
+          draw_seq_param_value_bar(dl, item_x0, item_x1, lane_top, lane_bot, def, value, step_qn, accent, selected)
+        end
+      end
+    end
+  end
+end
+
 function seq_draw_param_lane_packed_notes(dl, ctx, slot, active, def, selected_region_id, start_qn, col, step_qn, qn_to_x, cx0, cx1, lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region)
   local pack = seq_active_cell_notes(active)
   if not pack then
     return
   end
-  seq_pack_sort_later_on_top(pack)
   for pi = 1, #pack do
     local entry = pack[pi]
     local note = entry.note
-    if type(note) == "table" then
-      local cell_selected = entry.region_id == selected_region_id
+    if type(note) == "table" and entry.region_id == selected_region_id then
+      local cell_selected = true
       local value = note[def.key]
       if value == nil then value = def.default end
       if def.key == "length_qn" then
@@ -41311,6 +42448,7 @@ function render_seq_vary_filter_input()
     seq_commit_vary_filter_edit()
   end
   r.ImGui_SetCursorScreenPos(ctx, restore_x, restore_y)
+  r.ImGui_Dummy(ctx, 0, 0)
 end
 
 function draw_seq_note_param_mode_overlay(dl, ctx, def, value, cx0, cx1, y0, y1, step_qn, accent, selected)
@@ -41359,7 +42497,7 @@ function seq_note_edit_mode_tooltip(def)
     return "Lock mode (" .. hotkey .. ")\nClick a note or empty cell to lock it\nDrag to lock a range of notes and empty grids\nRMB click a lock = unlock the whole area\nRMB drag = unlock only the cells you sweep"
   end
   if seq_is_vary_def(def) then
-    return "Variation mode (" .. hotkey .. ")\nLMB drag on notes = set how far the sample can wander on the map\nRMB drag on notes = reset to the track sample\n" .. shortcut_display("pick_note_sample") .. " = open the mini map and click a sample to swap the hovered note\nWith a razor, that swap applies to every note inside it"
+    return "Variation mode (" .. hotkey .. ")\nLMB drag on notes = set how far the sample can wander on the map\nOn stutter notes, each slice can be edited separately\nRMB drag on notes = reset to the track sample\n" .. shortcut_display("pick_note_sample") .. " = open the mini map and click a sample to swap the hovered note\nWith a razor, that swap applies to every note inside it"
   end
   if seq_is_vary_filter_def(def) then
     return "Vary filter mode (" .. hotkey .. ")\nClick or drag a grid area, type a word (lofi, robot…), then Enter\nVariation on those grids prefers matching filenames and tags\nRMB click a filter = clear the whole area\nRMB drag = clear only the cells you sweep"
@@ -41620,6 +42758,9 @@ function render_seq_top_toolbar()
   local groove_key = get_seq_region_groove(focus_region)
   local groove_active = groove_key ~= "off"
   local groove_label = get_seq_groove_chip_label(groove_key)
+  local drop_beacon = seq_stem_import_file_drag_active()
+  state.seq_stem_import_hover = false
+  local pat_btn_label = drop_beacon and (SEQ_STEM_IMPORT_DROP_LABEL or "Drop here to dissect drum pattern") or pattern_label
   local name_w = calc_compact_chip_width(region_chip) + 6
   if renaming then
     local typed = state.seq_region_rename.text or ""
@@ -41627,7 +42768,7 @@ function render_seq_top_toolbar()
     local tw = select(1, r.ImGui_CalcTextSize(ctx, measure)) or 0
     name_w = math.max(150, tw + 28)
   end
-  local pat_w = calc_compact_chip_width(pattern_label)
+  local pat_w = calc_compact_chip_width(pat_btn_label)
   local grv_w = calc_compact_chip_width(groove_label)
   local pocket_w = pocket_pad + pat_w + inner_gap + grv_w + pocket_pad
   local group_w = name_w + pocket_w
@@ -41757,15 +42898,22 @@ function render_seq_top_toolbar()
 
     local inner_y = gy + (btn_h - inner_h) * 0.5
     r.ImGui_SetCursorScreenPos(ctx, gx + name_w + pocket_pad, inner_y)
-    if draw_ui_button("seq_pattern_popup_open", pattern_label, nil, inner_h, {
+    if draw_ui_button("seq_pattern_popup_open", pat_btn_label, nil, inner_h, {
       compact = true,
-      style = "primary",
-      selected = state.seq_pattern_window_open,
+      style = drop_beacon and "accent" or "primary",
+      selected = drop_beacon or state.seq_pattern_window_open,
     }) then
-      open_seq_pattern_popup()
+      if not drop_beacon then
+        open_seq_pattern_popup()
+      end
     end
+    seq_stem_import_accept_file_drop()
     if r.ImGui_IsItemHovered(ctx) then
-      r.ImGui_SetTooltip(ctx, "Pattern for " .. region_name)
+      if drop_beacon then
+        r.ImGui_SetTooltip(ctx, "Drop an audio file to dissect its drum pattern")
+      else
+        r.ImGui_SetTooltip(ctx, "Pattern for " .. region_name)
+      end
     end
     r.ImGui_SameLine(ctx, 0, inner_gap)
     if draw_ui_button("seq_groove_popup_open", groove_label, nil, inner_h, {
@@ -41883,7 +43031,23 @@ function seq_get_project_first_measure()
   return 1
 end
 
-function collect_measure_guides_qn(start_qn, end_qn, max_guides)
+function seq_measure_guide_step(measure_px)
+  if not measure_px or measure_px >= 95 then
+    return 1
+  end
+  if measure_px < 12 then
+    return 32
+  elseif measure_px < 20 then
+    return 16
+  elseif measure_px < 35 then
+    return 8
+  elseif measure_px < 60 then
+    return 4
+  end
+  return 2
+end
+
+function collect_measure_guides_qn(start_qn, end_qn, max_guides, measure_step)
   local guides = {}
   if not r.TimeMap_GetMeasureInfo or not r.TimeMap2_timeToBeats then
     return guides
@@ -41895,6 +43059,7 @@ function collect_measure_guides_qn(start_qn, end_qn, max_guides)
   end
 
   max_guides = max_guides or 1024
+  measure_step = math.max(1, math.floor(measure_step or 1))
   local _, start_measure = r.TimeMap2_timeToBeats(0, start_time)
   if start_measure == nil then
     return guides
@@ -41902,6 +43067,9 @@ function collect_measure_guides_qn(start_qn, end_qn, max_guides)
 
   local first_measure = seq_get_project_first_measure()
   local measure = math.max(0, start_measure)
+  if measure_step > 1 then
+    measure = math.floor(measure / measure_step) * measure_step
+  end
   local guard = 0
   while guard < max_guides do
     local meas_time, qn_start, qn_end, ts_num, ts_den = r.TimeMap_GetMeasureInfo(0, measure)
@@ -41931,7 +43099,7 @@ function collect_measure_guides_qn(start_qn, end_qn, max_guides)
       }
     end
 
-    measure = measure + 1
+    measure = measure + measure_step
     guard = guard + 1
   end
 
@@ -43318,6 +44486,16 @@ function draw_seq_header_preview_waveform(dl, x, y, w, h, mx, my, left_down, lef
     local wheel = r.ImGui_GetMouseWheel and select(1, r.ImGui_GetMouseWheel(ctx)) or 0
     if wheel and wheel ~= 0 then
       wave_view_zoom(sample, duration, mx, inner_x, inner_w, wheel)
+      -- #region agent log
+      seq_debug_ndjson("D", "draw_seq_header_preview_waveform", "header wave zoom", {
+        wheel = wheel,
+        wave_t0 = state.wave_view_t0 or 0,
+        wave_t1 = state.wave_view_t1 or 0,
+        mx = mx, my = my, x = x, y = y, w = w, h = h,
+        time_mod = mod_active("time_zoom") and 1 or 0,
+        lane_mod = mod_active("lane_zoom") and 1 or 0,
+      })
+      -- #endregion
     end
   end
   if hovered and (mid_down or (alt and left_down)) and not (ctl and ctl.consumed) then
@@ -43800,12 +44978,1248 @@ function seq_apply_track_lane_resize_interaction(row_positions, mx, my, x0, widt
   end
 end
 
+function seq_stem_import_register_sample(path, name, tag, duration)
+  if not path or path == "" then
+    return nil
+  end
+  path = normalize_path(path)
+  local existing = find_sample_by_path(path)
+  if existing then
+    if duration and (not existing.duration or existing.duration <= 0) then
+      existing.duration = duration
+    end
+    return existing
+  end
+  local sample = {
+    path = path,
+    name = name or basename(path),
+    duration = duration,
+    tags = tag and { tag } or {},
+  }
+  samples_by_path[path] = sample
+  return sample
+end
+
+SEQ_STEM_IMPORT_ROLE = {
+  kick = "kick", snare = "snare", toms = "tom", hh = "hat",
+  ride = "ride", crash = "crash", drums = "perc",
+}
+SEQ_STEM_IMPORT_LABEL = {
+  kick = "Kick", snare = "Snare", toms = "Toms", hh = "Hats",
+  ride = "Ride", crash = "Crash", drums = "Drums",
+}
+SEQ_STEM_IMPORT_RGB = {
+  kick = {200, 60, 60},
+  snare = {230, 200, 80},
+  tom = {180, 100, 50},
+  hat = {200, 220, 90},
+  ride = {120, 200, 160},
+  crash = {90, 180, 220},
+  perc = {230, 180, 50},
+}
+
+function seq_stem_import_color_track(slot, role)
+  if not slot or not slot.reaper_track_guid then
+    return
+  end
+  local rgb = SEQ_STEM_IMPORT_RGB[role]
+  if not rgb then
+    return
+  end
+  local tr = get_track_by_guid(slot.reaper_track_guid)
+  if not tr then
+    return
+  end
+  local col
+  if r.ColorToNative then
+    col = r.ColorToNative(rgb[1], rgb[2], rgb[3]) | 0x1000000
+  else
+    col = 0x1000000 | (rgb[1] + rgb[2] * 256 + rgb[3] * 65536)
+  end
+  r.SetTrackColor(tr, col)
+end
+
+function seq_stem_import_slot_for_role(role, label)
+  for _, slot in ipairs(state.seq_tracks or {}) do
+    if classify_seq_role_text(slot.sample_tag) == role
+        or classify_seq_role_text(slot.name) == role then
+      return slot
+    end
+  end
+  local slot = create_seq_track_with_name(label)
+  if slot then
+    local tag = SEQ_ROLE_TAG_CANDIDATES[role] and SEQ_ROLE_TAG_CANDIDATES[role][1] or role
+    slot.sample_tag = tag
+    seq_stem_import_color_track(slot, role)
+  end
+  return slot
+end
+
+SEQ_STEM_HIT_DETECT = {
+  kick = {
+    peak_floor = 0.09,
+    novelty_percentile = 62,
+    percentile_mult = 1.28,
+    local_bar_mult = 1.5,
+    min_hit_gap = 0.085,
+  },
+  toms = {
+    peak_floor = 0.14,
+    novelty_percentile = 70,
+    percentile_mult = 1.4,
+    local_bar_mult = 1.65,
+    min_weight_frac = 0.55,
+  },
+  ride = {
+    peak_floor = 0.16,
+    novelty_percentile = 72,
+    percentile_mult = 1.45,
+    local_bar_mult = 1.7,
+    min_weight_frac = 0.52,
+  },
+  crash = {
+    peak_floor = 0.18,
+    novelty_percentile = 75,
+    percentile_mult = 1.5,
+    local_bar_mult = 1.8,
+    min_weight_frac = 0.48,
+  },
+}
+
+SEQ_STEM_QUIET_PEAK_RATIO = {
+  toms = 0.24,
+  ride = 0.22,
+  crash = 0.18,
+}
+
+SEQ_STEM_QUIET_ABS_PEAK = 0.0035
+
+function seq_stem_filter_weak_hits(onsets, key)
+  local cfg = SEQ_STEM_HIT_DETECT and SEQ_STEM_HIT_DETECT[key]
+  if type(cfg) ~= "table" or type(onsets) ~= "table" or #onsets == 0 then
+    return onsets
+  end
+  local frac = tonumber(cfg.min_weight_frac)
+  local min_w = tonumber(cfg.min_weight)
+  if not frac and not min_w then
+    return onsets
+  end
+  local max_w = 0.0
+  for i = 1, #onsets do
+    local w = tonumber(onsets[i].weight) or 0.0
+    if w > max_w then
+      max_w = w
+    end
+  end
+  local bar = 0.0
+  if frac then
+    bar = max_w * frac
+  end
+  if min_w and min_w > bar then
+    bar = min_w
+  end
+  local out = {}
+  for i = 1, #onsets do
+    if (tonumber(onsets[i].weight) or 0.0) >= bar then
+      out[#out + 1] = onsets[i]
+    end
+  end
+  if #out == 0 then
+    return onsets
+  end
+  return out
+end
+
+function seq_stem_kit_ref_peak(stats_by_key, key)
+  if type(stats_by_key) ~= "table" then
+    return 0.0
+  end
+  local function peak_of(name)
+    return stats_by_key[name] and tonumber(stats_by_key[name].peak) or 0.0
+  end
+  -- Toms leak from kick/snare. Cymbals leak from hats/snare.
+  if key == "toms" then
+    local kick = peak_of("kick")
+    local sn = peak_of("snare")
+    if kick > sn then
+      return kick
+    end
+    return sn
+  end
+  local hh = peak_of("hh")
+  local sn = peak_of("snare")
+  if hh > 1e-8 or sn > 1e-8 then
+    if hh > sn then
+      return hh
+    end
+    return sn
+  end
+  return peak_of("kick")
+end
+
+function seq_stem_cymbal_is_bleed(key, stats, ref_peak)
+  local ratio = SEQ_STEM_QUIET_PEAK_RATIO and SEQ_STEM_QUIET_PEAK_RATIO[key]
+  if not ratio or type(stats) ~= "table" then
+    return false
+  end
+  local peak = tonumber(stats.peak) or 0.0
+  local abs_floor = tonumber(SEQ_STEM_QUIET_ABS_PEAK) or 0.0035
+  if peak < abs_floor then
+    return true
+  end
+  ref_peak = tonumber(ref_peak) or 0.0
+  if ref_peak <= 1e-8 then
+    return false
+  end
+  return peak < ref_peak * ratio
+end
+
+function seq_stem_merge_close_hits(onsets, key)
+  if type(onsets) ~= "table" or #onsets == 0 then
+    return onsets or {}, 0, 0
+  end
+  local sorted = {}
+  for i = 1, #onsets do
+    sorted[i] = onsets[i]
+  end
+  table.sort(sorted, function(a, b)
+    return (a.time or 0) < (b.time or 0)
+  end)
+  local gaps = {
+    kick = 0.100,
+    snare = 0.070,
+    toms = 0.080,
+    hh = 0.040,
+    ride = 0.070,
+    crash = 0.120,
+    drums = 0.070,
+  }
+  local gap = gaps[key] or 0.070
+  local weak_gap, weak_frac = 0, 0
+  if key == "kick" then
+    weak_gap = 0.112
+    weak_frac = 0.82
+  end
+  local min_dt = 0
+  local close_n = 0
+  if #sorted >= 2 then
+    min_dt = 1e9
+    for i = 2, #sorted do
+      local dt = (sorted[i].time or 0) - (sorted[i - 1].time or 0)
+      if dt < min_dt then
+        min_dt = dt
+      end
+      if dt < gap then
+        close_n = close_n + 1
+      end
+    end
+  end
+  local out = { sorted[1] }
+  local merged = 0
+  for i = 2, #sorted do
+    local cur = sorted[i]
+    local prev = out[#out]
+    local dt = (cur.time or 0) - (prev.time or 0)
+    if dt < gap then
+      merged = merged + 1
+      local cw = tonumber(cur.weight) or tonumber(cur.raw) or 0
+      local pw = tonumber(prev.weight) or tonumber(prev.raw) or 0
+      if cw > pw then
+        prev.weight = cw
+      end
+    elseif weak_gap > 0 and dt < weak_gap then
+      local cw = tonumber(cur.weight) or tonumber(cur.raw) or 0
+      local pw = tonumber(prev.weight) or tonumber(prev.raw) or 0
+      local lo = cw
+      local hi = pw
+      if lo > hi then
+        lo = pw
+        hi = cw
+      end
+      if hi > 1e-9 and lo < hi * weak_frac then
+        merged = merged + 1
+        if cw > pw then
+          prev.weight = cw
+        end
+      else
+        out[#out + 1] = cur
+      end
+    else
+      out[#out + 1] = cur
+    end
+  end
+  local out_min = 0
+  if #out >= 2 then
+    out_min = 1e9
+    for i = 2, #out do
+      local dt = (out[i].time or 0) - (out[i - 1].time or 0)
+      if dt < out_min then
+        out_min = dt
+      end
+    end
+  end
+  -- #region agent log
+  seq_debug_ndjson("H1", "seq_stem_merge_close_hits", "merge", {
+    key = tostring(key or ""),
+    raw_n = #sorted,
+    out_n = #out,
+    merged = merged,
+    close_n = close_n,
+    gap = gap,
+    min_dt = min_dt,
+    out_min = out_min,
+  })
+  if key == "kick" and seq_debug_pack_close_hits then
+    local pre_n, pre_s = seq_debug_pack_close_hits(sorted, 0.18, 12)
+    local post_n, post_s = seq_debug_pack_close_hits(out, 0.18, 12)
+    seq_debug_ndjson("A", "seq_stem_merge_close_hits", "kick_pairs", {
+      pre_n = pre_n,
+      post_n = post_n,
+      raw_n = #sorted,
+      out_n = #out,
+      gap = gap,
+      weak_gap = weak_gap,
+      weak_frac = weak_frac,
+      pre = pre_s,
+      post = post_s,
+    })
+  end
+  -- #endregion
+  return out, merged, min_dt
+end
+
+function seq_stem_import_write_notes(region, slot, rec, place_time)
+  if not region or not slot or not rec or not rec.onsets then
+    return 0
+  end
+  local onsets = rec.onsets
+  local src_dur = rec.duration or 0.0
+  local region_start = region.start_qn or 0.0
+  local grid_qn = state.seq_grid_qn or 0.25
+  local n = 0
+  for i = 1, #onsets do
+    local t = onsets[i].time or 0.0
+    if t < 0 then t = 0.0 end
+    local next_t
+    if i < #onsets then
+      next_t = onsets[i + 1].time or (t + 0.12)
+    else
+      next_t = math.max(t + 0.12, src_dur)
+    end
+    if next_t <= t + 0.008 then
+      next_t = t + 0.08
+    end
+    local abs_qn = time_to_qn(place_time + t)
+    local next_qn = time_to_qn(place_time + next_t)
+    if abs_qn then
+      local qn_offset = abs_qn - region_start
+      if qn_offset < 0 then qn_offset = 0.0 end
+      local decay_qn = grid_qn
+      if next_qn and next_qn > abs_qn then
+        decay_qn = next_qn - abs_qn
+      end
+      local region_end = region_start + get_seq_region_length_qn(region)
+      if abs_qn + decay_qn > region_end then
+        decay_qn = math.max(grid_qn * 0.05, region_end - abs_qn)
+      end
+      local step_key = seq_alloc_note_key(region, slot.id, qn_offset)
+      set_seq_note(region, slot.id, step_key, {
+        enabled = true,
+        qn_offset = qn_offset,
+        step = math.floor((qn_offset / grid_qn) + 1e-9),
+        sample_path = rec.path,
+        sample_name = slot.sample_name or SEQ_STEM_IMPORT_LABEL[rec.key] or basename(rec.path),
+        frozen_sample_path = rec.path,
+        frozen_sample_name = slot.sample_name,
+        volume = 1.0,
+        pan = 0.0,
+        pitch = 0.0,
+        offset_qn = 0.0,
+        stretch = 1.0,
+        start = 0.0,
+        source_offset = t,
+        sample_vary = 0.0,
+        stutter = 1,
+        decay_qn = decay_qn,
+      })
+      -- #region agent log
+      if n < 4 then
+        local rt = qn_to_time(abs_qn)
+        seq_debug_ndjson("A", "seq_stem_import_write_notes", "hit", {
+          i = i,
+          t = t,
+          place = place_time or 0,
+          sum = (place_time or 0) + t,
+          abs_qn = abs_qn or 0,
+          qn_off = qn_offset or 0,
+          region_start = region_start or 0,
+          rt = rt or -1,
+          drift = (rt and ((place_time or 0) + t - rt)) or 0,
+          src_off = t,
+          key = rec.key or "",
+        })
+      end
+      -- #endregion
+      n = n + 1
+    end
+  end
+  -- #region agent log
+  if rec.key == "kick" and seq_debug_pack_close_hits then
+    local close_n, close_s = seq_debug_pack_close_hits(onsets, 0.18, 12)
+    seq_debug_ndjson("A", "seq_stem_import_write_notes", "kick_written", {
+      n = n,
+      close_n = close_n,
+      close = close_s,
+      dur = src_dur or 0,
+    })
+  end
+  -- #endregion
+  return n
+end
+
+function seq_stem_import_place(job, info)
+  local SM = SampleMapStemImport
+  if not SM or not job or not info then
+    return false, "Stem import backend missing."
+  end
+  local place_time = job.place_time or 0.0
+  local drums_path = info.stems and info.stems.drums
+  local drum_stems = info.drum_stems or {}
+  state._stem_dbg_n = 0
+  -- #region agent log
+  seq_debug_ndjson("D", "seq_stem_import_place", "script_ver", {
+    ver = 3,
+    kick_gap = 0.100,
+    min_hit_gap = (SEQ_STEM_HIT_DETECT and SEQ_STEM_HIT_DETECT.kick and SEQ_STEM_HIT_DETECT.kick.min_hit_gap) or 0,
+  })
+  -- #endregion
+
+  if r.PreventUIRefresh then r.PreventUIRefresh(1) end
+  local own = seq_undo_own_begin("Import drums from audio")
+
+  local idx = r.CountTracks(0)
+  r.InsertTrackAtIndex(idx, true)
+  local temp = r.GetTrack(0, idx)
+  if temp then
+    r.GetSetMediaTrackInfo_String(temp, "P_NAME", "Sample Map Stem Import", true)
+    r.SetMediaTrackInfo_Value(temp, "B_SHOWINMIXER", 0)
+    r.SetMediaTrackInfo_Value(temp, "B_SHOWINTCP", 0)
+  end
+
+  local drums_item, drums_len = nil, 0.0
+  if temp and drums_path then
+    drums_item, drums_len = SM.insert_wav(temp, drums_path, place_time)
+    if drums_item and job.tempo_map ~= false then
+      SM.tempo_map(drums_item)
+    end
+  end
+
+  local duration = (drums_len and drums_len > 0) and drums_len or (job.duration or 0.0)
+  local hits_by_key = {}
+  local kit_stats = {}
+  local order = SM.drum_order and SM.drum_order() or { "kick", "snare", "toms", "hh", "ride", "crash" }
+  if temp then
+    for _, key in ipairs(order) do
+      local wav = drum_stems[key]
+      if wav then
+        local item, item_len = SM.insert_wav(temp, wav, place_time)
+        if item then
+          local detect_opts = SEQ_STEM_HIT_DETECT and SEQ_STEM_HIT_DETECT[key] or nil
+          local onsets, stats = SM.detect_hits(item, detect_opts)
+          if type(stats) == "table" then
+            kit_stats[key] = stats
+          end
+          if onsets and #onsets > 0 then
+            if seq_stem_filter_weak_hits then
+              onsets = seq_stem_filter_weak_hits(onsets, key)
+            end
+            if seq_stem_merge_close_hits then
+              onsets = seq_stem_merge_close_hits(onsets, key)
+            end
+            if onsets and #onsets > 0 then
+              hits_by_key[key] = {
+                key = key,
+                path = wav,
+                onsets = onsets,
+                duration = (item_len and item_len > 0) and item_len or SM.file_duration(wav),
+                peak = stats and tonumber(stats.peak) or nil,
+              }
+            end
+          end
+          r.DeleteTrackMediaItem(temp, item)
+        end
+      end
+    end
+  end
+  -- #region agent log
+  do
+    local function n_of(k)
+      local rec = hits_by_key[k]
+      return (rec and rec.onsets and #rec.onsets) or 0
+    end
+    local kick = hits_by_key.kick
+    local close_n, close_s = 0, ""
+    if kick and seq_debug_pack_close_hits then
+      close_n, close_s = seq_debug_pack_close_hits(kick.onsets, 0.18, 12)
+    end
+    seq_debug_ndjson("B", "seq_stem_import_place", "kit", {
+      kick_n = n_of("kick"),
+      snare_n = n_of("snare"),
+      toms_n = n_of("toms"),
+      hh_n = n_of("hh"),
+      ride_n = n_of("ride"),
+      crash_n = n_of("crash"),
+      kick_close_n = close_n,
+      kick_close = close_s,
+      tempo = job.tempo_map ~= false,
+      min_hit_gap = (SEQ_STEM_HIT_DETECT and SEQ_STEM_HIT_DETECT.kick and SEQ_STEM_HIT_DETECT.kick.min_hit_gap) or 0,
+    })
+  end
+  -- #endregion
+  if seq_stem_cymbal_is_bleed then
+    for _, key in ipairs({ "toms", "ride", "crash" }) do
+      local ref_peak = seq_stem_kit_ref_peak(kit_stats, key)
+      if hits_by_key[key] and seq_stem_cymbal_is_bleed(key, kit_stats[key], ref_peak) then
+        hits_by_key[key] = nil
+      end
+    end
+  end
+  if not next(hits_by_key) and drums_path and drums_item then
+    local onsets = SM.detect_hits(drums_item)
+    if onsets and #onsets > 0 then
+      if seq_stem_merge_close_hits then
+        onsets = seq_stem_merge_close_hits(onsets, "drums")
+      end
+      hits_by_key.drums = {
+        key = "drums",
+        path = drums_path,
+        onsets = onsets,
+        duration = duration,
+      }
+    end
+  end
+
+  if temp then
+    r.DeleteTrack(temp)
+  end
+
+  local source_item = nil
+  if job.item_guid and SM.find_item_by_guid then
+    source_item = SM.find_item_by_guid(job.item_guid)
+  end
+  local have_hits = next(hits_by_key) ~= nil
+  local n_stems = 0
+  if job.place_mix_stems ~= false and SM.place_instrument_stems then
+    n_stems = SM.place_instrument_stems(info.stems, {
+      place_time = place_time,
+      source_item = source_item,
+      skip_drums = have_hits,
+    }) or 0
+  end
+  if source_item and SM.mute_item and job.mute_original ~= false
+      and (have_hits or n_stems > 0) then
+    SM.mute_item(source_item)
+  end
+
+  if not have_hits then
+    if own then end_seq_undo("Import drums from audio") end
+    if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+    r.UpdateArrange()
+    if n_stems > 0 then
+      return false, "No drum hits detected. Instrument stems were still placed."
+    end
+    return false, "No drum hits detected on the split stems."
+  end
+
+  local end_time = place_time + math.max(duration, 0.25)
+  local start_qn = time_to_qn(place_time) or 0.0
+  local bars = 4
+  if r.TimeMap2_timeToBeats then
+    local _, start_meas = r.TimeMap2_timeToBeats(0, place_time)
+    local _, end_meas = r.TimeMap2_timeToBeats(0, end_time)
+    if start_meas and end_meas and end_meas > start_meas then
+      bars = math.max(1, math.ceil(end_meas - start_meas + 0.05))
+    end
+  end
+  local region = create_seq_region(bars, nil, false, start_qn, true)
+  if region then
+    region.name = job.name or "Drums"
+    region.groove = "off"
+    state.selected_seq_region_id = region.id
+  end
+  -- #region agent log
+  do
+    local rt = qn_to_time(start_qn)
+    seq_debug_ndjson("D", "seq_stem_import_place", "region vs item", {
+      place_time = place_time or 0,
+      start_qn = start_qn or 0,
+      region_start = region and (region.start_qn or 0) or -1,
+      bars = bars or 0,
+      duration = duration or 0,
+      rt = rt or -1,
+      place_drift = (rt and (place_time - rt)) or 0,
+      engine = tostring(info.engine or ""),
+      split_start = job.backend and (tonumber(job.backend.start) or -1) or -1,
+    })
+  end
+  -- #endregion
+
+  local placed = 0
+  local keys = { "kick", "snare", "toms", "hh", "ride", "crash", "drums" }
+  for _, key in ipairs(keys) do
+    local rec = hits_by_key[key]
+    if rec then
+      local role = SEQ_STEM_IMPORT_ROLE[key] or "perc"
+      local label = SEQ_STEM_IMPORT_LABEL[key] or key
+      local slot = seq_stem_import_slot_for_role(role, label)
+      if slot then
+        local tag = SEQ_ROLE_TAG_CANDIDATES[role] and SEQ_ROLE_TAG_CANDIDATES[role][1] or role
+        local sample = seq_stem_import_register_sample(rec.path, label, tag, rec.duration)
+        if sample then
+          if region and slot.sample_path and slot.sample_path ~= "" and slot.sample_path ~= sample.path then
+            seq_assign_region_track_sample(region, slot, sample, false)
+          else
+            assign_sample_to_seq_track(slot, sample, false)
+          end
+        end
+        if region then
+          placed = placed + seq_stem_import_write_notes(region, slot, rec, place_time)
+        end
+      end
+    end
+  end
+
+  if region then
+    sync_seq_region(region)
+  end
+  save_config()
+  if save_seq_project_state then
+    save_seq_project_state()
+  end
+  if own then
+    end_seq_undo("Import drums from audio")
+  end
+  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+  r.UpdateArrange()
+  if info.warning and info.warning ~= "" then
+    return true, placed, info.warning
+  end
+  return true, placed
+end
+
+function seq_stem_import_file_drag_active()
+  if state.seq_stem_import then
+    return false
+  end
+  if sample_drag_active and sample_drag_active() then
+    return false
+  end
+  return state.seq_stem_import_hover == true
+end
+
+function seq_stem_import_classify_path(path)
+  local sample = find_sample_by_path(path) or lookup_sample_by_path(path)
+  local dur = 0.0
+  if SampleMapStemImport and SampleMapStemImport.file_duration then
+    dur = SampleMapStemImport.file_duration(path) or 0.0
+  end
+  if sample and type(sample.duration) == "number" and sample.duration > 0 then
+    dur = sample.duration
+  end
+  if not SampleMapStemImport or not SampleMapStemImport.classify_source then
+    return "auto", dur
+  end
+  local kind = SampleMapStemImport.classify_source(path, {
+    tags = sample and sample.tags,
+    sample_type = sample and sample.sample_type,
+    duration = dur,
+  })
+  return kind or "auto", dur
+end
+
+SEQ_STEM_IMPORT_DROP_LABEL = "Drop here to dissect drum pattern"
+
+function seq_stem_import_help_mark(id, tip)
+  r.ImGui_SameLine(ctx, 0, 8)
+  r.ImGui_InvisibleButton(ctx, "##stem_help_" .. tostring(id), 18, 18)
+  local x0, y0 = r.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = r.ImGui_GetItemRectMax(ctx)
+  local cx = (x0 + x1) * 0.5
+  local cy = (y0 + y1) * 0.5
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local col = hovered and (UI_THEME.accent or 0xFF4C8DFF) or (UI_THEME.text_dim or 0xFF8A93A3)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  r.ImGui_DrawList_AddCircle(dl, cx, cy, 7.2, col, 20, hovered and 1.6 or 1.25)
+  local qw, qh = r.ImGui_CalcTextSize(ctx, "?")
+  r.ImGui_DrawList_AddText(dl, cx - qw * 0.5, cy - qh * 0.5 - 1, col, "?")
+  if hovered and tip and tip ~= "" then
+    if r.ImGui_BeginTooltip then
+      r.ImGui_BeginTooltip(ctx)
+      if r.ImGui_PushTextWrapPos then
+        r.ImGui_PushTextWrapPos(ctx, 340)
+      end
+      r.ImGui_Text(ctx, tip)
+      if r.ImGui_PopTextWrapPos then
+        r.ImGui_PopTextWrapPos(ctx)
+      end
+      r.ImGui_EndTooltip(ctx)
+    elseif r.ImGui_SetTooltip then
+      r.ImGui_SetTooltip(ctx, tip)
+    end
+  end
+end
+
+function seq_stem_import_radio_row(id, choices, current)
+  for i = 1, #choices do
+    local choice = choices[i]
+    if i > 1 then
+      r.ImGui_SameLine(ctx, 0, 14)
+    end
+    if draw_ui_radio(id .. "_" .. tostring(choice.id), choice.label, current == choice.id) then
+      current = choice.id
+    end
+  end
+  return current
+end
+
+function seq_stem_import_offer(path, extra)
+  extra = extra or {}
+  if not path or path == "" then
+    return false
+  end
+  if state.seq_stem_import then
+    r.ShowMessageBox("A stem import is already running.", "Sequencer stem import", 0)
+    return false
+  end
+  local form = SampleMapStemImport and SampleMapStemImport.load_prefs
+    and SampleMapStemImport.load_prefs() or {}
+  if extra.model and extra.model ~= "" then
+    form.model = extra.model
+  end
+  if extra.source and extra.source ~= "" then
+    form.source = extra.source
+  end
+  if extra.shifts then
+    form.shifts = tonumber(extra.shifts) or form.shifts
+  end
+  if extra.overlap then
+    form.overlap = tonumber(extra.overlap) or form.overlap
+  end
+  if extra.split_drums ~= nil then
+    form.split_drums = extra.split_drums
+  end
+  if extra.place_mix_stems ~= nil then
+    form.place_mix_stems = extra.place_mix_stems
+  end
+  if extra.mute_original ~= nil then
+    form.mute_original = extra.mute_original
+  end
+  if extra.tempo_map ~= nil then
+    form.tempo_map = extra.tempo_map
+  end
+  state.seq_stem_import_dialog = {
+    path = path,
+    name = extra.name,
+    place_time = extra.place_time,
+    start = extra.start,
+    duration = extra.duration,
+    item_guid = extra.item_guid,
+    form = form,
+  }
+  if state.active_view ~= "sequencer" and not state.sequencer_floating then
+    state.active_view = "sequencer"
+  end
+  return true
+end
+
+function seq_stem_import_close_dialog()
+  state.seq_stem_import_dialog = nil
+end
+
+function seq_stem_import_commit_dialog()
+  local dlg = state.seq_stem_import_dialog
+  if not dlg or not dlg.path then
+    return false
+  end
+  local form = dlg.form or {}
+  form.source = form.source or "auto"
+  form.drums_only = form.source == "drums"
+  form.auto_skip_mix = form.source == "auto"
+  if SampleMapStemImport and SampleMapStemImport.save_prefs then
+    SampleMapStemImport.save_prefs(form)
+  end
+  local opts = {
+    name = dlg.name,
+    place_time = dlg.place_time,
+    start = dlg.start,
+    duration = dlg.duration,
+    item_guid = dlg.item_guid,
+    model = form.model,
+    source = form.source,
+    shifts = form.shifts,
+    overlap = form.overlap,
+    split_drums = form.split_drums,
+    place_mix_stems = form.place_mix_stems,
+    mute_original = form.mute_original,
+    tempo_map = form.tempo_map,
+    drums_only = form.drums_only,
+    auto_skip_mix = form.auto_skip_mix,
+  }
+  state.seq_stem_import_dialog = nil
+  return seq_stem_import_begin(dlg.path, opts)
+end
+
+function seq_stem_import_render_dialog()
+  local dlg = state.seq_stem_import_dialog
+  if not dlg or not ctx then
+    return
+  end
+  local form = dlg.form
+  if type(form) ~= "table" then
+    return
+  end
+  if r.ImGui_SetNextWindowSize then
+    r.ImGui_SetNextWindowSize(ctx, 430, 0, r.ImGui_Cond_Appearing and r.ImGui_Cond_Appearing() or 0)
+  end
+  if r.ImGui_SetNextWindowPos and state.main_window_rect then
+    local rect = state.main_window_rect
+    local cond = r.ImGui_Cond_Appearing and r.ImGui_Cond_Appearing() or 0
+    r.ImGui_SetNextWindowPos(ctx, rect.x + (rect.w or 0) * 0.5, rect.y + (rect.h or 0) * 0.42, cond, 0.5, 0.5)
+  end
+  local flags = 0
+  if r.ImGui_WindowFlags_AlwaysAutoResize then
+    flags = flags | r.ImGui_WindowFlags_AlwaysAutoResize()
+  end
+  if r.ImGui_WindowFlags_NoCollapse then
+    flags = flags | r.ImGui_WindowFlags_NoCollapse()
+  end
+  if r.ImGui_WindowFlags_NoDocking then
+    flags = flags | r.ImGui_WindowFlags_NoDocking()
+  end
+  local visible, open = r.ImGui_Begin(ctx, "Dissect drum pattern##stem_opts", true, flags)
+  if visible then
+    local file_name = dlg.name
+    if not file_name or file_name == "" then
+      file_name = tostring(dlg.path or ""):match("([^/\\]+)$") or dlg.path or ""
+    end
+    r.ImGui_TextColored(ctx, UI_THEME.text_dim or 0xFF8A93A3, file_name)
+    r.ImGui_Spacing(ctx)
+
+    r.ImGui_Text(ctx, "Model")
+    form.model = seq_stem_import_radio_row("stem_model", {
+      { id = "fast", label = "Fast" },
+      { id = "good", label = "Good" },
+      { id = "6stem", label = "6-stem" },
+    }, form.model or "good")
+    seq_stem_import_help_mark("model",
+      "Fast: quick split. Other can sound metallic.\n"
+        .. "Good: cleaner leftover stem. Best first try for ringing.\n"
+        .. "6-stem: also pulls guitar and piano out of Other.")
+
+    r.ImGui_Spacing(ctx)
+    r.ImGui_Text(ctx, "Source")
+    form.source = seq_stem_import_radio_row("stem_src", {
+      { id = "auto", label = "Auto" },
+      { id = "mix", label = "Mix" },
+      { id = "drums", label = "Drums" },
+    }, form.source or "auto")
+    seq_stem_import_help_mark("source",
+      "Auto: skip mix split when this already sounds like a drum loop.\n"
+        .. "Mix: always run Demucs (vocals, drums, bass, other).\n"
+        .. "Drums: treat the file as drums and only split the kit.")
+
+    r.ImGui_Spacing(ctx)
+    r.ImGui_Text(ctx, "Quality")
+    local shift_id = tostring(form.shifts or 2)
+    if shift_id ~= "1" and shift_id ~= "2" and shift_id ~= "4" then
+      shift_id = "2"
+    end
+    shift_id = seq_stem_import_radio_row("stem_shifts", {
+      { id = "1", label = "1" },
+      { id = "2", label = "2" },
+      { id = "4", label = "4" },
+    }, shift_id)
+    form.shifts = tonumber(shift_id) or 2
+    r.ImGui_SameLine(ctx, 0, 10)
+    r.ImGui_TextColored(ctx, UI_THEME.text_mute or 0xFF6B7380, "shifts")
+    seq_stem_import_help_mark("shifts",
+      "Extra Demucs passes, then averaged.\n"
+        .. "1: fastest.\n"
+        .. "2: less high, metallic ringing in Other. Recommended.\n"
+        .. "4: cleaner still, much slower.")
+
+    r.ImGui_Dummy(ctx, 1, 2)
+    local ov = tonumber(form.overlap) or 0.25
+    local ov_id = (ov >= 0.42) and "0.50" or ((ov >= 0.30) and "0.35" or "0.25")
+    ov_id = seq_stem_import_radio_row("stem_overlap", {
+      { id = "0.25", label = "0.25" },
+      { id = "0.35", label = "0.35" },
+      { id = "0.50", label = "0.50" },
+    }, ov_id)
+    form.overlap = tonumber(ov_id) or 0.25
+    r.ImGui_SameLine(ctx, 0, 10)
+    r.ImGui_TextColored(ctx, UI_THEME.text_mute or 0xFF6B7380, "overlap")
+    seq_stem_import_help_mark("overlap",
+      "How much adjacent chunks overlap.\n"
+        .. "0.25: default.\n"
+        .. "0.35–0.50: can soften metallic edges, a bit slower.")
+
+    r.ImGui_Spacing(ctx)
+    r.ImGui_Separator(ctx)
+    r.ImGui_Spacing(ctx)
+    r.ImGui_Text(ctx, "After split")
+    r.ImGui_Dummy(ctx, 1, 2)
+
+    local hit, val
+    hit, val = draw_ui_checkbox("stem_kit", "Split kit pieces", form.split_drums ~= false)
+    if hit then form.split_drums = val end
+    seq_stem_import_help_mark("kit",
+      "Split the drums stem into kick, snare, toms, hats, ride, and crash for the sequencer.")
+
+    hit, val = draw_ui_checkbox("stem_place", "Place mix stems", form.place_mix_stems ~= false)
+    if hit then form.place_mix_stems = val end
+    seq_stem_import_help_mark("place",
+      "Add vocals, bass, guitar, piano, and other as new tracks next to the original. Drums stay on the sequencer.")
+
+    hit, val = draw_ui_checkbox("stem_mute", "Mute original item", form.mute_original ~= false)
+    if hit then form.mute_original = val end
+    seq_stem_import_help_mark("mute",
+      "Mute the source audio item so you hear the stems and sequenced drums instead of the mix.")
+
+    hit, val = draw_ui_checkbox("stem_tempo", "Tempo map from drums", form.tempo_map ~= false)
+    if hit then form.tempo_map = val end
+    seq_stem_import_help_mark("tempo",
+      "Write project tempo from the drums stem so sequencer hits line up with the audio.")
+
+    r.ImGui_Spacing(ctx)
+    r.ImGui_Separator(ctx)
+    r.ImGui_Spacing(ctx)
+    if draw_ui_button("stem_opts_cancel", "Cancel", 100, 28, { compact = true }) then
+      seq_stem_import_close_dialog()
+    end
+    r.ImGui_SameLine(ctx)
+    if draw_ui_button("stem_opts_go", "Start", 120, 28, { compact = true, style = "primary" }) then
+      seq_stem_import_commit_dialog()
+    end
+  end
+  r.ImGui_End(ctx)
+  if open == false then
+    seq_stem_import_close_dialog()
+  end
+end
+
+function seq_stem_import_begin(path, opts)
+  opts = opts or {}
+  if state.seq_stem_import then
+    r.ShowMessageBox("A stem import is already running.", "Sequencer stem import", 0)
+    return false
+  end
+  if not SampleMapStemImport or not SampleMapStemImport.start_split then
+    r.ShowMessageBox("Stem import backend failed to load (SampleMapStemImport.lua).", "Sequencer stem import", 0)
+    return false
+  end
+  if not opts.model or opts.model == "" then
+    local prefs = SampleMapStemImport.load_prefs and SampleMapStemImport.load_prefs()
+    if prefs then
+      for k, v in pairs(prefs) do
+        if opts[k] == nil then
+          opts[k] = v
+        end
+      end
+    end
+  end
+  local place_time = tonumber(opts.place_time)
+  if not place_time then
+    place_time = 0.0
+    if state.seq_view_start_qn then
+      place_time = qn_to_time(state.seq_view_start_qn) or 0.0
+    end
+  end
+  local kind, file_dur = seq_stem_import_classify_path(path)
+  if opts.source == "mix" then
+    kind = "mix"
+  elseif opts.source == "drums" then
+    kind = "drums"
+  end
+  local dur = tonumber(opts.duration) or 0.0
+  if dur <= 0 then
+    dur = file_dur
+  end
+  local backend, err = SampleMapStemImport.start_split(path, {
+    model = opts.model,
+    shifts = opts.shifts,
+    overlap = opts.overlap,
+    drums_only = kind == "drums",
+    auto_skip_mix = kind == "auto",
+    split_drums = opts.split_drums,
+    duration = dur,
+    start = tonumber(opts.start) or 0.0,
+  })
+  -- #region agent log
+  seq_debug_ndjson("E", "seq_stem_import_begin", "begin split", {
+    kind = kind or "",
+    start = tonumber(opts.start) or 0.0,
+    duration = dur or 0.0,
+    place_time = place_time or 0.0,
+    file_dur = file_dur or 0.0,
+    has_opts_place = opts.place_time ~= nil,
+    path_tail = tostring(path or ""):match("([^/\\]+)$") or "",
+  })
+  -- #endregion
+  if not backend then
+    r.ShowMessageBox(err or "Could not start stem split.", "Sequencer stem import", 0)
+    return false
+  end
+  local msg = "Starting stem split…"
+  if kind == "drums" then
+    msg = "Drum loop — splitting kit pieces…"
+  elseif kind == "auto" then
+    msg = "Checking source, then splitting…"
+  end
+  if state.active_view ~= "sequencer" and not state.sequencer_floating then
+    state.active_view = "sequencer"
+  end
+  state.seq_stem_import = {
+    phase = "split",
+    backend = backend,
+    place_time = place_time,
+    name = (opts.name and opts.name ~= "" and opts.name) or backend.name,
+    duration = backend.duration or dur,
+    source_kind = kind,
+    item_guid = opts.item_guid,
+    mute_original = opts.mute_original ~= false,
+    place_mix_stems = opts.place_mix_stems ~= false,
+    tempo_map = opts.tempo_map ~= false,
+    pct = 0,
+    msg = msg,
+  }
+  return true
+end
+
+function seq_stem_import_tick()
+  -- Reload stem-import + tempo-map from disk each tick so extract picks up
+  -- file edits without depending on a stale live instance.
+  pcall(dofile, SCRIPT_DIR .. "/SampleMapStemImport.lua")
+  if SampleMapStemImport and SampleMapStemImport.install_browser_hooks then
+    SampleMapStemImport.install_browser_hooks()
+  end
+  local job = state.seq_stem_import
+  if not job then
+    return
+  end
+  if not SampleMapStemImport then
+    state.seq_stem_import = nil
+    return
+  end
+  if job.phase == "place" then
+    local ok, a, b = pcall(seq_stem_import_place, job, job.info)
+    state.seq_stem_import = nil
+    if not ok then
+      r.ShowMessageBox("Stem import failed:\n" .. tostring(a), "Sequencer stem import", 0)
+    elseif a == false then
+      r.ShowMessageBox(tostring(b or "Import produced no drum hits."), "Sequencer stem import", 0)
+    elseif type(b) == "string" and b ~= "" then
+      -- warning from drum split; still succeeded
+    end
+    return
+  end
+  if job.phase ~= "split" then
+    return
+  end
+  local status, a, b = SampleMapStemImport.poll(job.backend)
+  if status == "running" then
+    job.pct = a or 0
+    job.msg = (b and b ~= "" and b) or "Splitting stems…"
+    return
+  end
+  if status == "error" then
+    state.seq_stem_import = nil
+    r.ShowMessageBox(tostring(a or "Stem split failed."), "Sequencer stem import", 0)
+    return
+  end
+  job.phase = "place"
+  job.info = a
+  job.pct = 100
+  if a and a.engine == "drums-only" then
+    job.source_kind = "drums"
+  end
+  job.msg = "Detecting transients and mapping tempo…"
+end
+
+function seq_stem_import_poll_external_request()
+  if state.seq_stem_import then
+    return
+  end
+  if state.seq_stem_import_dialog then
+    return
+  end
+  if not SampleMapStemImport or not SampleMapStemImport.take_request then
+    return
+  end
+  local req = SampleMapStemImport.take_request()
+  if not req then
+    return
+  end
+  seq_stem_import_offer(req.path, req)
+end
+
+function seq_stem_import_draw_overlay(dl, x0, y0, x1, y1)
+  local job = state.seq_stem_import
+  if not job or not dl or not x0 then
+    return
+  end
+  local w = (x1 or x0) - x0
+  local h = (y1 or y0) - y0
+  if w < 40 or h < 24 then
+    return
+  end
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, 0xCC10141C, 0)
+  local pct = math.max(0, math.min(100, tonumber(job.pct) or 0)) / 100.0
+  local bar_w = math.min(360, w - 48)
+  local bar_x0 = x0 + (w - bar_w) * 0.5
+  local bar_y0 = y0 + h * 0.5 - 8
+  r.ImGui_DrawList_AddRectFilled(dl, bar_x0, bar_y0, bar_x0 + bar_w, bar_y0 + 16, 0xFF2A3140, 4)
+  r.ImGui_DrawList_AddRectFilled(dl, bar_x0, bar_y0, bar_x0 + bar_w * pct, bar_y0 + 16, UI_THEME.accent or 0xFF4C8DFF, 4)
+  local title = "Dissecting drum pattern"
+  if job.phase == "place" then
+    title = "Detecting transients and mapping tempo"
+  elseif job.source_kind == "drums" or (job.backend and job.backend.drums_only) then
+    title = "Splitting drum kit"
+  end
+  local tw = select(1, r.ImGui_CalcTextSize(ctx, title)) or 0
+  r.ImGui_DrawList_AddText(dl, x0 + (w - tw) * 0.5, bar_y0 - 28, 0xF2F6FAFF, title)
+  local msg = tostring(job.msg or "")
+  if msg ~= "" then
+    local mw = select(1, r.ImGui_CalcTextSize(ctx, msg)) or 0
+    r.ImGui_DrawList_AddText(dl, x0 + (w - mw) * 0.5, bar_y0 + 24, 0xAAB3C4FF, msg)
+  end
+end
+
+function seq_stem_import_payload_is_audio(path)
+  if not path or path == "" then
+    return false
+  end
+  if SampleMapStemImport and SampleMapStemImport.is_audio_path then
+    return SampleMapStemImport.is_audio_path(path)
+  end
+  local ext = tostring(path):match("%.([^%.]+)$")
+  ext = ext and ext:lower() or ""
+  return ext == "wav" or ext == "aif" or ext == "aiff" or ext == "flac"
+    or ext == "mp3" or ext == "ogg" or ext == "m4a" or ext == "wv"
+end
+
+function seq_stem_import_first_audio_from_payload(count)
+  local n = tonumber(count) or 0
+  if n < 1 then
+    n = 32
+  end
+  local i = 0
+  while i < n do
+    local ok, filename = r.ImGui_GetDragDropPayloadFile(ctx, i)
+    if not ok then
+      break
+    end
+    if seq_stem_import_payload_is_audio(filename) then
+      return filename
+    end
+    i = i + 1
+  end
+  return nil
+end
+
+function seq_stem_import_accept_file_drop()
+  if sample_drag_active and sample_drag_active() then
+    return
+  end
+  if state.seq_stem_import then
+    return
+  end
+  if not r.ImGui_BeginDragDropTarget or not r.ImGui_AcceptDragDropPayloadFiles then
+    return
+  end
+  if not r.ImGui_BeginDragDropTarget(ctx) then
+    return
+  end
+  local peek = 0
+  if r.ImGui_DragDropFlags_AcceptBeforeDelivery then
+    peek = peek | r.ImGui_DragDropFlags_AcceptBeforeDelivery()
+  end
+  if r.ImGui_DragDropFlags_AcceptNoDrawDefaultRect then
+    peek = peek | r.ImGui_DragDropFlags_AcceptNoDrawDefaultRect()
+  end
+  if r.ImGui_Col_DragDropTarget then
+    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_DragDropTarget(), 0x00000000)
+  end
+  local hovering, count = r.ImGui_AcceptDragDropPayloadFiles(ctx, peek)
+  if hovering then
+    state.seq_stem_import_hover = true
+    local delivered, dcount = r.ImGui_AcceptDragDropPayloadFiles(ctx)
+    if delivered then
+      local picked = seq_stem_import_first_audio_from_payload(dcount or count)
+      if picked then
+        seq_stem_import_offer(picked)
+      end
+    end
+  end
+  if r.ImGui_Col_DragDropTarget then
+    r.ImGui_PopStyleColor(ctx, 1)
+  end
+  r.ImGui_EndDragDropTarget(ctx)
+end
+
+-- ReaImGui only delivers OS file drops to an item that called BeginDragDropTarget.
+-- A click-through child covering the current window is the documented way to
+-- catch Finder/Explorer drops anywhere, while the pattern chip stays the visual.
+function seq_stem_import_install_os_drop_overlay()
+  if sample_drag_active and sample_drag_active() then
+    return
+  end
+  if state.seq_stem_import then
+    return
+  end
+  if state.seq_stem_import_dialog then
+    return
+  end
+  if not (r.ImGui_BeginChild and r.ImGui_GetWindowPos and r.ImGui_GetWindowSize) then
+    return
+  end
+  local wx, wy = r.ImGui_GetWindowPos(ctx)
+  local ww, wh = r.ImGui_GetWindowSize(ctx)
+  if not wx or not ww or ww < 8 or wh < 8 then
+    return
+  end
+  local cx, cy = r.ImGui_GetCursorScreenPos(ctx)
+  local win_flags = 0
+  if r.ImGui_WindowFlags_NoMouseInputs then
+    win_flags = win_flags | r.ImGui_WindowFlags_NoMouseInputs()
+  else
+    return
+  end
+  if r.ImGui_WindowFlags_NoScrollbar then
+    win_flags = win_flags | r.ImGui_WindowFlags_NoScrollbar()
+  end
+  if r.ImGui_WindowFlags_NoScrollWithMouse then
+    win_flags = win_flags | r.ImGui_WindowFlags_NoScrollWithMouse()
+  end
+  r.ImGui_SetCursorScreenPos(ctx, wx + 1, wy + 1)
+  local opened = r.ImGui_BeginChild(ctx, "##seq_os_file_drop", math.max(1, ww - 2), math.max(1, wh - 2), 0, win_flags)
+  if opened then
+    r.ImGui_EndChild(ctx)
+  end
+  seq_stem_import_accept_file_drop()
+  r.ImGui_SetCursorScreenPos(ctx, cx, cy)
+end
+
 function render_sequencer_map()
   seq_sec_per_qn = nil
   seq_decay_clear_hits()
   local region = get_selected_seq_region()
   local avail_x, avail_y = r.ImGui_GetContentRegionAvail(ctx)
   local width = math.max(720.0, avail_x)
+  -- #region agent log
+  state._seq_dbg_avail_x = avail_x
+  state._seq_dbg_width = width
+  -- #endregion
   seq_update_track_lane_h_drag()
   seq_sync_track_order_from_arrange()
   local lane_zoom = seq_lane_zoom_clamped()
@@ -43846,6 +46260,28 @@ function render_sequencer_map()
   end
 
   local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
+  -- Timeline zoom uses Shift+horizontal wheel; keep this child from also
+  -- panning horizontally so track controls / header stay fixed in screen space.
+  if r.ImGui_SetScrollX then
+    r.ImGui_SetScrollX(ctx, 0)
+    x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
+  end
+  -- #region agent log
+  do
+    local sx = (r.ImGui_GetScrollX and r.ImGui_GetScrollX(ctx)) or -1
+    local smax = (r.ImGui_GetScrollMaxX and r.ImGui_GetScrollMaxX(ctx)) or -1
+    local wx = (r.ImGui_GetWindowPos and select(1, r.ImGui_GetWindowPos(ctx))) or -1
+    local prev = state._seq_dbg_map_area_x0
+    if (not prev) or math.abs(x0 - prev) > 0.5 then
+      seq_debug_ndjson("B", "render_sequencer_map:map_area", "map area origin", {
+        x0 = x0, y0 = y0, scroll_x = sx, scroll_max_x = smax, win_x = wx,
+        runId = "post-fix",
+        fix = "main_content_noscroll",
+      })
+      state._seq_dbg_map_area_x0 = x0
+    end
+  end
+  -- #endregion
   local header_y1 = y0 + header_h
   -- Pin region lane + ruler at the top (outside the scrollable track list).
   -- Move the cursor without a Dummy so the header stays click-through for
@@ -43969,6 +46405,18 @@ function render_sequencer_map()
         state.seq_lane_h_drag = nil
         save_config()
       end
+      -- #region agent log
+      seq_debug_ndjson("A,D", "render_sequencer_map:wheel", "lane_zoom gesture", {
+        wheel = wheel, wheel_h = wheel_h,
+        lane_zoom = state.seq_lane_zoom or 0,
+        view_span = state.seq_view_span_qn or 0,
+        wave_t0 = state.wave_view_t0 or 0,
+        wave_t1 = state.wave_view_t1 or 0,
+        over_header_wave = over_header_wave and 1 or 0,
+        mx = mx, my = my, x0 = x0, y0 = y0,
+        label_w = label_w, width = width,
+      })
+      -- #endregion
     elseif (wheel ~= 0 and mod_active("time_zoom")) or shift_hzoom then
       local zoom_delta = shift_hzoom and -wheel_h or wheel
       if seq_apply_time_zoom(zoom_delta, mx, timeline_x0, timeline_w, view_start_qn, qn_span, step_qn) then
@@ -43977,6 +46425,22 @@ function render_sequencer_map()
         view_span_qn = state.seq_view_span_qn
         qn_span = view_span_qn
       end
+      -- #region agent log
+      seq_debug_ndjson("A,B,C,E", "render_sequencer_map:wheel", "time_zoom gesture", {
+        zoom_delta = zoom_delta or 0,
+        shift_hzoom = shift_hzoom and 1 or 0,
+        lane_zoom = state.seq_lane_zoom or 0,
+        view_span = state.seq_view_span_qn or 0,
+        view_start = state.seq_view_start_qn or 0,
+        wave_t0 = state.wave_view_t0 or 0,
+        wave_t1 = state.wave_view_t1 or 0,
+        width = width, label_w = label_w,
+        x0 = x0, timeline_x0 = timeline_x0, timeline_w = timeline_w,
+        font = (r.ImGui_GetFontSize and r.ImGui_GetFontSize(ctx)) or 0,
+        mx = mx, my = my,
+        runId = "post-fix",
+      })
+      -- #endregion
     elseif pan_wheel ~= 0 then
       if state.seq_follow_arrange then
         state.seq_drive_arrange = true
@@ -44000,7 +46464,32 @@ function render_sequencer_map()
     end
   end
 
-  local measure_guides = collect_measure_guides_qn(start_qn, end_qn, 1024)
+  -- #region agent log
+  do
+    local prev = state._seq_dbg_last_view or -1
+    if math.abs((view_start_qn or 0) - prev) > 0.01 then
+      seq_debug_ndjson("B,C", "render_sequencer_map.lua", "seq view after pan", {
+        avail_x = state._seq_dbg_avail_x or 0,
+        width = width,
+        timeline_w = timeline_w,
+        timeline_x0 = timeline_x0,
+        x0 = x0,
+        view_start_qn = view_start_qn or 0,
+        qn_span = qn_span or 0,
+        seq_view_span = state.seq_view_span_qn or 0,
+        arrange_span_qn = arrange_span_qn or 0,
+        start_qn = start_qn or 0,
+        end_qn = end_qn or 0,
+        follow = state.seq_follow_arrange and 1 or 0,
+        driving = seq_view_is_driving_arrange() and 1 or 0,
+      })
+      state._seq_dbg_last_view = view_start_qn or 0
+    end
+  end
+  -- #endregion
+
+  local approx_measure_px = (4.0 / math.max(qn_span, 0.001)) * timeline_w
+  local measure_guides = collect_measure_guides_qn(start_qn, end_qn, 256, seq_measure_guide_step(approx_measure_px))
   local active_cells = seq_build_visible_active_cells(start_qn, end_qn, step_qn, step_count)
   local selected_region_id = region.id
   local pattern = get_seq_pattern(region.pattern_id, true)
@@ -44026,6 +46515,19 @@ function render_sequencer_map()
   local function col_x0(col) return qn_to_x(start_qn + col * step_qn) end
   local function col_x1(col) return qn_to_x(start_qn + (col + 1) * step_qn) end
   local timeline_x1 = timeline_x0 + timeline_w
+  local cell_px = (qn_span > 0 and step_qn > 0) and ((step_qn / qn_span) * timeline_w) or 32.0
+  local seq_lod_skip_cell_grid = cell_px < 8.0
+  local seq_lod_simple_notes = cell_px < 24.0
+  local seq_grid_stride = 1
+  if cell_px > 0 and cell_px < 12.0 then
+    seq_grid_stride = math.max(1, math.floor(6.0 / cell_px + 0.5))
+  end
+  local vis_col0 = 0
+  local vis_col1 = step_count - 1
+  if step_qn > 0 then
+    vis_col0 = math.max(0, math.floor((view_start_qn - start_qn) / step_qn) - 1)
+    vis_col1 = math.min(step_count - 1, math.floor((view_start_qn + qn_span - start_qn) / step_qn) + 1)
+  end
   local function push_timeline_clip(clip_y0, clip_y1)
     if r.ImGui_DrawList_PushClipRect then
       r.ImGui_DrawList_PushClipRect(dl, timeline_x0, clip_y0, timeline_x1, clip_y1, true)
@@ -44067,25 +46569,9 @@ function render_sequencer_map()
   for i, guide in ipairs(measure_guides) do
     local px = qn_to_x(guide.qn_start)
     if px >= timeline_x0 and px <= timeline_x1 then
-      local next_guide = measure_guides[i + 1]
-      local measure_px = next_guide and math.abs(qn_to_x(next_guide.qn_start) - px) or (4.0 / qn_span) * timeline_w
-      local show_every = 1
-      if measure_px < 12 then
-        show_every = 32
-      elseif measure_px < 20 then
-        show_every = 16
-      elseif measure_px < 35 then
-        show_every = 8
-      elseif measure_px < 60 then
-        show_every = 4
-      elseif measure_px < 95 then
-        show_every = 2
-      end
       local measure_num = guide.display_measure or (guide.measure + 1)
-      if (guide.measure % show_every) == 0 then
-        r.ImGui_DrawList_AddLine(dl, px, measure_y0, px, header_y1, measure_line_clr, 1.0)
-        r.ImGui_DrawList_AddText(dl, px + 4, measure_y0 + 7, measure_label_clr, tostring(measure_num))
-      end
+      r.ImGui_DrawList_AddLine(dl, px, measure_y0, px, header_y1, measure_line_clr, 1.0)
+      r.ImGui_DrawList_AddText(dl, px + 4, measure_y0 + 7, measure_label_clr, tostring(measure_num))
     end
   end
   pop_timeline_clip(measure_header_clip)
@@ -44425,6 +46911,11 @@ function render_sequencer_map()
             undo_label = "Resize sequencer region",
             undo_started = false,
           }
+          -- #region agent log
+          seq_debug_ndjson("A", "region_drag_begin", "resize_left", {
+            id = hit.region.id, start = hit.region.start_qn or 0, bars = hit.region.length_bars or 0,
+          })
+          -- #endregion
         elseif hit.part == "right_edge" then
           seq_select_region(hit.region)
           region = hit.region
@@ -44434,6 +46925,11 @@ function render_sequencer_map()
             undo_label = "Resize sequencer region",
             undo_started = false,
           }
+          -- #region agent log
+          seq_debug_ndjson("A", "region_drag_begin", "resize_right", {
+            id = hit.region.id, start = hit.region.start_qn or 0, bars = hit.region.length_bars or 0,
+          })
+          -- #endregion
         elseif hit.part == "body" then
           if r.ImGui_IsMouseDoubleClicked(ctx, 0) then
             state.seq_region_drag = nil
@@ -44454,6 +46950,11 @@ function render_sequencer_map()
                 start_mx = mx,
                 start_my = my,
               }
+              -- #region agent log
+              seq_debug_ndjson("D", "region_drag_begin", "pool_copy", {
+                id = hit.region.id, start = hit.region.start_qn or 0,
+              })
+              -- #endregion
             else
               state.seq_region_drag = {
                 mode = "move",
@@ -44464,6 +46965,11 @@ function render_sequencer_map()
                 undo_label = "Move sequencer region",
                 undo_started = false,
               }
+              -- #region agent log
+              seq_debug_ndjson("B", "region_drag_begin", "move", {
+                id = hit.region.id, start = hit.region.start_qn or 0, bars = hit.region.length_bars or 0,
+              })
+              -- #endregion
             end
           end
         end
@@ -44486,6 +46992,11 @@ function render_sequencer_map()
             start_mx = mx,
             start_my = my,
           }
+          -- #region agent log
+          seq_debug_ndjson("D", "region_drag_begin", "create", {
+            start_qn = create_start_qn, len_qn = create_length_qn or 0, insert = create_insert and true or false,
+          })
+          -- #endregion
         end
       end
       end
@@ -44532,11 +47043,21 @@ function render_sequencer_map()
 
   if not r.ImGui_BeginChild(ctx, "sequencer_map_tracks", 0, math.max(0, tracks_avail_y), child_flags) then
     r.ImGui_EndChild(ctx)
+    r.ImGui_Dummy(ctx, 0, 0)
+    r.ImGui_EndChild(ctx)
     return
+  end
+  -- Allow vertical track scrolling, but never keep a horizontal pan — Shift+wheel
+  -- is reserved for timeline zoom and must not slide chrome sideways.
+  if r.ImGui_SetScrollX then
+    r.ImGui_SetScrollX(ctx, 0)
   end
 
   body_y0 = select(2, r.ImGui_GetCursorScreenPos(ctx))
   r.ImGui_Dummy(ctx, width, map_body_h)
+  if r.ImGui_SetItemAllowOverlap then
+    r.ImGui_SetItemAllowOverlap(ctx)
+  end
   body_y1 = body_y0 + map_body_h
 
   local hover_on_razor, razor_hover_track_id, razor_hover_qn = seq_compute_razor_hover(
@@ -44547,26 +47068,10 @@ function render_sequencer_map()
   r.ImGui_DrawList_AddRect(dl, x0, body_y0, x0 + width, body_y1, 0x40516AFF, 0, 0, 1.2)
   r.ImGui_DrawList_AddLine(dl, timeline_x0, body_y0, timeline_x0, body_y1, 0x70829CFF, 1.5)
 
-  for i, guide in ipairs(measure_guides) do
+  for _, guide in ipairs(measure_guides) do
     local px = qn_to_x(guide.qn_start)
     if px >= timeline_x0 and px <= timeline_x1 then
-      local next_guide = measure_guides[i + 1]
-      local measure_px = next_guide and math.abs(qn_to_x(next_guide.qn_start) - px) or (4.0 / qn_span) * timeline_w
-      local show_every = 1
-      if measure_px < 12 then
-        show_every = 32
-      elseif measure_px < 20 then
-        show_every = 16
-      elseif measure_px < 35 then
-        show_every = 8
-      elseif measure_px < 60 then
-        show_every = 4
-      elseif measure_px < 95 then
-        show_every = 2
-      end
-      if (guide.measure % show_every) == 0 then
-        r.ImGui_DrawList_AddLine(dl, px, body_y0, px, body_y1, measure_line_clr, 1.0)
-      end
+      r.ImGui_DrawList_AddLine(dl, px, body_y0, px, body_y1, measure_line_clr, 1.0)
     end
   end
 
@@ -44611,6 +47116,9 @@ function render_sequencer_map()
     local row_y1 = row_y0 + row.h
     row_positions[row_idx] = { y0 = row_y0, y1 = row_y1, row = row }
     cursor_y = row_y1
+    local row_visible = row_y1 >= (header_y1 - 24.0) and row_y0 <= (body_viewport_y1 + 24.0)
+    row_positions[row_idx].visible = row_visible
+    if row_visible then
 
     local lane_style = get_seq_row_lane_style(row)
     if row.type == "note" and edit_style then
@@ -44681,11 +47189,13 @@ function render_sequencer_map()
       )
 
       local note_clip = push_timeline_clip(row_y0, row_y1)
-      for col = 0, step_count - 1 do
-        local cx0 = col_x0(col)
-        local cx1 = col_x1(col)
-        if cx1 > timeline_x0 and cx0 < timeline_x1 and col % 2 == 1 then
-          r.ImGui_DrawList_AddRectFilled(dl, cx0, row_y0, cx1, row_y1, seq_lane_color_with_alpha(lane_style.accent, 16), 0)
+      if not seq_lod_skip_cell_grid then
+        for col = vis_col0, vis_col1 do
+          if col % 2 == 1 then
+            local cx0 = col_x0(col)
+            local cx1 = col_x1(col)
+            r.ImGui_DrawList_AddRectFilled(dl, cx0, row_y0, cx1, row_y1, seq_lane_color_with_alpha(lane_style.accent, 16), 0)
+          end
         end
       end
       -- Shift insert preview is drawn under notes so a later hit stays on top.
@@ -44717,21 +47227,33 @@ function render_sequencer_map()
           end
         end
       end
-      for col = 0, step_count - 1 do
-        local cx0 = col_x0(col)
-        local cx1 = col_x1(col)
-        -- Skip cells fully outside the visible timeline (continuous scroll pads extras).
-        if cx1 > timeline_x0 and cx0 < timeline_x1 then
-        local active = active_cells[slot.id] and active_cells[slot.id][col]
-        if active then
-          seq_draw_lane_packed_notes(
-            dl, slot, active, row_y0, row_y1, cx0, cx1,
-            selected_region_id, now_t, step_qn, qn_to_x,
-            edit_def, edit_style, mx, my, hover_on_razor,
-            seq_x_to_qn(mx, timeline_x0, timeline_w, view_start_qn, qn_span),
-            start_qn, col
+      local row_hover_qn = nil
+      if hovered and mx >= timeline_x0 and mx <= timeline_x1 and my >= row_y0 and my <= row_y1 then
+        row_hover_qn = seq_x_to_qn(mx, timeline_x0, timeline_w, view_start_qn, qn_span)
+      end
+      local track_note_color = get_sample_dot_color(
+        (slot.sample_path and find_sample_by_path(slot.sample_path))
+        or seq_effective_slot_sample(slot, region)
+      )
+      local slot_cells = active_cells[slot.id]
+      for col = vis_col0, vis_col1 do
+        local active = slot_cells and slot_cells[col]
+        if active and seq_active_cell_has_visual_start(active, start_qn, col, step_qn) then
+          seq_draw_unfocused_note_marks(
+            dl, active, row_y0, row_y1, selected_region_id, step_qn, qn_to_x, start_qn, col, track_note_color
           )
-        end
+          if seq_lod_simple_notes then
+            seq_draw_lane_notes_lod(
+              dl, active, row_y0, row_y1, selected_region_id, step_qn, qn_to_x, start_qn, col, track_note_color
+            )
+          else
+            seq_draw_lane_packed_notes(
+              dl, slot, active, row_y0, row_y1, col_x0(col), col_x1(col),
+              selected_region_id, now_t, step_qn, qn_to_x,
+              edit_def, edit_style, mx, my, hover_on_razor,
+              row_hover_qn, start_qn, col
+            )
+          end
         end
       end
       seq_draw_lane_delete_anims(
@@ -44740,20 +47262,26 @@ function render_sequencer_map()
       )
       local lock_hover_col = nil
       local filter_hover_col = nil
-      if hovered and mx >= timeline_x0 and mx <= timeline_x0 + timeline_w
+      local draw_locks = (not seq_lod_skip_cell_grid) or seq_is_lock_def(edit_def)
+      local draw_filters = (not seq_lod_skip_cell_grid) or seq_is_vary_filter_def(edit_def)
+      if (draw_locks or draw_filters) and hovered and mx >= timeline_x0 and mx <= timeline_x0 + timeline_w
           and my >= row_y0 and my <= row_y1 and not hover_on_razor then
-        local lock_hover_qn = seq_x_to_qn(mx, timeline_x0, timeline_w, view_start_qn, qn_span)
+        local lock_hover_qn = row_hover_qn or seq_x_to_qn(mx, timeline_x0, timeline_w, view_start_qn, qn_span)
         lock_hover_col = math.max(0, math.min(step_count - 1, math.floor((lock_hover_qn - start_qn) / step_qn + 1e-9)))
         filter_hover_col = lock_hover_col
-        if not seq_visible_cell_is_locked(slot, lock_hover_col, start_qn, step_qn, active_cells) then
+        if draw_locks and not seq_visible_cell_is_locked(slot, lock_hover_col, start_qn, step_qn, active_cells) then
           lock_hover_col = nil
         end
-        if not seq_vary_filter_cell_key(slot, filter_hover_col, start_qn, step_qn) then
+        if draw_filters and not seq_vary_filter_cell_key(slot, filter_hover_col, start_qn, step_qn) then
           filter_hover_col = nil
         end
       end
-      draw_seq_lock_spans(dl, slot, row_y0, row_y1, start_qn, step_qn, step_count, col_x0, col_x1, timeline_x0, timeline_x1, active_cells, seq_is_lock_def(edit_def), lock_hover_col)
-      draw_seq_vary_filter_spans(dl, ctx, slot, row_y0, row_y1, start_qn, step_qn, step_count, col_x0, col_x1, timeline_x0, timeline_x1, seq_is_vary_filter_def(edit_def), filter_hover_col)
+      if draw_locks then
+        draw_seq_lock_spans(dl, slot, row_y0, row_y1, start_qn, step_qn, step_count, col_x0, col_x1, timeline_x0, timeline_x1, active_cells, seq_is_lock_def(edit_def), lock_hover_col)
+      end
+      if draw_filters then
+        draw_seq_vary_filter_spans(dl, ctx, slot, row_y0, row_y1, start_qn, step_qn, step_count, col_x0, col_x1, timeline_x0, timeline_x1, seq_is_vary_filter_def(edit_def), filter_hover_col)
+      end
       pop_timeline_clip(note_clip)
     elseif row.type == "param" and slot and row.param then
       local def = row.param
@@ -44780,25 +47308,32 @@ function render_sequencer_map()
       end
 
       local param_clip = push_timeline_clip(row_y0, row_y1)
-      for col = 0, step_count - 1 do
+      local slot_cells = active_cells[slot.id]
+      for col = vis_col0, vis_col1 do
         local cx0 = col_x0(col)
         local cx1 = col_x1(col)
-        if cx1 > timeline_x0 and cx0 < timeline_x1 then
-        if col % 2 == 1 then
+        if not seq_lod_skip_cell_grid and col % 2 == 1 then
           r.ImGui_DrawList_AddRectFilled(dl, cx0, row_y0, cx1, row_y1, seq_lane_color_with_alpha(lane_style.accent, 16), 0)
         end
-        local active = active_cells[slot.id] and active_cells[slot.id][col]
-        if active then
-          seq_draw_param_lane_packed_notes(
-            dl, ctx, slot, active, def, selected_region_id, start_qn, col, step_qn,
-            qn_to_x, cx0, cx1, lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region
-          )
-        end
+        local active = slot_cells and slot_cells[col]
+        if active and seq_active_cell_has_visual_start(active, start_qn, col, step_qn) then
+          if seq_lod_simple_notes then
+            seq_draw_param_lane_notes_lod(
+              dl, ctx, active, def, selected_region_id, start_qn, col, step_qn,
+              qn_to_x, lane_top, lane_bot, is_stutter_lane, lane_style
+            )
+          else
+            seq_draw_param_lane_packed_notes(
+              dl, ctx, slot, active, def, selected_region_id, start_qn, col, step_qn,
+              qn_to_x, cx0, cx1, lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region
+            )
+          end
         end
       end
       pop_timeline_clip(param_clip)
     else
       r.ImGui_DrawList_AddText(dl, x0 + 8, row_y0 + 8, UI_THEME.text_dim, "No sequencer tracks configured")
+    end
     end
   end
 
@@ -44811,6 +47346,36 @@ function render_sequencer_map()
   local map_icon_size = seq_icon_size_for_lane_h(note_lane_h)
   local map_ctrl_size = seq_ctrl_size_for_icon(map_icon_size)
   local map_nav_w = get_seq_track_sample_controls_width(map_ctrl_size, map_icon_size)
+  -- #region agent log
+  do
+    local sx = (r.ImGui_GetScrollX and r.ImGui_GetScrollX(ctx)) or 0
+    local sy = (r.ImGui_GetScrollY and r.ImGui_GetScrollY(ctx)) or 0
+    local prev = state._seq_dbg_chrome
+    local span = state.seq_view_span_qn or 0
+    local lane_z = state.seq_lane_zoom or 1
+    local changed = (not prev)
+      or math.abs((prev.span or 0) - span) > 0.05
+      or math.abs((prev.lane or 0) - lane_z) > 0.01
+      or math.abs((prev.width or 0) - width) > 0.5
+      or math.abs((prev.sx or 0) - sx) > 0.5
+      or math.abs((prev.icon or 0) - map_icon_size) > 0.5
+    if changed then
+      seq_debug_ndjson("B,C,E,F", "render_sequencer_map:chrome", "chrome metrics", {
+        width = width, label_w = label_w, x0 = x0, y0 = y0,
+        timeline_x0 = timeline_x0, timeline_w = timeline_w,
+        lane_zoom = lane_z, note_lane_h = note_lane_h,
+        map_icon_size = map_icon_size, map_ctrl_size = map_ctrl_size, map_nav_w = map_nav_w,
+        view_span = span, scroll_x = sx, scroll_y = sy,
+        font = (r.ImGui_GetFontSize and r.ImGui_GetFontSize(ctx)) or 0,
+        wave_t0 = state.wave_view_t0 or 0,
+        wave_t1 = state.wave_view_t1 or 0,
+      })
+      state._seq_dbg_chrome = {
+        span = span, lane = lane_z, width = width, sx = sx, icon = map_icon_size,
+      }
+    end
+  end
+  -- #endregion
   local over_lane_mix_controls = false
   local mix_env_resync = false
   local env_resync_slot = nil
@@ -44837,20 +47402,40 @@ function render_sequencer_map()
       local fill = seq_region_pool_color(reg.pool_id, selected and 32 or (link_hl and 40 or 8))
       local edge = link_hl and 0xFFE599FF or seq_region_pool_color(reg.pool_id, selected and 255 or 100)
       r.ImGui_DrawList_AddRectFilled(dl, rx0, body_y0, rx1, body_y1, fill, 0)
-      if not selected and not link_hl then
-        r.ImGui_DrawList_AddRectFilled(dl, rx0, body_y0, rx1, body_y1, 0x00000048, 0)
-      end
       r.ImGui_DrawList_AddLine(dl, rx0, body_y0, rx0, body_y1, edge, (selected or link_hl) and 2.5 or 1.5)
       r.ImGui_DrawList_AddLine(dl, rx1, body_y0, rx1, body_y1, edge, (selected or link_hl) and 2.0 or 1.0)
+      -- #region agent log
+      if selected then
+        local prev_rx1 = state._seq_dbg_last_rx1
+        if (not prev_rx1) or math.abs(rx1 - prev_rx1) > 0.5 then
+          seq_debug_ndjson("D,C", "render_sequencer_map.lua", "seq region right bound", {
+            rx0 = rx0,
+            rx1 = rx1,
+            raw_rx1 = qn_to_x(reg_end),
+            timeline_x1 = timeline_x1,
+            timeline_w = timeline_w,
+            clamped = (rx1 >= timeline_x1 - 0.5) and 1 or 0,
+            reg_start = reg_start,
+            reg_end = reg_end,
+            view_start_qn = view_start_qn or 0,
+            qn_span = qn_span or 0,
+            region_w = rx1 - rx0,
+          })
+          state._seq_dbg_last_rx1 = rx1
+        end
+      end
+      -- #endregion
     end
   end
 
-  for col = 0, step_count do
-    local qn = start_qn + col * step_qn
-    local px = qn_to_x(qn)
-    if px >= timeline_x0 and px <= timeline_x1 then
-      local clr = (math.abs(qn - math.floor(qn + 0.5)) < 0.0001) and 0x45505EFF or 0x2A303AFF
-      r.ImGui_DrawList_AddLine(dl, px, body_y0, px, body_y1, clr, 1.0)
+  if not seq_lod_skip_cell_grid then
+    for col = vis_col0, vis_col1 + 1, seq_grid_stride do
+      local qn = start_qn + col * step_qn
+      local px = qn_to_x(qn)
+      if px >= timeline_x0 and px <= timeline_x1 then
+        local clr = (math.abs(qn - math.floor(qn + 0.5)) < 0.0001) and 0x45505EFF or 0x2A303AFF
+        r.ImGui_DrawList_AddLine(dl, px, body_y0, px, body_y1, clr, 1.0)
+      end
     end
   end
   pop_timeline_clip(body_clip)
@@ -45806,6 +48391,19 @@ function render_sequencer_map()
   end
   if r.ImGui_IsMouseReleased(ctx, 0) and state.seq_region_drag then
     local drag = state.seq_region_drag
+    -- #region agent log
+    seq_debug_ndjson("B,A,D", "region_drag_commit", "release", {
+      mode = drag.mode or "?",
+      region_id = drag.region_id or drag.source_region_id or -1,
+      preview = drag.preview_start_qn or -1,
+      swap_id = drag.swap_region_id or -1,
+      orig = drag.orig_start_qn or -1,
+      insert_qn = drag.insert_qn or drag.current_start_qn or -1,
+      start_qn = drag.start_qn or -1,
+      current_qn = drag.current_qn or -1,
+      snap = seq_debug_region_snapshot(),
+    })
+    -- #endregion
     if drag.mode == "move" then
       local reg = get_seq_region_by_id(drag.region_id)
       local swap = drag.swap_region_id and get_seq_region_by_id(drag.swap_region_id)
@@ -45857,6 +48455,12 @@ function render_sequencer_map()
     elseif drag.undo_label and (drag.undo_started or seq_undo_is_open()) then
       end_seq_undo(drag.undo_label)
     end
+    -- #region agent log
+    seq_debug_ndjson("B,A,D", "region_drag_commit", "after", {
+      mode = drag.mode or "?",
+      snap = seq_debug_region_snapshot(),
+    })
+    -- #endregion
     state.seq_region_drag = nil
   end
   if mouse_released then
@@ -46014,7 +48618,7 @@ function render_sequencer_map()
   end
   for _, row_pos in ipairs(row_positions) do
     local row = row_pos.row
-    if row.type == "note" and row.slot then
+    if row_pos.visible and row.type == "note" and row.slot then
       local track_idx = slot_id_to_idx[row.slot.id]
       if track_idx then
         if random_edit_region and random_edit_pattern then
@@ -46129,6 +48733,30 @@ function render_sequencer_map()
   end
 
   r.ImGui_Dummy(ctx, width, 0)
+  -- #region agent log
+  do
+    local sx = (r.ImGui_GetScrollX and r.ImGui_GetScrollX(ctx)) or -1
+    local smax = (r.ImGui_GetScrollMaxX and r.ImGui_GetScrollMaxX(ctx)) or -1
+    local ww = (r.ImGui_GetWindowWidth and r.ImGui_GetWindowWidth(ctx)) or -1
+    local cx = select(1, r.ImGui_GetCursorScreenPos(ctx))
+    local prev_x0 = state._seq_dbg_last_x0
+    if (not prev_x0) or math.abs(x0 - prev_x0) > 0.5 or math.abs(sx - (state._seq_dbg_last_sx or -999)) > 0.5 then
+      seq_debug_ndjson("A,E", "render_sequencer_map.lua", "seq tracks dummy corner", {
+        dummy_x = x0 + math.max(1.0, width),
+        cursor_x = cx or 0,
+        x0 = x0,
+        width = width,
+        scroll_x = sx,
+        scroll_max_x = smax,
+        win_w = ww,
+        inner_right = (x0 + (ww > 0 and ww or width)),
+        timeline_x1 = (timeline_x0 or x0) + (timeline_w or 0),
+      })
+      state._seq_dbg_last_sx = sx
+      state._seq_dbg_last_x0 = x0
+    end
+  end
+  -- #endregion
 
   render_seq_add_track_popup()
   r.ImGui_EndChild(ctx)
@@ -46168,7 +48796,10 @@ function render_sequencer_map()
   end
 
   render_seq_pattern_popup(region)
+  r.ImGui_Dummy(ctx, 0, 0)
   r.ImGui_EndChild(ctx)
+  seq_stem_import_accept_file_drop()
+  seq_stem_import_draw_overlay(dl, x0, y0, x0 + width, body_viewport_y1 or (y0 + 120))
 end
 
 
@@ -47770,16 +50401,13 @@ function render_view_tab_switcher()
     { id = "sample_map", label = "Sample Map", icon = draw_sample_map_icon },
     { id = "sequencer", label = "Sequencer", icon = draw_sequencer_icon },
   }
+  local expand_w = 16
+  local expand_gap = 4
   local widths = {}
   local total_w = track_pad * 2 + tab_gap * (#tabs - 1)
   for i, tab in ipairs(tabs) do
     local text_w = r.ImGui_CalcTextSize(ctx, tab.label)
-    widths[i] = pad_x + icon_size + icon_text_gap + text_w + pad_x
-    local floating = (tab.id == "sample_map" and state.sample_map_floating)
-      or (tab.id == "sequencer" and state.sequencer_floating)
-    if floating then
-      widths[i] = widths[i] + 12
-    end
+    widths[i] = pad_x + icon_size + icon_text_gap + text_w + expand_gap + expand_w + pad_x
     total_w = total_w + widths[i]
   end
 
@@ -47801,15 +50429,31 @@ function render_view_tab_switcher()
     local x1, y1 = r.ImGui_GetItemRectMax(ctx)
     local hovered = r.ImGui_IsItemHovered(ctx)
     local pressed = r.ImGui_IsItemActive(ctx)
+    local expand_x0 = x1 - pad_x - expand_w
+    local mx = select(1, r.ImGui_GetMousePos(ctx))
+    local on_expand = hovered and mx and mx >= (expand_x0 - 2)
+
     if clicked then
-      if floating then
+      if on_expand then
+        if floating then
+          dock_floating_view(tab.id)
+        else
+          pop_out_view(tab.id)
+        end
+      elseif floating then
         dock_floating_view(tab.id)
       elseif state.active_view ~= tab.id then
         state.active_view = tab.id
         save_config()
       end
     end
-    if hovered and floating then
+    if on_expand then
+      if floating then
+        r.ImGui_SetTooltip(ctx, "Dock " .. tab.label .. " back into this window")
+      else
+        r.ImGui_SetTooltip(ctx, "Open " .. tab.label .. " in a separate window")
+      end
+    elseif hovered and floating then
       r.ImGui_SetTooltip(ctx, "Dock " .. tab.label .. " back into this window")
     end
 
@@ -47845,24 +50489,16 @@ function render_view_tab_switcher()
     local text_x = icon_x0 + icon_size + icon_text_gap
     local text_y = y0 + (inner_h - text_h) * 0.5 + (pressed and 1.0 or 0.0)
     r.ImGui_DrawList_AddText(dl, text_x, text_y, text_color, tab.label)
-    if floating then
-      ui_button_draw_icon(dl, "popout", x1 - 11, y0 + inner_h * 0.5 + (pressed and 1.0 or 0.0), 11, text_color)
-    end
-  end
 
-  r.ImGui_SameLine(ctx, 0, 6)
-  local float_view = state.active_view
-  local already_floating = (float_view == "sample_map" and state.sample_map_floating)
-    or (float_view == "sequencer" and state.sequencer_floating)
-  local both_floating = state.sample_map_floating and state.sequencer_floating
-  if not both_floating and not already_floating then
-    if draw_ui_button("view_popout", nil, inner_h, inner_h, { icon = "popout", compact = true }) then
-      pop_out_active_view()
+    local expand_cx = expand_x0 + expand_w * 0.5
+    local expand_cy = y0 + inner_h * 0.5 + (pressed and 1.0 or 0.0)
+    local expand_color = text_color
+    if on_expand then
+      expand_color = active and 0xFFFFFFFF or UI_THEME.text
+    elseif not (active or floating or hovered) then
+      expand_color = UI_THEME.text_mute
     end
-    if r.ImGui_IsItemHovered(ctx) then
-      local name = float_view == "sequencer" and "Sequencer" or "Sample Map"
-      r.ImGui_SetTooltip(ctx, "Open " .. name .. " in a separate window")
-    end
+    ui_button_draw_icon(dl, "popout", expand_cx, expand_cy, 11, expand_color)
   end
 end
 
@@ -48908,6 +51544,7 @@ function render_sequencer_float_window()
     render_seq_top_toolbar()
     r.ImGui_PopStyleVar(ctx, 2)
     render_sequencer_with_explorer()
+    seq_stem_import_install_os_drop_overlay()
     pcall(r.ImGui_End, ctx)
   end
   if open == false then
@@ -51861,6 +54498,8 @@ function loop()
   stop_preview_if_transport_started()
   sync_project_state_if_needed()
   ingest_seq_from_arrange()
+  pcall(seq_stem_import_poll_external_request)
+  pcall(seq_stem_import_tick)
   if state.seq_random_sync_run and not state.seq_random_knob_drag then
     state.seq_random_sync_run = false
     seq_flush_pending_random_sync()
@@ -51939,11 +54578,40 @@ function loop()
       end
       local child_win_flags = 0
       if r.ImGui_WindowFlags_NoNav then
-        child_win_flags = r.ImGui_WindowFlags_NoNav()
+        child_win_flags = child_win_flags | r.ImGui_WindowFlags_NoNav()
+      end
+      -- Toolbar + sequencer/map live in this child. Shift+horizontal wheel is used
+      -- for timeline zoom and must not pan the whole chrome sideways.
+      if r.ImGui_WindowFlags_NoScrollbar then
+        child_win_flags = child_win_flags | r.ImGui_WindowFlags_NoScrollbar()
+      end
+      if r.ImGui_WindowFlags_NoScrollWithMouse then
+        child_win_flags = child_win_flags | r.ImGui_WindowFlags_NoScrollWithMouse()
       end
 
       local main_open = r.ImGui_BeginChild(ctx, "main_content", 0, avail_y, child_flags, child_win_flags)
       if main_open then
+        if r.ImGui_SetScrollX then
+          r.ImGui_SetScrollX(ctx, 0)
+        end
+        -- #region agent log
+        do
+          local sx = (r.ImGui_GetScrollX and r.ImGui_GetScrollX(ctx)) or -1
+          local smax = (r.ImGui_GetScrollMaxX and r.ImGui_GetScrollMaxX(ctx)) or -1
+          local wx = (r.ImGui_GetWindowPos and select(1, r.ImGui_GetWindowPos(ctx))) or -1
+          local prev = state._seq_dbg_main_sx
+          if prev == nil or math.abs(sx - (prev or 0)) > 0.5 or math.abs(smax - (state._seq_dbg_main_smax or 0)) > 0.5 then
+            seq_debug_ndjson("B", "loop:main_content", "main_content scroll", {
+              scroll_x = sx, scroll_max_x = smax, win_x = wx,
+              active_view = tostring(state.active_view or ""),
+              runId = "post-fix",
+              fix = "main_content_noscroll",
+            })
+            state._seq_dbg_main_sx = sx
+            state._seq_dbg_main_smax = smax
+          end
+        end
+        -- #endregion
         r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 4, 3)
         r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FramePadding(), 5, 3)
         render_view_tab_switcher()
@@ -51973,6 +54641,7 @@ function loop()
           render_sample_map_body()
         elseif seq_in_main then
           render_sequencer_with_explorer()
+          seq_stem_import_install_os_drop_overlay()
         else
           local _, empty_y = r.ImGui_GetContentRegionAvail(ctx)
           r.ImGui_Dummy(ctx, 1, math.max(12, empty_y * 0.28))
@@ -51998,6 +54667,7 @@ function loop()
     pcall(render_sequencer_float_window)
     pcall(render_settings)
     pcall(render_scan_complete_dialog)
+    pcall(seq_stem_import_render_dialog)
     pcall(render_explorer_window)
   elseif not ui_ok then
     log("ImGui frame skipped during window host change: " .. tostring(ui_err))
@@ -52038,19 +54708,9 @@ end
 
 
 -- --- Main entry point --------------------------------------------------------
-function main()
-  if r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) == "1" then
-    local existing = true
-    if r.JS_Window_Find then
-      existing = r.JS_Window_Find(SCRIPT_NAME, true) ~= nil
-    end
-    if existing then
-      -- Already running: ask the live instance to save and quit (keyboard shortcut / re-run).
-      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
-      return
-    end
-    -- Stale flag from a previous crash; start a new instance.
-  end
+function SampleMap_BeginInstance()
+  SampleMapInstance.shutdown_done = false
+  running = true
   r.SetExtState(SampleMapInstance.section, SampleMapInstance.key, "1", false)
   if r.atexit then
     r.atexit(function()
@@ -52059,7 +54719,18 @@ function main()
   end
 
   log("Starting Sample Map Browser...")
-  
+  -- #region agent log
+  seq_debug_ndjson("boot", "main", "script started", {
+    t = r.time_precise and r.time_precise() or 0,
+    runId = "post-fix",
+    ver = 4,
+    fix = "reload_live_instance",
+  })
+  if r.ShowConsoleMsg then
+    r.ShowConsoleMsg("[Sample Map] stem-import debug ver 4 loaded\n")
+  end
+  -- #endregion
+
   load_config()
   sync_project_state_if_needed()
 
@@ -52074,6 +54745,47 @@ function main()
   begin_library_load()
   log("ImGui context created; loading library asynchronously")
   loop()
+end
+
+function SampleMap_WaitThenBegin(n)
+  n = (tonumber(n) or 0) + 1
+  local win = nil
+  if r.JS_Window_Find then
+    win = r.JS_Window_Find(SCRIPT_NAME, true)
+  end
+  local flag = r.GetExtState(SampleMapInstance.section, SampleMapInstance.key)
+  if n < 90 and (win or flag == "1") then
+    if flag == "1" then
+      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
+    end
+    r.defer(function()
+      SampleMap_WaitThenBegin(n)
+    end)
+    return
+  end
+  SampleMap_BeginInstance()
+end
+
+function main()
+  if r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) == "1" then
+    local existing = true
+    if r.JS_Window_Find then
+      existing = r.JS_Window_Find(SCRIPT_NAME, true) ~= nil
+    end
+    if existing then
+      -- Already running: quit the live instance, then start THIS (new) copy.
+      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
+      if r.ShowConsoleMsg then
+        r.ShowConsoleMsg("[Sample Map] Reloading from disk…\n")
+      end
+      r.defer(function()
+        SampleMap_WaitThenBegin(0)
+      end)
+      return
+    end
+    -- Stale flag from a previous crash; start a new instance.
+  end
+  SampleMap_BeginInstance()
 end
 
 main()
