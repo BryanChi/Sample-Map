@@ -49254,9 +49254,15 @@ function explorer_pump_disk_refresh()
   if not queue or #queue == 0 then
     return
   end
-  local path = table.remove(queue, 1)
-  state.explorer_disk_queued[path] = nil
-  explorer_list_dir_from_disk(path)
+  -- List directories until the per-frame budget (checked before each one) runs out.
+  local started = r.time_precise()
+  local listed = 0
+  while #queue > 0 and (listed == 0 or (r.time_precise() - started) < 0.004) do
+    local path = table.remove(queue, 1)
+    state.explorer_disk_queued[path] = nil
+    explorer_list_dir_from_disk(path)
+    listed = listed + 1
+  end
   explorer_invalidate_rows()
 end
 
@@ -49264,58 +49270,11 @@ function explorer_shell_quote(path)
   return "'" .. tostring(path or ""):gsub("'", "'\\''") .. "'"
 end
 
-function explorer_list_dir_via_shell(path, dirs, files)
-  local function read_popen(cmd, on_line)
-    local ok, handle = pcall(io.popen, cmd)
-    if not ok or not handle then
-      return false
-    end
-    for line in handle:lines() do
-      on_line(line)
-    end
-    handle:close()
-    return true
-  end
-
-  local osname = (r.GetOS and r.GetOS()) or ""
-  if osname:match("Win") then
-    local win = path:gsub("/", "\\"):gsub('"', "")
-    local quoted = '"' .. win .. '"'
-    local ok_dirs = read_popen("cmd /c dir /b /ad " .. quoted .. " 2>nul", function(line)
-      if line ~= "" and not line:match("^%.") and #dirs < EXPLORER_MAX_LIST then
-        dirs[#dirs + 1] = line
-      end
-    end)
-    local ok_files = read_popen("cmd /c dir /b /a-d " .. quoted .. " 2>nul", function(line)
-      if line ~= "" and explorer_is_audio_name(line) and #files < EXPLORER_MAX_LIST then
-        files[#files + 1] = line
-      end
-    end)
-    return ok_dirs or ok_files
-  end
-
-  return read_popen("/bin/ls -1p " .. explorer_shell_quote(path) .. " 2>/dev/null", function(name)
-    if name == "" then
-      return
-    end
-    local is_dir = name:sub(-1) == "/"
-    if is_dir then
-      name = name:sub(1, -2)
-    end
-    if name == "" or name:match("^%.") then
-      return
-    end
-    if is_dir then
-      if #dirs < EXPLORER_MAX_LIST then
-        dirs[#dirs + 1] = name
-      end
-    elseif explorer_is_audio_name(name) and #files < EXPLORER_MAX_LIST then
-      files[#files + 1] = name
-    end
-  end)
-end
-
+-- REAPER's directory enumeration (no shell process per directory).
 function explorer_list_dir_via_enumerate(path, dirs, files)
+  -- Index -1 clears REAPER's cached listing so a refresh sees disk changes.
+  pcall(r.EnumerateSubdirectories, path, -1)
+  pcall(r.EnumerateFiles, path, -1)
   local i = 0
   local subdir = r.EnumerateSubdirectories(path, i)
   while subdir do
@@ -49360,11 +49319,7 @@ function explorer_list_dir_from_disk(path)
   end
 
   local dirs, files = {}, {}
-  local ok = explorer_list_dir_via_shell(path, dirs, files)
-  if not ok then
-    dirs, files = {}, {}
-    ok = explorer_list_dir_via_enumerate(path, dirs, files)
-  end
+  local ok = explorer_list_dir_via_enumerate(path, dirs, files)
   if not ok then
     return nil, nil
   end
