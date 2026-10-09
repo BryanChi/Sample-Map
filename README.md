@@ -25,6 +25,8 @@ REAPER script that scans audio folders into an interactive 2D sample map, with a
    - `Sample Map Browser.lua`
    - `Sample Map - Quick swap for selected item.lua` (optional companion)
 
+   Keep the `browser/` folder next to `Sample Map Browser.lua`; the script loads its modules from there.
+
 ## Using the UI
 
 - **Library** menu: rescan / resume, manage scan folders, and *Re-analyze* passes (effective range, transients, loop / one-shot, weight).
@@ -36,7 +38,8 @@ REAPER script that scans audio folders into an interactive 2D sample map, with a
 
 | Path | Role |
 | --- | --- |
-| `Sample Map Browser.lua` | Main UI (map + sequencer) |
+| `Sample Map Browser.lua` | Entry point: checks dependencies and loads `browser/` |
+| `browser/NN_*.lua` | The browser itself (map, sequencer, explorer, settings), loaded in numeric order |
 | `Sample Map - Quick swap for selected item.lua` | Replace the selected item's sample from the map |
 | `SampleMapAnalyzer.py` | External audio analysis sidecar |
 | `SampleMapDrumAI.py` | Local drum-pattern variation |
@@ -45,7 +48,20 @@ REAPER script that scans audio folders into an interactive 2D sample map, with a
 | `Effects/SampleMapPlayer.jsfx` | Per-track layered sampler |
 | `Effects/SampleMapPreview.jsfx` | Preview bus passthrough |
 | `assets/` | Sequencer / map icons |
-| `tag_presets.lua` | Tag color palettes |
+| `tag_presets.default.lua` | Default tag color palettes (your edits are saved to `tag_presets.lua`) |
+| `tests/` | Syntax checks, a stub-REAPER load test and unit tests (run by CI) |
+
+## Development
+
+The browser is split into modules under `browser/`. They run in order and share globals,
+so a helper defined in an earlier module is visible to later ones. To check changes locally:
+
+```sh
+pip install lupa pytest numpy
+python3 tests/lua_syntax.py *.lua browser/*.lua
+python3 tests/load_browser.py . 30   # runs the script for 30 frames against a stub REAPER API
+pytest -q tests
+```
 
 Local files such as `SampleMapData.json` and `SampleMapBrowser.json` are generated at runtime and are not committed.
 

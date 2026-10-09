@@ -28,8 +28,10 @@ import csv
 import json
 import os
 import random
+import shutil
 import struct
 import sys
+import tempfile
 import urllib.request
 import zipfile
 
@@ -119,11 +121,37 @@ def is_ready():
     return os.path.isfile(info_csv_path())
 
 
+def _zip_is_valid(path):
+    """True when path is a readable zip whose members pass CRC checks."""
+    try:
+        if not zipfile.is_zipfile(path):
+            return False
+        with zipfile.ZipFile(path, "r") as zf:
+            return zf.testzip() is None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _remove_quietly(path):
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        elif os.path.lexists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
 def download_and_extract():
     ensure_cache_dir()
     zpath = zip_path()
+    # A truncated/corrupt cached zip would otherwise wedge every later ensure.
+    if os.path.isfile(zpath) and not is_ready() and not _zip_is_valid(zpath):
+        _remove_quietly(zpath)
     if not os.path.isfile(zpath):
-        tmp = zpath + ".partial"
+        # Unique name: a timed-out earlier download may still be writing its own file.
+        fd, tmp = tempfile.mkstemp(prefix=os.path.basename(zpath) + ".", suffix=".partial", dir=cache_dir())
+        os.close(fd)
         try:
             with urllib.request.urlopen(DATASET_URL, timeout=120) as resp, open(tmp, "wb") as out:
                 while True:
@@ -131,19 +159,36 @@ def download_and_extract():
                     if not chunk:
                         break
                     out.write(chunk)
-            os.replace(tmp, zpath)
+            if not _zip_is_valid(tmp):
+                raise RuntimeError("Downloaded Groove MIDI archive is corrupt; try again")
+            if not os.path.isfile(zpath):
+                os.replace(tmp, zpath)
+            else:
+                _remove_quietly(tmp)
         except Exception:
-            if os.path.isfile(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+            _remove_quietly(tmp)
             raise
 
-    root = extract_root()
-    if not os.path.isdir(root):
-        with zipfile.ZipFile(zpath, "r") as zf:
-            zf.extractall(cache_dir())
+    if not is_ready():
+        root = extract_root()
+        # Extract into a scratch dir and move into place, so an interrupted
+        # extract never leaves a half-populated dataset folder behind.
+        tmp_dir = tempfile.mkdtemp(prefix=".extract_", dir=cache_dir())
+        try:
+            try:
+                with zipfile.ZipFile(zpath, "r") as zf:
+                    zf.extractall(tmp_dir)
+            except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, OSError) as exc:
+                _remove_quietly(zpath)
+                raise RuntimeError("Groove MIDI archive could not be extracted (%s); try again" % exc)
+            extracted = os.path.join(tmp_dir, os.path.basename(root))
+            if not os.path.isfile(os.path.join(extracted, "info.csv")):
+                _remove_quietly(zpath)
+                raise RuntimeError("Groove MIDI archive is missing info.csv; try again")
+            _remove_quietly(root)
+            os.replace(extracted, root)
+        finally:
+            _remove_quietly(tmp_dir)
 
     if not is_ready():
         raise RuntimeError("Groove MIDI Dataset extracted but info.csv is missing")
