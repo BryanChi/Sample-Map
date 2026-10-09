@@ -2859,12 +2859,24 @@ function sync_project_state_if_needed()
 end
 
 local function load_config()
-  local file = io.open(CONFIG_PATH, "r")
-  if file then
-    local content = file:read("*all")
-    file:close()
-    if content and content ~= "" then
-      local success, cfg = pcall(json_decode, content)
+  local content = sm_read_nonempty_file(CONFIG_PATH)
+  local success, cfg = false, nil
+  if content then
+    success, cfg = pcall(json_decode, content)
+  end
+  if not (success and type(cfg) == "table") then
+    -- Missing, empty or corrupt config: fall back to the previous good copy.
+    local bak_content = sm_read_nonempty_file(CONFIG_PATH .. ".bak")
+    if bak_content then
+      local ok_bak, cfg_bak = pcall(json_decode, bak_content)
+      if ok_bak and type(cfg_bak) == "table" then
+        log("Config file unreadable; using SampleMapBrowser.json.bak")
+        content, success, cfg = bak_content, ok_bak, cfg_bak
+      end
+    end
+  end
+  if content then
+    do
       if success and cfg and type(cfg) == "table" then
         -- Ensure folders is an array of strings (normalized)
         if cfg.folders and type(cfg.folders) == "table" then
@@ -3161,7 +3173,7 @@ local function serialize_table(t, indent)
   for k, v in pairs(t) do
     result = result .. indent .. "  "
     if type(k) == "string" then
-      result = result .. '["' .. k .. '"]'
+      result = result .. "[" .. string.format("%q", k) .. "]"
     else
       result = result .. '[' .. tostring(k) .. ']'
     end
@@ -3169,7 +3181,7 @@ local function serialize_table(t, indent)
     if type(v) == "table" then
       result = result .. serialize_table(v, indent .. "  ")
     elseif type(v) == "string" then
-      result = result .. '"' .. v .. '"'
+      result = result .. string.format("%q", v)
     else
       result = result .. tostring(v)
     end
@@ -3177,6 +3189,53 @@ local function serialize_table(t, indent)
   end
   result = result .. indent .. "}"
   return result
+end
+
+-- Tag colour presets: the user's copy (tag_presets.lua, gitignored) wins over the
+-- shipped defaults (tag_presets.default.lua). Kept in memory; re-read at most every 2 s.
+SM_TAG_PRESETS_PATH = CONFIG_DIR .. "/tag_presets.lua"
+SM_TAG_PRESETS_DEFAULT_PATH = CONFIG_DIR .. "/tag_presets.default.lua"
+
+function sm_read_tag_presets_file()
+  local sources = { SM_TAG_PRESETS_PATH, SM_TAG_PRESETS_PATH .. ".bak", SM_TAG_PRESETS_DEFAULT_PATH }
+  for i = 1, #sources do
+    local content = sm_read_nonempty_file(sources[i])
+    if content then
+      local chunk = load(content, "@tag_presets.lua", "t", {})
+      if chunk then
+        local ok, presets = pcall(chunk)
+        if ok and type(presets) == "table" then
+          return presets
+        end
+      end
+    end
+  end
+  return {}
+end
+
+function sm_get_tag_presets(force)
+  local now = r.time_precise()
+  if force or type(state.tag_presets_cache) ~= "table"
+      or (now - (state.tag_presets_cache_time or 0)) > 2.0 then
+    state.tag_presets_cache = sm_read_tag_presets_file()
+    state.tag_presets_cache_time = now
+  end
+  return state.tag_presets_cache
+end
+
+function sm_save_tag_presets(presets)
+  state.tag_presets_cache = presets
+  state.tag_presets_cache_time = r.time_precise()
+  local ok_ser, content = pcall(serialize_table, presets)
+  if not ok_ser then
+    log("Failed to serialize tag presets: " .. tostring(content))
+    return false
+  end
+  local ok, err = sm_atomic_write(SM_TAG_PRESETS_PATH, "return " .. content)
+  if not ok then
+    log("Failed to save tag presets: " .. tostring(err))
+  end
+  return ok
 end
 
 local function save_config()
@@ -3223,14 +3282,17 @@ local function save_config()
     map_tab_next_id = state.map_tab_next_id,
     map_ui_layout = map_ui_clone(state.map_ui_layout) or state.map_ui_layout,
   }
-  local file = io.open(CONFIG_PATH, "w")
-  if file then
-    local json_str = json_encode(cfg)
-    file:write(json_str)
-    file:close()
+  local ok_enc, json_str = pcall(json_encode, cfg)
+  local saved, save_err = false, nil
+  if ok_enc and type(json_str) == "string" then
+    saved, save_err = sm_atomic_write(CONFIG_PATH, json_str)
+  else
+    save_err = "encode failed: " .. tostring(json_str)
+  end
+  if saved then
     log("Saved config with " .. #state.folders .. " folder(s)")
   else
-    log("Failed to save config file")
+    log("Failed to save config file: " .. tostring(save_err))
   end
   save_seq_project_state(loaded_project or get_current_project())
 end
@@ -4088,6 +4150,40 @@ local function finish_library_hit(job)
   ))
 end
 
+-- Pick the next readable cache file: main Lua, main JSON, then their .bak copies.
+function sm_library_load_next_source(job)
+  local candidates = {
+    { "lua", DATA_LUA_PATH },
+    { "json", DATA_PATH },
+    { "lua", DATA_LUA_PATH .. ".bak" },
+    { "json", DATA_PATH .. ".bak" },
+  }
+  local i = (job.source_index or 0) + 1
+  while i <= #candidates do
+    local c = candidates[i]
+    local f = io.open(c[2], "rb")
+    if f then
+      local size = f:seek("end") or 0
+      f:close()
+      if size > 0 then
+        job.source_index = i
+        job.format = c[1]
+        job.path = c[2]
+        job.content = nil
+        job.phase = "read"
+        job.message = (c[1] == "lua") and "Reading Lua cache…" or "Reading JSON cache…"
+        if i > 2 then
+          log("Using backup sample cache: " .. c[2])
+        end
+        return true
+      end
+    end
+    i = i + 1
+  end
+  job.source_index = i
+  return false
+end
+
 local function process_library_load_slice(max_ms)
   local job = state.library_load
   if not job or job.phase == "done" or job.phase == "miss" then
@@ -4098,25 +4194,10 @@ local function process_library_load_slice(max_ms)
 
   while r.time_precise() < deadline do
     if job.phase == "init" then
-      local lua_file = io.open(DATA_LUA_PATH, "r")
-      if lua_file then
-        lua_file:close()
-        job.format = "lua"
-        job.path = DATA_LUA_PATH
-        job.message = "Reading Lua cache…"
-      else
-        local json_file = io.open(DATA_PATH, "r")
-        if json_file then
-          json_file:close()
-          job.format = "json"
-          job.path = DATA_PATH
-          job.message = "Reading JSON cache…"
-        else
-          finish_library_miss("Cache file not found")
-          return false
-        end
+      if not sm_library_load_next_source(job) then
+        finish_library_miss("Cache file not found")
+        return false
       end
-      job.phase = "read"
 
     elseif job.phase == "read" then
       if job.format == "lua" then
@@ -4127,19 +4208,28 @@ local function process_library_load_slice(max_ms)
       else
         local file = io.open(job.path, "r")
         if not file then
-          finish_library_miss("Cache file cannot be opened")
-          return false
+          if not sm_library_load_next_source(job) then
+            finish_library_miss("Cache file cannot be opened")
+            return false
+          end
+        else
+          job.content = file:read("*all")
+          file:close()
+          if not job.content or job.content == "" or not job.content:sub(-64):find("}%s*$") then
+            -- Empty or truncated (a complete cache ends with '}').
+            log("JSON cache empty or truncated: " .. tostring(job.path))
+            job.content = nil
+            if not sm_library_load_next_source(job) then
+              finish_library_miss("Cache file is empty")
+              return false
+            end
+          else
+            log(string.format("Cache file size: %d bytes (json)", #job.content))
+            job.message = "Decoding JSON cache…"
+            job.phase = "decode"
+            job.progress = 0.05
+          end
         end
-        job.content = file:read("*all")
-        file:close()
-        if not job.content or job.content == "" then
-          finish_library_miss("Cache file is empty")
-          return false
-        end
-        log(string.format("Cache file size: %d bytes (json)", #job.content))
-        job.message = "Decoding JSON cache…"
-        job.phase = "decode"
-        job.progress = 0.05
       end
 
     elseif job.phase == "decode" then
@@ -4169,20 +4259,24 @@ local function process_library_load_slice(max_ms)
         end
         if not loader then
           log("Failed to load Lua cache: " .. tostring(err))
-          pcall(os.remove, DATA_LUA_PATH)
-          job.format = "json"
-          job.path = DATA_PATH
-          job.phase = "read"
-          job.message = "Lua cache invalid; reading JSON…"
+          if job.path == DATA_LUA_PATH then
+            pcall(os.remove, DATA_LUA_PATH)
+          end
+          if not sm_library_load_next_source(job) then
+            finish_library_miss("Failed to load Lua cache")
+            return false
+          end
         else
           local ok, result = pcall(loader)
           if not ok or type(result) ~= "table" then
             log("Failed to execute Lua cache: " .. tostring(result))
-            pcall(os.remove, DATA_LUA_PATH)
-            job.format = "json"
-            job.path = DATA_PATH
-            job.phase = "read"
-            job.message = "Lua cache invalid; reading JSON…"
+            if job.path == DATA_LUA_PATH then
+              pcall(os.remove, DATA_LUA_PATH)
+            end
+            if not sm_library_load_next_source(job) then
+              finish_library_miss("Failed to execute Lua cache")
+              return false
+            end
           else
             data = result
           end
@@ -4192,17 +4286,20 @@ local function process_library_load_slice(max_ms)
         job.content = nil
         if not ok or type(result) ~= "table" then
           log("Fast JSON decode failed (" .. tostring(result) .. "); trying full decoder")
-          local file = io.open(DATA_PATH, "r")
-          if not file then
-            finish_library_miss("Failed to decode JSON cache")
-            return false
+          local content = sm_read_nonempty_file(job.path)
+          if content then
+            ok, result = pcall(json_decode, content)
+          else
+            ok, result = false, "cannot read " .. tostring(job.path)
           end
-          local content = file:read("*all")
-          file:close()
-          ok, result = pcall(json_decode, content)
+          content = nil
           if not ok or type(result) ~= "table" then
-            finish_library_miss("Failed to decode JSON: " .. tostring(result))
-            return false
+            log("Failed to decode JSON cache " .. tostring(job.path) .. ": " .. tostring(result))
+            result = nil
+            if not sm_library_load_next_source(job) then
+              finish_library_miss("Failed to decode JSON cache")
+              return false
+            end
           end
         end
         data = result
@@ -4345,13 +4442,16 @@ local function save_samples()
   local sample_count = #payload.samples
 
   -- Fast Lua cache (primary load path)
-  local lua_str = encode_lua_cache(payload)
-  local lua_file = io.open(DATA_LUA_PATH, "w")
-  if lua_file then
-    lua_file:write(lua_str)
-    lua_file:close()
+  local ok_lua_enc, lua_str = pcall(encode_lua_cache, payload)
+  local lua_saved, lua_err = false, nil
+  if ok_lua_enc and type(lua_str) == "string" then
+    lua_saved, lua_err = sm_atomic_write(DATA_LUA_PATH, lua_str)
   else
-    log("Failed to write Lua cache: " .. DATA_LUA_PATH)
+    lua_err = "encode failed: " .. tostring(lua_str)
+  end
+  lua_str = nil
+  if not lua_saved then
+    log("Failed to write Lua cache: " .. DATA_LUA_PATH .. " (" .. tostring(lua_err) .. ")")
   end
 
   -- Compact JSON for companion scripts (Quick Swap, etc.)
@@ -4367,7 +4467,7 @@ local function save_samples()
     return table.concat(out)
   end
 
-  local json_str = table.concat({
+  local ok_json_enc, json_str = pcall(function() return table.concat({
     "{",
     "\"v\":", json_encode(payload.v), ",",
     "\"tag_schema_version\":", json_encode(payload.tag_schema_version), ",",
@@ -4384,12 +4484,15 @@ local function save_samples()
     "\"analyzer_results\":", json_encode(payload.analyzer_results), ",",
     "\"analyzer_mode\":", json_encode(payload.analyzer_mode),
     "}"
-  })
+  }) end)
 
-  local file = io.open(DATA_PATH, "w")
-  if file then
-    file:write(json_str)
-    file:close()
+  if ok_json_enc and type(json_str) == "string" then
+    local json_saved, json_err = sm_atomic_write(DATA_PATH, json_str)
+    if not json_saved then
+      log("Failed to write JSON cache: " .. tostring(json_err))
+    end
+  else
+    log("Failed to encode JSON cache: " .. tostring(json_str))
   end
 
   state.last_save_time = r.time_precise()
@@ -4398,8 +4501,11 @@ end
 
 
 local function clear_sample_cache()
-  os.remove(DATA_PATH)
-  os.remove(DATA_LUA_PATH)
+  for _, p in ipairs({ DATA_PATH, DATA_LUA_PATH }) do
+    os.remove(p)
+    os.remove(p .. ".bak")
+    os.remove(p .. ".tmp")
+  end
 end
 
 local function filter_samples_by_folders()
@@ -8687,20 +8793,8 @@ end
 
 -- Function to save tag colors to current preset
 local function save_tag_color_to_preset(tag, color)
-  -- Load current presets
-  local tag_presets = {}
-  local function load_tag_presets()
-    local preset_file = io.open(CONFIG_DIR .. "/tag_presets.lua", "r")
-    if preset_file then
-      local content = preset_file:read("*all")
-      preset_file:close()
-      local success, presets = pcall(load, content)
-      if success and type(presets) == "function" then
-        tag_presets = presets() or {}
-      end
-    end
-  end
-  load_tag_presets()
+  -- Load current presets (cached in memory)
+  local tag_presets = sm_get_tag_presets()
   
   -- Ensure current preset exists
   if not tag_presets[state.current_preset_name] then
@@ -8711,12 +8805,18 @@ local function save_tag_color_to_preset(tag, color)
   tag_presets[state.current_preset_name][tag] = color
   
   -- Save presets back to file
-  local preset_content = "return " .. serialize_table(tag_presets)
-  local preset_file = io.open(CONFIG_DIR .. "/tag_presets.lua", "w")
-  if preset_file then
-    preset_file:write(preset_content)
-    preset_file:close()
+  sm_save_tag_presets(tag_presets)
+end
+
+-- Persist a tag colour edited in the picker once the edit finishes (not on every drag frame).
+function sm_flush_tag_color_save()
+  local pending = state.tag_color_pending_save
+  if not pending then
+    return
   end
+  state.tag_color_pending_save = nil
+  save_tag_color_to_preset(pending.tag, pending.color)
+  save_config()
 end
 
 -- Helper function to categorize tags
@@ -9610,8 +9710,8 @@ function render_tag_filters()
       if color_changed then
         local rgb_color = new_color & 0xFFFFFF  -- Extract RGB part only
         state.tag_colors[state.tag_color_picker_tag] = rgb_color
-        save_tag_color_to_preset(state.tag_color_picker_tag, rgb_color)
-        save_config()  -- Also save to main config
+        -- Persisted by sm_flush_tag_color_save() when the drag/edit ends.
+        state.tag_color_pending_save = { tag = state.tag_color_picker_tag, color = rgb_color }
         invalidate_sample_render_colors(state.tag_color_picker_tag)
       end
       
@@ -9634,6 +9734,9 @@ function render_tag_filters()
       r.ImGui_CloseCurrentPopup(ctx)
     end
     r.ImGui_EndPopup(ctx)
+  end
+  if state.tag_color_pending_save and not (r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0)) then
+    sm_flush_tag_color_save()
   end
 
   r.ImGui_Separator(ctx)
@@ -52619,17 +52722,8 @@ function settings_render_tag_layout()
 end
 
 function settings_render_tag_colors()
-  -- Load tag presets
-  local tag_presets = {}
-  local preset_file = io.open(CONFIG_DIR .. "/tag_presets.lua", "r")
-  if preset_file then
-    local content = preset_file:read("*all")
-    preset_file:close()
-    local success, presets = pcall(load, content)
-    if success and type(presets) == "function" then
-      tag_presets = presets() or {}
-    end
-  end
+  -- Load tag presets (cached; re-read at most every 2 s)
+  local tag_presets = sm_get_tag_presets()
 
   local preset_names = {}
   for name, _ in pairs(tag_presets) do
@@ -52671,10 +52765,11 @@ function settings_render_tag_colors()
 
     if r.ImGui_BeginPopup(ctx, "save_tag_preset") then
       r.ImGui_Text(ctx, "Preset Name:")
-      local preset_name = ""
+      local preset_name = state.settings_preset_name_buf or ""
       local changed, new_name = r.ImGui_InputText(ctx, "##preset_name", preset_name, 0)
       if changed then
         preset_name = new_name
+        state.settings_preset_name_buf = new_name
       end
 
       if draw_ui_button("settings_save_preset_confirm", "Save") and preset_name ~= "" then
@@ -52683,13 +52778,9 @@ function settings_render_tag_colors()
           tag_presets[preset_name][tag] = color
         end
         state.current_preset_name = preset_name
+        state.settings_preset_name_buf = nil
 
-        local preset_content = "return " .. serialize_table(tag_presets)
-        local out_file = io.open(CONFIG_DIR .. "/tag_presets.lua", "w")
-        if out_file then
-          out_file:write(preset_content)
-          out_file:close()
-        end
+        sm_save_tag_presets(tag_presets)
 
         r.ImGui_CloseCurrentPopup(ctx)
       end
