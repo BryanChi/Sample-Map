@@ -25451,7 +25451,7 @@ end
 function seq_env_sync_to_length(env, length)
   env = seq_normalize_track_env(env)
   length = math.max(0.001, length or 1.0)
-  if not seq_env_shape_active(env) then
+  if not seq_env_shape_active_norm(env) then
     env.points = {
       { t = 0.0, amp = 1.0 },
       { t = length, amp = 1.0 },
@@ -26351,8 +26351,12 @@ end
 
 
 function seq_env_shape_active(env)
-  env = seq_normalize_track_env(env)
-  local pts = env.points
+  return seq_env_shape_active_norm(seq_normalize_track_env(env))
+end
+
+-- Same as seq_env_shape_active for an env already passed through seq_normalize_track_env.
+function seq_env_shape_active_norm(env)
+  local pts = env and env.points
   if not pts or #pts == 0 then
     return false
   end
@@ -26469,8 +26473,12 @@ function seq_ensure_take_volume_envelope(take)
 end
 
 function seq_env_levels_at(env, t, length)
-  env = seq_normalize_track_env(env)
-  local pts = env.points
+  return seq_env_levels_at_norm(seq_normalize_track_env(env), t)
+end
+
+-- Same as seq_env_levels_at for an env already passed through seq_normalize_track_env.
+function seq_env_levels_at_norm(env, t)
+  local pts = env and env.points
   if not pts or #pts == 0 then
     return 1.0
   end
@@ -26509,7 +26517,7 @@ function seq_build_env_amp_points(item_len, env, env_offset)
     pts[#pts + 1] = { t = t, amp = amp }
   end
 
-  add(0.0, seq_env_levels_at(env, env_offset, item_len))
+  add(0.0, seq_env_levels_at_norm(env, env_offset))
   local src = env.points
   for i, p in ipairs(src) do
     local local_t = (p.t or 0.0) - env_offset
@@ -26533,7 +26541,7 @@ function seq_build_env_amp_points(item_len, env, env_offset)
       end
     end
   end
-  add(item_len, seq_env_levels_at(env, env_offset + item_len, item_len))
+  add(item_len, seq_env_levels_at_norm(env, env_offset + item_len))
   return pts
 end
 
@@ -26548,7 +26556,7 @@ function seq_apply_envelope_fades_fallback(item, take, item_len, env, env_offset
   if not take then
     return
   end
-  local amp = seq_env_levels_at(env, env_offset, item_len)
+  local amp = seq_env_levels_at_norm(env, env_offset)
   local max_amp = amp
   local win_end = env_offset + (item_len or 0.0)
   for _, p in ipairs(env.points) do
@@ -26582,7 +26590,7 @@ function seq_apply_take_volume_envelope(take, item_len, env, env_offset)
   env = seq_normalize_track_env(env)
   env_offset = math.max(0.0, env_offset or 0.0)
   local item = r.GetMediaItemTake_Item(take)
-  if not seq_env_is_active(env) then
+  if not seq_env_shape_active_norm(env) then
     if item then
       r.SetMediaItemInfo_Value(item, "D_FADEINLEN", 0)
       r.SetMediaItemInfo_Value(item, "D_FADEOUTLEN", 0)
@@ -26683,66 +26691,77 @@ function seq_env_downsample_peaks(src_peaks, width)
 end
 
 function seq_env_build_wave_peaks(path, width)
-  if not path or path == "" or not r.GetAudioAccessorSamples then return nil, nil end
+  -- Reads peaks straight from a PCM source, so nothing is added to the project.
+  if not path or path == "" or not r.PCM_Source_CreateFromFile
+      or not r.PCM_Source_GetPeaks or not r.new_array then
+    return nil, nil
+  end
   width = math.max(48, math.min(320, math.floor(width or 200)))
   local src = r.PCM_Source_CreateFromFile(path)
   if not src then return nil, nil end
-  local duration = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
-  local sr = pick_number({ r.GetMediaSourceSampleRate(src) }, 44100.0)
-  local channels = math.max(1, math.floor(pick_number({ r.GetMediaSourceNumChannels(src) }, 1)))
-  if duration <= 0.0001 or sr <= 0 then
-    r.PCM_Source_Destroy(src)
+  local ok, peaks, duration = pcall(function()
+    local dur = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
+    local channels = math.floor(pick_number({ r.GetMediaSourceNumChannels(src) }, 1))
+    channels = math.max(1, math.min(8, channels))
+    if dur <= 0.0001 then
+      return nil, nil
+    end
+    if r.PCM_Source_BuildPeaks and r.PCM_Source_BuildPeaks(src, 0) ~= 0 then
+      local deadline = r.time_precise() + 0.5
+      while r.PCM_Source_BuildPeaks(src, 1) ~= 0 do
+        if r.time_precise() > deadline then break end
+      end
+      r.PCM_Source_BuildPeaks(src, 2)
+    end
+    -- One peak per bin: peakrate = bins per second, so every frame of the bin is covered.
+    local buf = r.new_array(channels * width * 2)
+    buf.clear()
+    local ret = r.PCM_Source_GetPeaks(src, width / dur, 0.0, channels, width, 0, buf)
+    local got = math.floor(tonumber(ret) or 0) % 1048576
+    if got <= 0 then
+      return nil, nil
+    end
+    if got > width then got = width end
+    -- buf holds a block of maxima (frame-major, channel-interleaved), then a block of minima.
+    local min_off = channels * width
+    local out = {}
+    local max_v = 0.0
+    for i = 0, width - 1 do
+      local peak = 0.0
+      if i < got then
+        for c = 0, channels - 1 do
+          local hi = math.abs(buf[i * channels + c + 1] or 0.0)
+          local lo = math.abs(buf[min_off + i * channels + c + 1] or 0.0)
+          if hi > peak then peak = hi end
+          if lo > peak then peak = lo end
+        end
+      end
+      out[i + 1] = peak
+      if peak > max_v then max_v = peak end
+    end
+    if max_v > 0.0001 then
+      for i = 1, #out do out[i] = out[i] / max_v end
+    end
+    return out, dur
+  end)
+  r.PCM_Source_Destroy(src)
+  if not ok then
     return nil, nil
   end
-
-  r.PreventUIRefresh(1)
-  local track = r.GetTrack(0, 0)
-  local item = track and r.AddMediaItemToTrack(track) or nil
-  local peaks = nil
-  if item then
-    r.SetMediaItemPosition(item, 0, false)
-    r.SetMediaItemLength(item, duration, false)
-    local take = r.AddTakeToMediaItem(item)
-    if take then
-      r.SetMediaItemTake_Source(take, src)
-      src = nil
-      local accessor = r.CreateTakeAudioAccessor(take)
-      if accessor then
-        peaks = {}
-        local max_v = 0.0
-        for i = 0, width - 1 do
-          local t0 = (i / width) * duration
-          local read_n = math.min(128, math.max(32, math.floor((duration / width) * sr)))
-          local buf = r.new_array(read_n * channels)
-          local got = r.GetAudioAccessorSamples(accessor, sr, channels, t0, read_n, buf)
-          local peak = 0.0
-          if got and got > 0 and buf then
-            local frames = got
-            for j = 0, frames - 1 do
-              for c = 0, channels - 1 do
-                local v = buf[j * channels + c + 1]
-                if v then
-                  local a = math.abs(v)
-                  if a > peak then peak = a end
-                end
-              end
-            end
-          end
-          peaks[i + 1] = peak
-          if peak > max_v then max_v = peak end
-          if buf and buf.clear then buf.clear(buf) end
-        end
-        if max_v > 0.0001 then
-          for i = 1, #peaks do peaks[i] = peaks[i] / max_v end
-        end
-        r.DestroyAudioAccessor(accessor)
-      end
-    end
-    r.DeleteTrackMediaItem(track, item)
-  end
-  r.PreventUIRefresh(-1)
-  if src then r.PCM_Source_Destroy(src) end
   return peaks, duration
+end
+
+function seq_env_wave_peaks_for_width(cached, width)
+  if cached.width == width then
+    return cached.peaks
+  end
+  cached.resized = cached.resized or {}
+  local resized = cached.resized[width]
+  if not resized then
+    resized = seq_env_downsample_peaks(cached.peaks, width) or cached.peaks
+    cached.resized[width] = resized
+  end
+  return resized
 end
 
 function seq_env_get_wave_peaks(sample, width)
@@ -26750,18 +26769,25 @@ function seq_env_get_wave_peaks(sample, width)
   width = math.max(48, math.min(320, math.floor(width or 200)))
   local cached = seq_env_wave_cache[sample.path]
   if cached and cached.peaks and #cached.peaks > 0 and cached.duration and cached.duration > 0 then
-    if cached.width == width then
-      return cached.peaks, cached.duration
-    end
-    local resized = seq_env_downsample_peaks(cached.peaks, width)
-    return resized or cached.peaks, cached.duration
+    return seq_env_wave_peaks_for_width(cached, width), cached.duration
   end
 
   -- Prefer PCM-built peaks so duration and waveform share one timeline.
   -- Fall back to downsampling the preview waveform only when PCM build fails.
+  -- A failed build (e.g. offline file) is not retried for 30 s.
   local build_w = 256
-  local peaks, duration = seq_env_build_wave_peaks(sample.path, build_w)
-  if (not peaks or not duration or duration <= 0)
+  local peaks, duration = nil, nil
+  local now = r.time_precise()
+  local recently_failed = cached and cached.failed
+      and (now - (cached.at or 0)) >= 0 and (now - (cached.at or 0)) < 30.0
+  if not recently_failed then
+    peaks, duration = seq_env_build_wave_peaks(sample.path, build_w)
+    if not peaks or not duration or duration <= 0 then
+      peaks, duration = nil, nil
+      seq_env_wave_cache[sample.path] = { failed = true, at = now }
+    end
+  end
+  if not peaks
       and waveform_data
       and waveform_data.sample_path == sample.path
       and waveform_data.data
@@ -26770,12 +26796,9 @@ function seq_env_get_wave_peaks(sample, width)
     duration = tonumber(waveform_data.duration) or tonumber(sample.duration)
   end
   if peaks and duration and duration > 0 then
-    seq_env_wave_cache[sample.path] = { peaks = peaks, duration = duration, width = build_w }
-    if build_w ~= width then
-      local resized = seq_env_downsample_peaks(peaks, width)
-      return resized or peaks, duration
-    end
-    return peaks, duration
+    local entry = { peaks = peaks, duration = duration, width = build_w }
+    seq_env_wave_cache[sample.path] = entry
+    return seq_env_wave_peaks_for_width(entry, width), duration
   end
   return peaks, duration or tonumber(sample.duration)
 end
@@ -26835,9 +26858,10 @@ function seq_draw_env_sparkline(dl, x, y, w, h, env, active, hovered)
     edge = active and UI_THEME.accent_hvr or UI_THEME.border_hvr
     edge_w = 1.4
   end
-  local line = seq_env_is_active(env) and 0x9FE3B5FF or 0x6A849EFF
+  local shaped = seq_env_shape_active_norm(env)
+  local line = shaped and 0x9FE3B5FF or 0x6A849EFF
   if hovered then
-    line = seq_env_is_active(env) and 0xC8FFD8FF or 0x9EC0E0FF
+    line = shaped and 0xC8FFD8FF or 0x9EC0E0FF
   end
   r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, bg, 3.0)
   if hovered then
@@ -26861,7 +26885,7 @@ function seq_draw_env_sparkline(dl, x, y, w, h, env, active, hovered)
   local steps = math.max(12, math.floor(w / 2))
   for i = 0, steps do
     local t = (i / steps) * t1
-    local amp = seq_env_levels_at(env, t, t1)
+    local amp = seq_env_levels_at_norm(env, t)
     local px = x + 2 + (i / steps) * (w - 4)
     local py = y + h - 2 - (amp / max_y) * (h - 4)
     if prev_x then
