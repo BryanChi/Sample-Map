@@ -495,7 +495,7 @@ local state = {
   seq_random_popup_close = false,  -- Close the random settings popup after a reset
   seq_random_popup_active_key = nil, -- Active knob key while dragging in the region random popup
   seq_random_flyout = nil,         -- Momentary extras panel: { kind, slot_id, anchor, rect, hold_until, pinned }
-  seq_random_sync_pending = nil,   -- { pattern_id, track_ids } flushed on mouse release
+  seq_random_sync_pending = nil,   -- { by_pattern = { [pid] = { track_ids, all_tracks } } } flushed on mouse release
   seq_random_sync_run = false,     -- flush pending random rebuild on the next frame
   seq_pattern_popup_last_style = nil, -- Last popup preset targeted by a dice strength button
   seq_pattern_popup_last_strength = nil,
@@ -850,6 +850,7 @@ local function refresh_scan_folder_availability()
 
   if new_sig ~= prev_sig then
     seq_path_exists_cache = {}
+    seq_sample_len_sec_cache = {}
     state.map_availability_epoch = (state.map_availability_epoch or 0) + 1
     local missing_names = {}
     for folder in pairs(missing_folders) do
@@ -11546,9 +11547,7 @@ function seq_clear_track_document_data(track_id)
     state.seq_razors = kept
   end
 
-  if state.seq_random_sync_pending and state.seq_random_sync_pending.track_ids then
-    state.seq_random_sync_pending.track_ids[track_id] = nil
-  end
+  seq_random_sync_pending_forget_track(track_id)
   if state.seq_layering_slot_id == track_id then
     state.seq_layering_slot_id = nil
   end
@@ -17207,7 +17206,33 @@ function seq_arrange_imgui_rect(octx, geo)
   return x0, y0, x1, y1
 end
 
+-- Follow and overlay both ask for the hovered items each frame; scan once.
 function seq_find_hovered_arrange_items()
+  local hover = state.seq_grid_hover
+  local frame = nil
+  if r.ImGui_GetFrameCount and ctx then
+    local ok, fc = pcall(r.ImGui_GetFrameCount, ctx)
+    if ok then frame = fc end
+  end
+  local c = state.seq_hover_items_frame_cache
+  if frame and c and c.frame == frame and hover and c.hover == hover
+      and c.slot_id == hover.slot_id and c.region_id == hover.region_id
+      and c.step_key == hover.step_key and c.note == hover.note then
+    return c.items, c.track
+  end
+  local items, track = seq_find_hovered_arrange_items_scan()
+  if frame and hover then
+    state.seq_hover_items_frame_cache = {
+      frame = frame, hover = hover, slot_id = hover.slot_id, region_id = hover.region_id,
+      step_key = hover.step_key, note = hover.note, items = items, track = track,
+    }
+  else
+    state.seq_hover_items_frame_cache = nil
+  end
+  return items, track
+end
+
+function seq_find_hovered_arrange_items_scan()
   local hover = state.seq_grid_hover
   if not hover or not hover.slot_id or not hover.note then
     return nil, nil
@@ -17698,6 +17723,19 @@ function seq_arrange_hl_flush()
   if not seq_arrange_hl_bm then
     return
   end
+  -- Skip clear/redraw/composite when the same rects are already composited.
+  local sig_parts = { tostring(w), tostring(h) }
+  for i = 1, #pending do
+    local p = pending[i]
+    sig_parts[#sig_parts + 1] = string.format("%s,%s,%s,%s,%s,%s,%s",
+      math.floor(p.x0 + 0.5), math.floor(p.y0 + 0.5),
+      math.floor(p.x1 - p.x0 + 0.5), math.floor(p.y1 - p.y0 + 0.5),
+      tostring(p.fill_rgb), tostring(p.fill_a), tostring(p.edge_rgb))
+  end
+  local sig = table.concat(sig_parts, ";")
+  if seq_arrange_hl_linked and seq_arrange_hl_hwnd == hwnd and state.seq_arrange_hl_last_sig == sig then
+    return
+  end
   r.JS_LICE_Clear(seq_arrange_hl_bm, 0)
   for i = 1, #pending do
     seq_arrange_hl_draw_rect(seq_arrange_hl_bm, pending[i])
@@ -17705,6 +17743,7 @@ function seq_arrange_hl_flush()
   seq_arrange_hl_hwnd = hwnd
   r.JS_Composite(hwnd, 0, 0, w, h, seq_arrange_hl_bm, 0, 0, w, h, true)
   seq_arrange_hl_linked = true
+  state.seq_arrange_hl_last_sig = sig
 end
 
 function seq_update_arrange_item_follow()
@@ -17763,10 +17802,10 @@ function seq_render_link_parent_overlay()
     local t0, t1 = get_arrange_view_range()
     if geo and geo.view_w and geo.view_h and t0 and t1 then
       -- #region agent log
-      local zoom = (r.GetHZoomLevel and r.GetHZoomLevel()) or 0
+      local zoom = SEQ_DEBUG_LOG and (r.GetHZoomLevel and r.GetHZoomLevel()) or 0
       local hz_w = (t1 - t0) * zoom
       local now = (r.time_precise and r.time_precise()) or 0
-      if not seq_dbg_link_hl_t or (now - seq_dbg_link_hl_t) > 0.35 then
+      if SEQ_DEBUG_LOG and (not seq_dbg_link_hl_t or (now - seq_dbg_link_hl_t) > 0.35) then
         seq_dbg_link_hl_t = now
         seq_debug_ndjson("A", "seq_render_link_parent_overlay", "arrange width compare", {
           view_w = geo.view_w or -1,
@@ -17792,6 +17831,7 @@ function seq_render_link_parent_overlay()
             local x0, y0, x1, y1 = seq_item_imgui_rect(nil, item, track, 0, 0, geo.view_w, geo.view_h, t0, t1)
             if x0 then
               -- #region agent log
+              if SEQ_DEBUG_LOG then
               local pos = r.GetMediaItemInfo_Value(item, "D_POSITION") or 0
               local len = r.GetMediaItemInfo_Value(item, "D_LENGTH") or 0
               local hz_x0 = (pos - t0) * zoom
@@ -17842,6 +17882,7 @@ function seq_render_link_parent_overlay()
                   })
                 end
               end
+              end
               -- #endregion
               seq_arrange_hl_add(x0, y0, x1, y1, seq_lice_color(255, 229, 153), 0.33, seq_lice_color(255, 229, 153))
             end
@@ -17868,6 +17909,7 @@ function seq_undo_is_open()
 end
 
 function seq_undo_clear_history()
+  state.seq_pattern_confirm = nil
   seq_undo_stack = {}
   seq_redo_stack = {}
   seq_undo_session = nil
@@ -17951,6 +17993,7 @@ function restore_seq_document_snapshot(snap)
   state.seq_env_graph_drag = nil
   state.seq_razor_drag = nil
   state.seq_track_reorder_drag = nil
+  state.seq_pattern_confirm = nil
   seq_undo_commit_on_release = false
   if seq_normalize_slot_mix then
     for _, slot in ipairs(state.seq_tracks) do
@@ -18103,12 +18146,36 @@ function apply_seq_undo_snapshot(snap, label)
   if type(snap) ~= "table" then
     return
   end
-  local remove_ids, sync_ids, mix, full = seq_undo_plan_resync(state, snap)
+  -- Run the body under xpcall so the REAPER undo block, PreventUIRefresh and
+  -- seq_undo_applying are always released, even if a resync step errors.
+  local guard = { block = false, refresh = false }
   seq_undo_applying = true
+  local ok, err = xpcall(seq_apply_undo_snapshot_body, function(e)
+    return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e)
+  end, snap, label, guard)
+  if guard.refresh and r.PreventUIRefresh then
+    r.PreventUIRefresh(-1)
+  end
+  if guard.block then
+    seq_undo_end_reaper(label or "Sample Map undo")
+  end
+  seq_undo_applying = false
+  if not ok then
+    if r.ShowConsoleMsg then
+      r.ShowConsoleMsg("Sample Map: error while applying sequencer undo:\n" .. tostring(err) .. "\n")
+    end
+    error(err, 0)
+  end
+end
+
+function seq_apply_undo_snapshot_body(snap, label, guard)
+  local remove_ids, sync_ids, mix, full = seq_undo_plan_resync(state, snap)
   restore_seq_document_snapshot(snap)
   seq_undo_begin_reaper()
+  guard.block = true
   if r.PreventUIRefresh then
     r.PreventUIRefresh(1)
+    guard.refresh = true
   end
   if seq_ensure_slot_reaper_tracks then
     seq_ensure_slot_reaper_tracks()
@@ -18147,10 +18214,12 @@ function apply_seq_undo_snapshot(snap, label)
   if seq_apply_seq_order_to_arrange then
     seq_apply_seq_order_to_arrange()
   end
-  if r.PreventUIRefresh then
+  if guard.refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(-1)
   end
+  guard.refresh = false
   r.UpdateArrange()
+  guard.block = false
   seq_undo_end_reaper(label or "Sample Map undo")
   if save_seq_project_state then
     save_seq_project_state()
@@ -18161,7 +18230,6 @@ function apply_seq_undo_snapshot(snap, label)
   if r.GetProjectStateChangeCount then
     state.seq_last_proj_change = r.GetProjectStateChangeCount(0)
   end
-  seq_undo_applying = false
 end
 
 function seq_undo_own_begin(label)
@@ -18180,12 +18248,63 @@ function begin_seq_undo(label)
   if seq_undo_session then
     return seq_undo_session.label or label
   end
+  if state.seq_pattern_confirm and seq_undo_label_is_manual_note_edit(label) then
+    -- A manual note edit keeps the auditioned pattern; reverting afterwards
+    -- would silently discard the user's edit.
+    state.seq_pattern_confirm = nil
+  end
+  -- Capture under xpcall: a failure must not leave a half-open session.
+  local ok, before = xpcall(seq_undo_capture_before_snapshot, function(e)
+    return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e)
+  end)
+  if not ok then
+    seq_undo_session = nil
+    if r.ShowConsoleMsg then
+      r.ShowConsoleMsg("Sample Map: error while starting sequencer undo:\n" .. tostring(before) .. "\n")
+    end
+    error(before, 0)
+  end
   seq_undo_session = {
     label = label,
-    before = capture_seq_document_snapshot(),
+    before = before,
   }
   seq_undo_begin_reaper()
   return label
+end
+
+function seq_undo_label_is_manual_note_edit(label)
+  local l = string.lower(tostring(label or ""))
+  return l:find("note", 1, true) ~= nil
+    or l:find("stutter", 1, true) ~= nil
+    or l:find("decay", 1, true) ~= nil
+    or l:find("cells", 1, true) ~= nil
+end
+
+-- Snapshots are never mutated after capture (restore clones field-by-field),
+-- so when nothing changed since the last committed edit, reuse its `after`
+-- as this session's `before` instead of storing another deep clone.
+function seq_undo_capture_before_snapshot()
+  local last = seq_undo_stack[#seq_undo_stack]
+  if last and type(last.after) == "table" then
+    local live = {
+      seq_tracks = state.seq_tracks,
+      selected_seq_track = state.selected_seq_track,
+      seq_track_next_id = state.seq_track_next_id,
+      seq_regions = state.seq_regions,
+      seq_patterns = state.seq_patterns,
+      seq_region_next_id = state.seq_region_next_id,
+      seq_pattern_next_id = state.seq_pattern_next_id,
+      seq_pool_next_id = state.seq_pool_next_id,
+      selected_seq_region_id = state.selected_seq_region_id,
+      seq_kit_history = state.seq_kit_history,
+      seq_kit_history_next_id = state.seq_kit_history_next_id,
+      seq_razors = state.seq_razors or {},
+    }
+    if seq_undo_values_equal(last.after, live) then
+      return last.after
+    end
+  end
+  return capture_seq_document_snapshot()
 end
 
 function end_seq_undo(label)
@@ -20337,16 +20456,33 @@ function seq_queue_random_sync(pattern_id, track_id)
   if not pattern_id then
     return
   end
-  local pending = state.seq_random_sync_pending
+  -- Pending syncs are keyed by pattern so rapid edits across patterns all flush.
+  local all = state.seq_random_sync_pending
+  if not all then
+    all = { by_pattern = {} }
+    state.seq_random_sync_pending = all
+  end
+  local pending = all.by_pattern[pattern_id]
   if not pending then
     pending = { pattern_id = pattern_id, track_ids = {} }
-    state.seq_random_sync_pending = pending
+    all.by_pattern[pattern_id] = pending
   end
-  pending.pattern_id = pattern_id
   if track_id then
     pending.track_ids[track_id] = true
   else
     pending.all_tracks = true
+  end
+end
+
+function seq_random_sync_pending_forget_track(track_id)
+  local all = state.seq_random_sync_pending
+  if not (all and all.by_pattern) then
+    return
+  end
+  for _, pending in pairs(all.by_pattern) do
+    if pending.track_ids then
+      pending.track_ids[track_id] = nil
+    end
   end
 end
 
@@ -20363,49 +20499,43 @@ function seq_repair_collapsed_note_velocities(pattern, track_id)
 end
 
 function seq_flush_pending_random_sync()
-  local pending = state.seq_random_sync_pending
-  if not pending then
+  local all = state.seq_random_sync_pending
+  if not all then
     return
   end
   state.seq_random_sync_pending = nil
   state.seq_random_sync_run = false
-  local pattern = get_seq_pattern(pending.pattern_id, false)
-  if pattern and pending.track_ids and not pending.all_tracks then
-    for track_id, _ in pairs(pending.track_ids) do
-      seq_repair_collapsed_note_velocities(pattern, track_id)
-    end
-  elseif pattern then
-    for _, slot in ipairs(state.seq_tracks or {}) do
-      seq_repair_collapsed_note_velocities(pattern, slot.id)
-    end
-  end
+  -- Note: quiet notes are no longer forced back to 1.0 here (that wiped
+  -- deliberate ghost notes on every random-setting edit).
   if seq_schedule_ingest_save then
     seq_schedule_ingest_save()
   elseif save_seq_project_state then
     save_seq_project_state()
   end
-  if pending.all_tracks or not pending.track_ids then
-    sync_seq_pattern_regions(pending.pattern_id)
-    return
-  end
-  local any = false
-  for _ in pairs(pending.track_ids) do
-    any = true
-    break
-  end
-  if not any then
-    sync_seq_pattern_regions(pending.pattern_id)
-    return
-  end
-  if r.PreventUIRefresh then r.PreventUIRefresh(1) end
-  for track_id, _ in pairs(pending.track_ids) do
-    local slot = seq_find_track_slot_by_id(track_id) or seq_find_slot_by_id(track_id)
-    if slot then
-      sync_seq_pattern_track(pending.pattern_id, slot, { skip_arrange = true, force_rebuild = true })
+  local need_arrange = false
+  for _, pending in pairs(all.by_pattern or {}) do
+    local any = false
+    if not pending.all_tracks and pending.track_ids then
+      for _ in pairs(pending.track_ids) do
+        any = true
+        break
+      end
+    end
+    if not any then
+      sync_seq_pattern_regions(pending.pattern_id)
+    else
+      if r.PreventUIRefresh then r.PreventUIRefresh(1) end
+      for track_id, _ in pairs(pending.track_ids) do
+        local slot = seq_find_track_slot_by_id(track_id) or seq_find_slot_by_id(track_id)
+        if slot then
+          sync_seq_pattern_track(pending.pattern_id, slot, { skip_arrange = true, force_rebuild = true })
+        end
+      end
+      if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+      need_arrange = true
     end
   end
-  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
-  if r.UpdateArrange then
+  if need_arrange and r.UpdateArrange then
     r.UpdateArrange()
   end
 end
@@ -23188,13 +23318,15 @@ function seq_set_parent_item_image_chunk(item, path, flags)
   flags = flags or SEQ_PARENT_IMAGE_FLAGS
   local line = string.format('RESOURCEFN "%s"', path)
   local flag_line = string.format("IMGRESOURCEFLAGS %d", flags)
+  -- gsub replacement strings treat % specially; escape it for paths like "100%".
+  local line_repl = line:gsub("%%", "%%%%")
   if chunk:find("RESOURCEFN%s+", 1) then
-    chunk = chunk:gsub('RESOURCEFN%s+"[^"]*"', line, 1)
+    chunk = chunk:gsub('RESOURCEFN%s+"[^"]*"', line_repl, 1)
     if chunk:find("RESOURCEFN%s+[^\"\r\n]+", 1) and not chunk:find(line, 1, true) then
-      chunk = chunk:gsub("RESOURCEFN%s+[^\r\n]+", line, 1)
+      chunk = chunk:gsub("RESOURCEFN%s+[^\r\n]+", line_repl, 1)
     end
   elseif chunk:find("\n>%s*$") then
-    chunk = chunk:gsub("\n>%s*$", "\n" .. line .. "\n" .. flag_line .. "\n>\n")
+    chunk = chunk:gsub("\n>%s*$", "\n" .. line_repl .. "\n" .. flag_line .. "\n>\n")
   else
     chunk = chunk .. line .. "\n" .. flag_line .. "\n"
   end
@@ -23775,19 +23907,51 @@ function seq_region_native_color(region)
   return 0
 end
 
-function seq_find_item_by_guid(guid)
-  if not guid or guid == "" then
-    return nil, nil
-  end
+-- GUID -> item map built lazily by one project scan. Hits are validated
+-- (pointer still valid and GUID unchanged); a miss or stale hit rebuilds the
+-- map, so a lookup never costs more than one scan. Validation makes hits safe
+-- across edits, so the map is not dropped on every project change (pool sync
+-- edits items between lookups); it is dropped when the active project changes.
+seq_item_guid_lookup_cache = nil
+
+function seq_item_guid_lookup_rebuild()
+  local map = {}
   local n = r.CountTracks(0)
   for tr_idx = 0, n - 1 do
     local tr = r.GetTrack(0, tr_idx)
     for item_idx = 0, r.CountTrackMediaItems(tr) - 1 do
       local item = r.GetTrackMediaItem(tr, item_idx)
-      if item and seq_item_guid(item) == guid then
-        return item, tr
+      local g = item and seq_item_guid(item)
+      if g and map[g] == nil then
+        map[g] = item
       end
     end
+  end
+  seq_item_guid_lookup_cache = {
+    map = map,
+    proj = r.EnumProjects and r.EnumProjects(-1) or nil,
+  }
+  return map
+end
+
+function seq_find_item_by_guid(guid)
+  if not guid or guid == "" then
+    return nil, nil
+  end
+  local cache = seq_item_guid_lookup_cache
+  if cache and r.EnumProjects and cache.proj ~= r.EnumProjects(-1) then
+    cache = nil
+  end
+  if cache then
+    local item = cache.map[guid]
+    if item and (not r.ValidatePtr2 or r.ValidatePtr2(0, item, "MediaItem*"))
+        and seq_item_guid(item) == guid then
+      return item, r.GetMediaItem_Track(item)
+    end
+  end
+  local item = seq_item_guid_lookup_rebuild()[guid]
+  if item then
+    return item, r.GetMediaItem_Track(item)
   end
   return nil, nil
 end
@@ -24261,14 +24425,14 @@ function seq_ingest_parent_items()
       local renamed = rec.name and rec.name ~= "" and rec.name ~= (region.name or "")
       if moved or resized or renamed then
         -- #region agent log
-        seq_debug_ndjson("E3", "arrange_parent_geometry", "mutate region", {
+        if SEQ_DEBUG_LOG then seq_debug_ndjson("E3", "arrange_parent_geometry", "mutate region", {
           id = region.id, old_start = old_start, new_start = new_start,
           old_bars = region.length_bars or 0, new_bars = new_bars,
           new_len = new_len, moved = moved, resized = resized, renamed = renamed,
           selected = (r.CountSelectedMediaItems and r.CountSelectedMediaItems(0)) or 0,
           snap_before = seq_debug_region_snapshot(),
           runId = "post-fix",
-        })
+        }) end
         -- #endregion
         if moved then
           region.start_qn = new_start
@@ -24300,11 +24464,11 @@ function seq_ingest_parent_items()
       end
       sync_seq_region(region)
       -- #region agent log
-      seq_debug_ndjson("E3", "arrange_parent_geometry", "after sync", {
+      if SEQ_DEBUG_LOG then seq_debug_ndjson("E3", "arrange_parent_geometry", "after sync", {
         id = region.id, start = region.start_qn or 0, bars = region.length_bars or 0,
         snap_after = seq_debug_region_snapshot(),
         runId = "post-fix",
-      })
+      }) end
       -- #endregion
     end
     seq_mark_self_arrange_write()
@@ -26415,8 +26579,27 @@ function seq_ensure_take_volume_envelope(take)
     local src_at = chunk:find("<SOURCE", 1, true)
     local insert_at = nil
     if src_at then
-      local close_at = chunk:find("\n>", src_at, true)
-      if close_at then insert_at = close_at + 2 end
+      -- Walk lines counting nested "<..." / ">" so a <SOURCE SECTION> that
+      -- wraps an inner <SOURCE WAVE> closes at its own matching ">".
+      local depth = 0
+      local pos = src_at
+      local len = #chunk
+      while pos <= len do
+        local nl = chunk:find("\n", pos, true)
+        local line_end = nl and (nl - 1) or len
+        local trimmed = chunk:sub(pos, line_end):match("^%s*(.-)%s*$") or ""
+        if trimmed:sub(1, 1) == "<" then
+          depth = depth + 1
+        elseif trimmed == ">" then
+          depth = depth - 1
+          if depth <= 0 then
+            if nl then insert_at = nl end
+            break
+          end
+        end
+        if not nl then break end
+        pos = nl + 1
+      end
     end
     if not insert_at then
       local last = nil
@@ -27436,6 +27619,7 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
   max_v = max_v or 1.0
   if max_v <= min_v then max_v = min_v + 1.0 end
   value = math.max(min_v, math.min(max_v, value or min_v))
+  local entry_value = value
 
   r.ImGui_SetCursorScreenPos(ctx, x, y)
   r.ImGui_InvisibleButton(ctx, id, w, h)
@@ -27494,7 +27678,8 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
       value = (drag.start_value or value) - drag_y * sensitivity
       value = math.max(min_v, math.min(max_v, value))
     end
-    changed = true
+    -- Only report a change when the value actually moved this frame.
+    changed = math.abs(value - entry_value) > (max_v - min_v) * 1e-7
   elseif state.seq_rect_drag and state.seq_rect_drag.id == id then
     state.seq_rect_drag = nil
   end
@@ -28381,6 +28566,15 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     end
   end
 
+  -- Open the undo session before mutating slot fields so the "before"
+  -- snapshot holds the old value (callers' begin_seq_undo is then a no-op).
+  local function begin_mix_undo()
+    if not seq_undo_is_open() then
+      begin_seq_undo("Adjust sequencer mix")
+    end
+    seq_undo_commit_on_release = true
+  end
+
   local gear = layout.gear
   if gear and gear.w > 0 then
     local layering_open = state.seq_layering_slot_id == slot.id
@@ -28417,6 +28611,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     )
     if vol_hot then hovered = true end
     if vol_changed then
+      begin_mix_undo()
       slot.volume = vol_val
       changed_mix = true
     end
@@ -28437,6 +28632,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     )
     if pan_hot then hovered = true end
     if pan_changed then
+      begin_mix_undo()
       slot.pan = pan_val
       changed_mix = true
     end
@@ -28485,6 +28681,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   local mute = layout.mute
   if mute and mute.w > 0 then
     if seq_ms_button("##seq_mute_" .. slot.id, dl, mute.x, mute.y, mute.w, "M", slot.mute, 0xE05050FF) then
+      begin_mix_undo()
       slot.mute = not slot.mute
       changed_mix = true
     end
@@ -28493,6 +28690,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   local solo = layout.solo
   if solo and solo.w > 0 then
     if seq_ms_button("##seq_solo_" .. slot.id, dl, solo.x, solo.y, solo.w, "S", slot.solo, 0xE8A020FF) then
+      begin_mix_undo()
       slot.solo = not slot.solo
       changed_mix = true
     end
@@ -28501,6 +28699,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   local overlap = layout.overlap
   if overlap and overlap.w > 0 then
     if seq_ms_button("##seq_overlap_" .. slot.id, dl, overlap.x, overlap.y, overlap.w, "O", slot.overlap, 0x40C8C8FF) then
+      begin_mix_undo()
       slot.overlap = not slot.overlap
       changed_mix = true
       overlap_changed = true
@@ -28685,6 +28884,9 @@ function render_seq_midi_assign_popup()
         state.seq_midi_popup_slot_id = nil
         state.seq_midi_key_drag = nil
         state.seq_midi_assign_dirty = nil
+        -- Disarm learn so the next incoming note can't silently reassign a track.
+        state.seq_midi_learn_slot_id = nil
+        state.seq_midi_kb_octave = nil
         return dirty
       end
     end
@@ -28697,6 +28899,8 @@ function render_seq_midi_assign_popup()
     r.ImGui_EndPopup(ctx)
     pop_style()
     state.seq_midi_popup_slot_id = nil
+    state.seq_midi_learn_slot_id = nil
+    state.seq_midi_kb_octave = nil
     return false
   end
   seq_midi_ensure_jsfx()
@@ -29372,7 +29576,6 @@ function seq_layering_sync_arrange(slot, opts)
     return
   end
   opts = opts or {}
-  seq_layering_repair_note_volumes(slot)
   if r.PreventUIRefresh then
     r.PreventUIRefresh(1)
   end
@@ -29485,9 +29688,6 @@ function seq_layering_set_output(slot, kind)
   state.seq_layering_ab = kind
   seq_layering_sync_arrange(slot, { force_rebuild = true })
   save_config()
-  if save_seq_project_state then
-    save_seq_project_state()
-  end
   return true
 end
 
@@ -29529,9 +29729,6 @@ function apply_dragged_sample_to_seq_track(slot, sample, persist)
     seq_layering_sync_arrange(slot)
     if persist ~= false then
       save_config()
-      if save_seq_project_state then
-        save_seq_project_state()
-      end
     end
     return true
   end
@@ -29576,6 +29773,7 @@ function seq_layering_insert_mix_at_position(sample, time_pos, target_track)
     local piece = pieces[i]
     if piece.path and r.file_exists(piece.path) then
       local item = r.AddMediaItemToTrack(track)
+      local item_ok = false
       if item then
         local src_sample = piece.sample or find_sample_by_path(piece.path)
         local pdur = (seq_sample_source_length_sec and seq_sample_source_length_sec(piece.path, src_sample))
@@ -29604,7 +29802,12 @@ function seq_layering_insert_mix_at_position(sample, time_pos, target_track)
             seq_item_apply_layer_fades(item, piece.fade_in, piece.fade_out)
             rebuild_peaks_for_item(item)
             any = true
+            item_ok = true
           end
+        end
+        if not item_ok and r.DeleteTrackMediaItem then
+          -- Source failed to load: don't leave an empty item behind.
+          r.DeleteTrackMediaItem(track, item)
         end
       end
     end
@@ -30537,7 +30740,6 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
   if draw_ui_button("seq_layer_global_" .. slot.id .. "_" .. side_key, nil, dice_sz, dice_sz, { icon = "dice5", style = "accent" }) then
     if seq_layering_randomize_side(slot, side_key) then
       save_config()
-      if save_seq_project_state then save_seq_project_state() end
       seq_layering_sync_arrange(slot)
     end
   end
@@ -30707,12 +30909,44 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
 
   if changed then
     save_config()
-    if save_seq_project_state then save_seq_project_state() end
     seq_layering_sync_arrange(slot)
   end
 end
 
+-- Drum-layering edits (blend drag, dice, lock, volume knobs, bias, link,
+-- A/B output) mutate slot.layers directly. Open one undo session when a click
+-- lands in the layering window (before any widget mutates) and close it once
+-- all mouse buttons are released; unchanged sessions are dropped by end_seq_undo.
+function seq_layering_undo_maybe_begin()
+  if state.seq_layering_undo_owned or not state.seq_layering_hovered then
+    return
+  end
+  if not r.ImGui_IsMouseClicked then
+    return
+  end
+  if r.ImGui_IsMouseClicked(ctx, 0) or r.ImGui_IsMouseClicked(ctx, 1) then
+    if seq_undo_own_begin("Edit drum layering") then
+      state.seq_layering_undo_owned = true
+    end
+  end
+end
+
+function seq_layering_undo_maybe_end(force)
+  if not state.seq_layering_undo_owned then
+    return
+  end
+  if not force and r.ImGui_IsMouseDown
+      and (r.ImGui_IsMouseDown(ctx, 0) or r.ImGui_IsMouseDown(ctx, 1)) then
+    return
+  end
+  state.seq_layering_undo_owned = nil
+  if seq_undo_is_open() then
+    end_seq_undo()
+  end
+end
+
 function render_seq_layering_window()
+  seq_layering_undo_maybe_end()
   if not state.seq_layering_slot_id then
     state.seq_layering_hover_side = nil
     state.seq_layering_hovered = false
@@ -30784,10 +31018,12 @@ function render_seq_layering_window()
     state.seq_layering_hovered = r.ImGui_IsWindowHovered
         and r.ImGui_IsWindowHovered(ctx, hover_flags)
         or false
+    seq_layering_undo_maybe_begin()
     local body_ok, body_err = pcall(seq_layering_render_body, slot)
     if not body_ok and log then
       log("Drum layering draw error: " .. tostring(body_err))
     end
+    seq_layering_undo_maybe_end()
     pcall(r.ImGui_End, ctx)
   else
     state.seq_layering_hovered = false
@@ -30809,7 +31045,6 @@ function seq_layering_draw_bias(dl, slot, x, y, w, h, linked)
       slot.layers.bias = 0.0
       state.seq_layering_bias_drag = nil
       save_config()
-      if save_seq_project_state then save_seq_project_state() end
       seq_layering_sync_arrange(slot, { force_rebuild = true })
     elseif active then
       local dx = select(1, r.ImGui_GetMouseDelta(ctx))
@@ -30823,7 +31058,6 @@ function seq_layering_draw_bias(dl, slot, x, y, w, h, linked)
     elseif state.seq_layering_bias_drag and not (r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0)) then
       state.seq_layering_bias_drag = nil
       save_config()
-      if save_seq_project_state then save_seq_project_state() end
       seq_layering_sync_arrange(slot, { force_rebuild = true })
     end
   elseif state.seq_layering_bias_drag then
@@ -30934,7 +31168,6 @@ function seq_layering_render_body(slot)
   }) then
     seq_layering_set_linked(slot, not linked)
     save_config()
-    if save_seq_project_state then save_seq_project_state() end
     seq_layering_sync_arrange(slot)
   end
   if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
@@ -31336,34 +31569,45 @@ function seq_sample_source_length_sec(path, sample)
   if not path or path == "" then
     return nil
   end
+  -- Only successful lookups are cached; failures (offline/unreadable files)
+  -- are retried, and the cache is cleared when folder availability changes.
   local cached = seq_sample_len_sec_cache[path]
-  if cached ~= nil then
-    return cached > 0 and cached or nil
+  if cached ~= nil and cached > 0 then
+    return cached
   end
   if not seq_path_exists(path) then
-    seq_sample_len_sec_cache[path] = 0
     return nil
   end
   local src = r.PCM_Source_CreateFromFile(path)
   if not src then
-    seq_sample_len_sec_cache[path] = 0
     return nil
   end
   local length_sec = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
   if r.PCM_Source_Destroy then
     r.PCM_Source_Destroy(src)
   end
-  seq_sample_len_sec_cache[path] = length_sec or 0
-  if length_sec > 0 then
+  if length_sec and length_sec > 0 then
+    seq_sample_len_sec_cache[path] = length_sec
     return length_sec
   end
   return nil
 end
 
-function seq_sample_length_qn(path, sample)
+-- at_qn (optional): project QN where the sample starts; converts through the
+-- tempo map at that position instead of assuming the tempo at QN 0.
+function seq_sample_length_qn(path, sample, at_qn)
   local length_sec = seq_sample_source_length_sec(path, sample)
   if not length_sec or length_sec <= 0 then
     return nil
+  end
+  if type(at_qn) == "number" and r.TimeMap2_timeToQN then
+    local t0 = qn_to_time(at_qn)
+    if t0 then
+      local end_qn = r.TimeMap2_timeToQN(0, t0 + length_sec)
+      if end_qn and end_qn > at_qn then
+        return end_qn - at_qn
+      end
+    end
   end
   local sec_per = seq_sec_per_qn
   if not sec_per or sec_per <= 0 then
@@ -31487,8 +31731,8 @@ end
 
 -- Remaining source after Start, then Stretch can shrink it but not grow past
 -- the unstretched remaining length (so a longer stretch never pushes the end).
-function seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx)
-  local src_qn = seq_sample_length_qn(path, sample)
+function seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx, at_qn)
+  local src_qn = seq_sample_length_qn(path, sample, at_qn)
   if not src_qn or src_qn <= 0 then
     return length_qn
   end
@@ -31501,11 +31745,11 @@ function seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx)
   return math.min(length_qn, math.max(0.001, cap))
 end
 
-function seq_cap_length_to_sample_qn(length_qn, path, sample, note, hit_idx)
+function seq_cap_length_to_sample_qn(length_qn, path, sample, note, hit_idx, at_qn)
   if note then
-    return seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx)
+    return seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx, at_qn)
   end
-  local cap_qn = seq_sample_length_qn(path, sample)
+  local cap_qn = seq_sample_length_qn(path, sample, at_qn)
   if cap_qn and cap_qn > 0 then
     return math.min(length_qn, cap_qn)
   end
@@ -31598,7 +31842,8 @@ function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx,
     return seq_cap_length_to_sample_qn(slice_qn * 0.98, resolved_path, resolved_sample, note)
   end
 
-  local sample_qn = seq_sample_length_qn(resolved_path, resolved_sample)
+  local at_qn = region and step_idx ~= nil and seq_note_trigger_qn(region, step_idx, note, grid_qn) or nil
+  local sample_qn = seq_sample_length_qn(resolved_path, resolved_sample, at_qn)
   if not sample_qn or sample_qn <= 0 then
     sample_qn = grid_qn
   end
@@ -31606,7 +31851,7 @@ function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx,
   -- length_qn (one grid cell) which is only a stutter-span placeholder.
   local decay_qn = tonumber(note and note.decay_qn)
   if type(decay_qn) == "number" and decay_qn > 1e-9 then
-    return seq_cap_length_to_sample_qn(math.max(grid_qn * 0.05, decay_qn), resolved_path, resolved_sample, note)
+    return seq_cap_length_to_sample_qn(math.max(grid_qn * 0.05, decay_qn), resolved_path, resolved_sample, note, nil, at_qn)
   end
   -- Default: full effective length, cropped so it does not overlap the next hit.
   -- Per-track overlap lets the sample ring out over later notes, unless a
@@ -31619,7 +31864,7 @@ function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx,
   end
   -- Auto sustain stays inside the region. Explicit decay_qn may cross it.
   sample_qn = seq_cap_length_to_region_end_qn(sample_qn, region, step_idx, note, grid_qn)
-  return seq_cap_length_to_sample_qn(sample_qn, resolved_path, resolved_sample, note)
+  return seq_cap_length_to_sample_qn(sample_qn, resolved_path, resolved_sample, note, nil, at_qn)
 end
 
 SEQ_FADE_SHAPE_COUNT = 7
@@ -32724,17 +32969,6 @@ function insert_seq_note_hit(tr, region, track_id, step_key, note, resolved_path
   if scale == nil then scale = 1.0 end
   if take then
     local vel = tonumber(note.volume) or 1.0
-    if opts.layer_piece and vel < 0.1 then vel = 1.0 end
-    local pattern = region and get_seq_pattern(region.pattern_id, false)
-    local vel_settings = get_seq_track_settings(pattern, track_id, false)
-    -- Previous humanize bake-in drove stored level to 0; restore unity so
-    -- further tweaks can be heard instead of staying at -inf.
-    if vel < 0.08 and (not opts.ghost) and seq_settings_vel_humanize_active(vel_settings) then
-      vel = 1.0
-      if type(note) == "table" then
-        note.volume = 1.0
-      end
-    end
     if not opts.ghost then
       vel = seq_humanize_note_velocity(vel, region, track_id, step_key, hit_start_qn, opts.hit_idx)
     end
@@ -33446,7 +33680,12 @@ function seq_sync_linked_arrange_from(region)
     if seq_prune_stale_region_items(others[i]) > 0 then
       pruned = true
     end
-    local item_n = seq_count_owned_primary_items(others[i])
+  end
+  -- Pruning only touches each region's own items, so count all regions in
+  -- one scan afterwards instead of rescanning every track per region.
+  local owned_counts = seq_count_owned_primary_items_by_region()
+  for i = 1, #others do
+    local item_n = owned_counts[others[i].id] or 0
     local note_n = seq_region_expected_primary_notes(others[i])
     if item_n ~= note_n then
       rebuild[#rebuild + 1] = others[i]
@@ -34289,6 +34528,27 @@ function seq_count_owned_primary_items(region)
   return n
 end
 
+-- Same counting as seq_count_owned_primary_items, for every region in one pass:
+-- region_id -> number of owned non-aux items on the slots' target tracks.
+function seq_count_owned_primary_items_by_region()
+  local counts = {}
+  for _, slot in ipairs(state.seq_tracks or {}) do
+    local tr = get_seq_slot_target_track(slot)
+    if tr then
+      for i = 0, r.CountTrackMediaItems(tr) - 1 do
+        local item = r.GetTrackMediaItem(tr, i)
+        if item and not seq_item_is_aux_piece(item) and seq_item_is_owned(item) then
+          local rid = tonumber(get_item_ext(item, SEQ_EXT_REGION) or "")
+          if rid then
+            counts[rid] = (counts[rid] or 0) + 1
+          end
+        end
+      end
+    end
+  end
+  return counts
+end
+
 function seq_region_expected_primary_notes(region)
   local n = 0
   if not region then
@@ -34329,6 +34589,7 @@ function seq_regions_for_ingest()
     out[selected.id] = selected
   end
   local sel_count = r.CountSelectedMediaItems and r.CountSelectedMediaItems(0) or 0
+  local sel_linked = nil
   for i = 0, sel_count - 1 do
     local item = r.GetSelectedMediaItem(0, i)
     if item and seq_item_is_parent_marker(item) then
@@ -34341,13 +34602,8 @@ function seq_regions_for_ingest()
       local tr = r.GetMediaItemTrack and r.GetMediaItemTrack(item)
       local on_seq = false
       if tr then
-        local guid = r.GetTrackGUID(tr)
-        for _, slot in ipairs(state.seq_tracks or {}) do
-          if slot.reaper_track_guid and slot.reaper_track_guid == guid then
-            on_seq = true
-            break
-          end
-        end
+        sel_linked = sel_linked or seq_linked_track_guid_set()
+        on_seq = sel_linked[r.GetTrackGUID(tr)] == true
       end
       if on_seq then
         if seq_item_is_owned(item) then
@@ -34435,8 +34691,9 @@ function seq_regions_for_ingest()
     out[id] = region
   end
   local mismatch = {}
+  local owned_counts = seq_count_owned_primary_items_by_region()
   for _, region in pairs(out) do
-    mismatch[region.id] = seq_count_owned_primary_items(region) ~= seq_region_expected_primary_notes(region)
+    mismatch[region.id] = (owned_counts[region.id] or 0) ~= seq_region_expected_primary_notes(region)
   end
   local best = {}
   for _, region in pairs(out) do
@@ -35165,6 +35422,11 @@ function delete_selected_seq_region()
   end
   if not pattern_still_used then
     state.seq_patterns[tostring(region.pattern_id)] = nil
+  end
+  local pending_confirm = state.seq_pattern_confirm
+  if pending_confirm and (pending_confirm.region_id == region.id
+      or tostring(pending_confirm.pattern_id) == tostring(region.pattern_id)) then
+    state.seq_pattern_confirm = nil
   end
 
   if #state.seq_regions == 0 then
@@ -37443,6 +37705,22 @@ function seq_locked_step_seen(locked, track_id)
   return seen
 end
 
+-- Clear only the tracks a generator writes to (role present in role_lookup);
+-- other tracks (bass, loops, roles the generator doesn't cover) keep their notes.
+function seq_clear_generated_role_tracks(pattern, role_lookup)
+  if not pattern or type(pattern.notes) ~= "table" or type(role_lookup) ~= "table" then
+    return
+  end
+  for _, slot in ipairs(state.seq_tracks or {}) do
+    if slot.sample_path and slot.id ~= nil then
+      local role = infer_seq_track_role(slot)
+      if type(role_lookup[role]) == "table" then
+        pattern.notes[tostring(slot.id)] = nil
+      end
+    end
+  end
+end
+
 function generate_seq_pattern(region, style_key, opts)
   if not region then
     return 0
@@ -37471,7 +37749,7 @@ function generate_seq_pattern(region, style_key, opts)
   local add_prob = (dens_pct / 100.0) * 0.4
 
   local locked_notes = seq_collect_locked_notes(pattern, grid_qn)
-  pattern.notes = {}
+  seq_clear_generated_role_tracks(pattern, template)
   state.selected_seq_note = nil
   local hit_count = seq_restore_locked_notes(region, locked_notes)
 
@@ -38558,16 +38836,29 @@ end
 -- state that exmizisted before the user started auditioning patterns.
 function seq_pattern_confirm_capture(region)
   if not region then return end
-  if state.seq_pattern_confirm and state.seq_pattern_confirm.active then
+  local c = state.seq_pattern_confirm
+  if c and c.active and tostring(c.pattern_id) == tostring(region.pattern_id)
+      and c.proj == seq_pattern_confirm_current_proj() then
     return
   end
+  -- A different pattern (or project) starts a new confirmation session;
+  -- the previous audition is implicitly kept.
   local key = tostring(region.pattern_id)
   state.seq_pattern_confirm = {
     active = true,
     region_id = region.id,
     pattern_id = region.pattern_id,
+    proj = seq_pattern_confirm_current_proj(),
     snapshot = clone_table_deep(state.seq_patterns[key]),
   }
+end
+
+function seq_pattern_confirm_current_proj()
+  if r.EnumProjects then
+    local proj = r.EnumProjects(-1)
+    return proj
+  end
+  return nil
 end
 
 function seq_pattern_confirm_commit()
@@ -38577,6 +38868,10 @@ end
 function seq_pattern_confirm_restore()
   local c = state.seq_pattern_confirm
   if not c then return end
+  if c.proj ~= seq_pattern_confirm_current_proj() then
+    state.seq_pattern_confirm = nil
+    return
+  end
   local key = tostring(c.pattern_id)
   local label = begin_seq_undo("Revert pattern changes")
   if c.snapshot == nil then
@@ -38692,7 +38987,7 @@ function seq_write_role_positions(region, style_key, role_map)
   local max_steps = math.max(1, math.floor((region_len_qn / grid_qn) + 0.5))
 
   local locked_notes = seq_collect_locked_notes(pattern, grid_qn)
-  pattern.notes = {}
+  seq_clear_generated_role_tracks(pattern, role_map)
   state.selected_seq_note = nil
   local hit_count = seq_restore_locked_notes(region, locked_notes)
 
@@ -42006,6 +42301,7 @@ function seq_delete_notes_in_razors()
                 if toggle_seq_note(region, slot, rec.key, rec.qn, "erase", {
                   defer_save = true,
                   defer_arrange = true,
+                  defer_sync = true,
                 }) then
                   changed = true
                   synced[region.pattern_id] = true
@@ -42017,11 +42313,14 @@ function seq_delete_notes_in_razors()
       end
     end
   end
-  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+  -- One full resync per touched pattern, inside the PreventUIRefresh block.
   if changed then
     for pattern_id in pairs(synced) do
       sync_seq_pattern_regions(pattern_id)
     end
+  end
+  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+  if changed then
     r.UpdateArrange()
     save_config()
   end

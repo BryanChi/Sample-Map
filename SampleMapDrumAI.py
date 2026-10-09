@@ -191,9 +191,29 @@ def softmax_sample(candidates, scores, n, tau, rng):
     return chosen
 
 
-def vary_role(genre, role, input_positions, variation, rng):
+def allowed_steps(steps_per_bar):
+    """16th positions the caller's grid can represent. A coarser grid (e.g. 8
+    steps per bar) can only place every other 16th; the Lua side drops
+    positions that don't land on its grid, so never emit them."""
+    try:
+        spb = int(steps_per_bar)
+    except (TypeError, ValueError):
+        spb = 16
+    if 0 < spb < 16 and 16 % spb == 0:
+        stride = 16 // spb
+        return [s for s in range(16) if s % stride == 0]
+    return list(range(16))
+
+
+def vary_role(genre, role, input_positions, variation, rng, allowed=None):
+    if not allowed:
+        allowed = list(range(16))
+    allowed_set = set(allowed)
+    # Positions are 16ths within a bar; wrap multi-bar / rounded-up values
+    # (e.g. 16 from a bar-end rounding) instead of dropping them.
+    input_positions = [p % 16 for p in input_positions if p >= 0]
     prior = get_prior(genre, role, input_positions)
-    input_set = set(p for p in input_positions if 0 <= p < 16)
+    input_set = set(p for p in input_positions if p in allowed_set)
 
     # Blend prior with the user's pattern; more variation -> trust prior/noise.
     w_input = (1.0 - variation) * 0.9 + 0.1
@@ -205,7 +225,7 @@ def vary_role(genre, role, input_positions, variation, rng):
         scores.append(w_prior * prior[s] + w_input * in_mask + noise)
 
     # Steps the genre considers structurally important.
-    strong = [s for s in range(16) if prior[s] >= 0.8]
+    strong = [s for s in allowed if prior[s] >= 0.8]
 
     if input_set:
         # Density anchors on the user's note count; preserve the groove skeleton
@@ -224,14 +244,14 @@ def vary_role(genre, role, input_positions, variation, rng):
     # so low variation keeps the same number of notes.
     jitter = round((rng.random() * 2.0 - 1.0) * variation * 2.5)
     target = base_count + jitter
-    target = max(1, min(12, target))
+    target = max(1, min(12, len(allowed), target))
     if target < len(forced):
         target = len(forced)
 
     chosen = set(forced[:target]) if forced else set()
     remaining = target - len(chosen)
     if remaining > 0:
-        candidates = [s for s in range(16) if s not in chosen]
+        candidates = [s for s in allowed if s not in chosen]
         cand_scores = [scores[s] for s in candidates]
         tau = 0.25 + variation * 0.9
         for s in softmax_sample(candidates, cand_scores, remaining, tau, rng):
@@ -256,6 +276,7 @@ def main():
     variation = max(0.0, min(1.0, variation))
     seed = int(req.get("seed", 0)) or random.randint(1, 2_000_000_000)
     rng = random.Random(seed)
+    allowed = allowed_steps(req.get("steps_per_bar", 16))
 
     out = {}
     for role in roles:
@@ -264,7 +285,7 @@ def main():
             positions = [int(p) for p in positions]
         except Exception:  # noqa: BLE001
             positions = []
-        out[role] = vary_role(genre, role, positions, variation, rng)
+        out[role] = vary_role(genre, role, positions, variation, rng, allowed)
 
     print(json.dumps({"pattern": out, "engine": "groove-prior-v1", "seed": seed}))
 
