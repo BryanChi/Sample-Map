@@ -382,27 +382,34 @@ function seq_sample_source_length_sec(path, sample)
   if not path or path == "" then
     return nil
   end
-  -- Only successful lookups are cached; failures (offline/unreadable files)
-  -- are retried, and the cache is cleared when folder availability changes.
+  -- Lengths are cached; a failed lookup (offline/unreadable file) is cached as
+  -- a negative number holding its time and retried after 5 s. The cache is
+  -- cleared when folder availability changes.
   local cached = seq_sample_len_sec_cache[path]
-  if cached ~= nil and cached > 0 then
-    return cached
+  local now = r.time_precise()
+  if cached ~= nil then
+    if cached > 0 then
+      return cached
+    end
+    if now - (-cached) < 5.0 then
+      return nil
+    end
   end
-  if not seq_path_exists(path) then
-    return nil
-  end
-  local src = r.PCM_Source_CreateFromFile(path)
-  if not src then
-    return nil
-  end
-  local length_sec = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
-  if r.PCM_Source_Destroy then
-    r.PCM_Source_Destroy(src)
+  local length_sec = nil
+  if seq_path_exists(path) then
+    local src = r.PCM_Source_CreateFromFile(path)
+    if src then
+      length_sec = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
+      if r.PCM_Source_Destroy then
+        r.PCM_Source_Destroy(src)
+      end
+    end
   end
   if length_sec and length_sec > 0 then
     seq_sample_len_sec_cache[path] = length_sec
     return length_sec
   end
+  seq_sample_len_sec_cache[path] = -math.max(now, 1e-6)
   return nil
 end
 

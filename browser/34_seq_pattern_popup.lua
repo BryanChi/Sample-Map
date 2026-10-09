@@ -533,7 +533,7 @@ function seq_call_drum_ai(style_key, role_positions, variation, seed, steps_per_
   }, " ") .. " 2>&1"
 
   local output = nil
-  local pipe = io.popen(cmd, "r")
+  local pipe = io.popen(sm_shell_cmd(cmd), "r")
   if pipe then
     output = pipe:read("*all")
     pipe:close()
@@ -580,7 +580,9 @@ function run_seq_ai_variation(region, style_key, variation)
   -- created below still get generated parts.
   local seed = seq_new_seed()
   local role_map, err = nil, "no region"
-  if region then
+  -- Skip the model when nothing could be generated; if tracks created below
+  -- make it generatable after all, the built-in randomizer covers it.
+  if region and seq_has_generatable_track(style) then
     local pre_grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
     local pre_steps_per_bar = math.max(1, math.floor((4.0 / pre_grid_qn) + 0.5))
     local pre_bar_count = math.max(1, math.floor((get_seq_region_length_qn(region) / 4.0) + 0.5))
@@ -696,7 +698,7 @@ function seq_call_gmd(payload)
   }, " ") .. " 2>&1"
 
   local output = nil
-  local pipe = io.popen(cmd, "r")
+  local pipe = io.popen(sm_shell_cmd(cmd), "r")
   if pipe then
     output = pipe:read("*all")
     pipe:close()

@@ -149,7 +149,9 @@ def download_and_extract():
     if os.path.isfile(zpath) and not is_ready() and not _zip_is_valid(zpath):
         _remove_quietly(zpath)
     if not os.path.isfile(zpath):
-        tmp = zpath + ".partial"
+        # Unique name: a timed-out earlier download may still be writing its own file.
+        fd, tmp = tempfile.mkstemp(prefix=os.path.basename(zpath) + ".", suffix=".partial", dir=cache_dir())
+        os.close(fd)
         try:
             with urllib.request.urlopen(DATASET_URL, timeout=120) as resp, open(tmp, "wb") as out:
                 while True:
@@ -159,7 +161,10 @@ def download_and_extract():
                     out.write(chunk)
             if not _zip_is_valid(tmp):
                 raise RuntimeError("Downloaded Groove MIDI archive is corrupt; try again")
-            os.replace(tmp, zpath)
+            if not os.path.isfile(zpath):
+                os.replace(tmp, zpath)
+            else:
+                _remove_quietly(tmp)
         except Exception:
             _remove_quietly(tmp)
             raise

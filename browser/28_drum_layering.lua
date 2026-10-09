@@ -1719,7 +1719,7 @@ function seq_layering_undo_maybe_begin()
     return
   end
   if r.ImGui_IsMouseClicked(ctx, 0) or r.ImGui_IsMouseClicked(ctx, 1) then
-    if seq_undo_own_begin("Edit drum layering") then
+    if seq_undo_own_begin("Edit drum layering", { lazy_reaper = true }) then
       state.seq_layering_undo_owned = true
     end
   end

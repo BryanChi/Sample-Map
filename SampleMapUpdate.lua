@@ -426,8 +426,9 @@ function SampleMapFetchFilesSync(rel_paths)
     local tmp = dest .. ".new"
     ensure_dir(dir_of(dest))
     os.remove(tmp)
-    -- ExecProcess runs the command directly on Windows (no batch % expansion).
-    local q = is_windows() and function(v) return '"' .. tostring(v):gsub('"', "") .. '"' end or bg_quote
+    -- ExecProcess splits its command line itself (no shell), honoring double
+    -- quotes, so quote that way on every platform, as earlier versions did.
+    local q = function(v) return '"' .. tostring(v):gsub('"', "") .. '"' end
     local cmd = string.format('%s -L -f -s -S --connect-timeout 10 --max-time 60 -o %s %s',
       curl_bin(), q(tmp), q(base .. "/" .. url_encode(rel)))
     local out = r.ExecProcess(cmd, 70000) or ""
@@ -618,8 +619,8 @@ local function install_downloads(upd)
   if failure then
     for i = #installed, 1, -1 do
       local e = installed[i]
+      os.remove(e.file.local_path)
       if e.had_orig then
-        os.remove(e.file.local_path)
         os.rename(e.file.bak_path, e.file.local_path)
       end
     end

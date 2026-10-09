@@ -522,6 +522,10 @@ function seq_undo_clear_history()
   state.seq_pattern_confirm = nil
   seq_undo_stack = {}
   seq_redo_stack = {}
+  -- Close a REAPER undo block still open from an interrupted session.
+  if seq_undo_session and not seq_undo_session.lazy_reaper then
+    seq_undo_end_reaper(seq_undo_session.label)
+  end
   seq_undo_session = nil
   seq_undo_applying = false
   seq_undo_commit_on_release = false
@@ -842,15 +846,17 @@ function seq_apply_undo_snapshot_body(snap, label, guard)
   end
 end
 
-function seq_undo_own_begin(label)
+function seq_undo_own_begin(label, opts)
   if seq_undo_applying or seq_undo_is_open() then
     return false
   end
-  begin_seq_undo(label)
+  begin_seq_undo(label, opts)
   return true
 end
 
-function begin_seq_undo(label)
+-- opts.lazy_reaper: don't open a REAPER undo block up front (the session may
+-- end without changes); a REAPER undo point is added only if something changed.
+function begin_seq_undo(label, opts)
   label = label or "Sample Map Sequencer edit"
   if seq_undo_applying then
     return label
@@ -874,11 +880,15 @@ function begin_seq_undo(label)
     end
     error(before, 0)
   end
+  local lazy = type(opts) == "table" and opts.lazy_reaper == true
   seq_undo_session = {
     label = label,
     before = before,
+    lazy_reaper = lazy,
   }
-  seq_undo_begin_reaper()
+  if not lazy then
+    seq_undo_begin_reaper()
+  end
   return label
 end
 
@@ -923,11 +933,17 @@ function end_seq_undo(label)
   end
   label = label or seq_undo_session.label or "Sample Map Sequencer edit"
   local before = seq_undo_session.before
+  local lazy = seq_undo_session.lazy_reaper
   seq_undo_session = nil
-  seq_undo_end_reaper(label)
+  if not lazy then
+    seq_undo_end_reaper(label)
+  end
   local after = capture_seq_document_snapshot()
   if seq_undo_values_equal(before, after) then
     return
+  end
+  if lazy and r.Undo_OnStateChange2 then
+    r.Undo_OnStateChange2(0, label)
   end
   seq_undo_stack[#seq_undo_stack + 1] = {
     label = label,

@@ -1321,8 +1321,9 @@ function collect_worker_result(w)
       note_scan_session_analyzer(false)
       w.path = nil
       w.mode = nil
-      -- Restart the hung worker so its late result can't land on the next job.
-      if sm_analyzer_worker_pid(w) then
+      -- Restart the hung worker so its late result can't land on the next job;
+      -- also restart one that exited (pid file gone) right as the job was sent.
+      if sm_analyzer_worker_pid(w) or w.pid_seen then
         sm_restart_analyzer_worker(w)
       end
       return true
