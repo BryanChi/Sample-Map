@@ -660,6 +660,65 @@ end
 
 -- --- Helper functions ---------------------------------------------------------
 local function log(msg)
+  -- Bounded in-memory ring buffer (last 200 lines); read via sm_error_log_lines().
+  local buf = state.error_log
+  if type(buf) ~= "table" or type(buf.lines) ~= "table" then
+    buf = { lines = {}, next = 1, count = 0, max = 200 }
+    state.error_log = buf
+  end
+  buf.lines[buf.next] = tostring(msg)
+  buf.next = (buf.next % buf.max) + 1
+  if buf.count < buf.max then
+    buf.count = buf.count + 1
+  end
+end
+
+function sm_error_log_lines()
+  local buf = state.error_log
+  local out = {}
+  if type(buf) ~= "table" or type(buf.lines) ~= "table" then
+    return out
+  end
+  local start = (buf.count < buf.max) and 1 or buf.next
+  for i = 0, buf.count - 1 do
+    out[#out + 1] = buf.lines[((start - 1 + i) % buf.max) + 1]
+  end
+  return out
+end
+
+function sm_error_traceback(err)
+  if debug and debug.traceback then
+    return debug.traceback(tostring(err), 2)
+  end
+  return tostring(err)
+end
+
+-- Log every error; show the first one from each site in the REAPER console.
+function sm_report_error(site, err)
+  site = tostring(site or "?")
+  log("[error] " .. site .. ": " .. tostring(err))
+  state.sm_error_sites = state.sm_error_sites or {}
+  if state.sm_error_sites[site] then
+    return
+  end
+  state.sm_error_sites[site] = true
+  if r.ShowConsoleMsg then
+    r.ShowConsoleMsg(string.format(
+      "[Sample Map] Error in %s (repeats are only logged):\n%s\n\n", site, tostring(err)
+    ))
+  end
+end
+
+-- xpcall with traceback + reporting. Returns ok, results...
+function sm_pcall(site, fn, ...)
+  if type(fn) ~= "function" then
+    return true -- optional hook not defined: nothing to run
+  end
+  local res = table.pack(xpcall(fn, sm_error_traceback, ...))
+  if not res[1] then
+    sm_report_error(site, res[2])
+  end
+  return table.unpack(res, 1, res.n)
 end
 
 local function add_scan_log(msg)
@@ -46056,12 +46115,51 @@ function seq_stem_import_begin(path, opts)
   return true
 end
 
+-- SampleMapStemImport.lua is loaded once at startup. Developer hot-reload is
+-- opt-in: set ExtState SampleMapBrowser/stem_hot_reload=1 (or the global
+-- SAMPLE_MAP_STEM_HOT_RELOAD = true); the file is then re-read at most once a
+-- second and re-run only when its contents changed.
+function seq_stem_import_hot_reload_if_changed()
+  local now = r.time_precise()
+  if now - (state.seq_stem_hot_reload_checked or 0) < 1.0 then
+    return
+  end
+  state.seq_stem_hot_reload_checked = now
+  if not (SAMPLE_MAP_STEM_HOT_RELOAD or r.GetExtState("SampleMapBrowser", "stem_hot_reload") == "1") then
+    return
+  end
+  local path = SCRIPT_DIR .. "/SampleMapStemImport.lua"
+  local fh = io.open(path, "rb")
+  if not fh then
+    return
+  end
+  local src = fh:read("*a")
+  fh:close()
+  if not src or src == state.seq_stem_hot_reload_src then
+    return
+  end
+  local first = state.seq_stem_hot_reload_src == nil
+  state.seq_stem_hot_reload_src = src
+  if first then
+    return -- baseline: the startup dofile already ran this version
+  end
+  local ok, err = pcall(dofile, path)
+  if not ok then
+    log("Stem import hot-reload failed: " .. tostring(err))
+    return
+  end
+  state.seq_stem_hooks_installed = false
+end
+
 function seq_stem_import_tick()
-  -- Reload stem-import + tempo-map from disk each tick so extract picks up
-  -- file edits without depending on a stale live instance.
-  pcall(dofile, SCRIPT_DIR .. "/SampleMapStemImport.lua")
-  if SampleMapStemImport and SampleMapStemImport.install_browser_hooks then
-    SampleMapStemImport.install_browser_hooks()
+  seq_stem_import_hot_reload_if_changed()
+  -- Hooks reference browser functions defined after the startup dofile, so
+  -- install them lazily on the first tick (and again after a hot-reload).
+  if not state.seq_stem_hooks_installed then
+    state.seq_stem_hooks_installed = true
+    if SampleMapStemImport and SampleMapStemImport.install_browser_hooks then
+      SampleMapStemImport.install_browser_hooks()
+    end
   end
   local job = state.seq_stem_import
   if not job then
@@ -54578,7 +54676,12 @@ function shutdown_script(reason)
   SampleMapInstance.shutdown_done = true
   running = false
   pcall(function()
-    r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
+    -- Only clear the key while it still holds this instance's token; a newer
+    -- instance may already have claimed it.
+    local cur = r.GetExtState(SampleMapInstance.section, SampleMapInstance.key)
+    if SampleMapInstance.token and cur == SampleMapInstance.token then
+      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
+    end
   end)
 
   pcall(stop_preview)
@@ -54608,63 +54711,129 @@ function shutdown_script(reason)
   pcall(save_config)
 end
 
+-- After a UI error left the ImGui stack unbalanced, ReaImGui may invalidate
+-- the context. Recreate it (at most 3 times per 30 s) instead of quitting.
+function sm_imgui_try_recover_context()
+  if not state.sm_imgui_recover_pending then
+    return false
+  end
+  state.sm_imgui_recover_pending = false
+  local now = r.time_precise()
+  local recent = {}
+  for _, t in ipairs(state.sm_imgui_recreate_times or {}) do
+    if now - t < 30.0 then
+      recent[#recent + 1] = t
+    end
+  end
+  state.sm_imgui_recreate_times = recent
+  if #recent >= 3 then
+    return false
+  end
+  local ok_new, new_ctx = pcall(r.ImGui_CreateContext, SCRIPT_NAME, r.ImGui_ConfigFlags_DockingEnable())
+  if not ok_new or not new_ctx then
+    return false
+  end
+  recent[#recent + 1] = now
+  ctx = new_ctx
+  font = nil
+  local ok_font, new_font = pcall(r.ImGui_CreateFont, "sans-serif", 16)
+  if ok_font and new_font then
+    font = new_font
+    pcall(r.ImGui_Attach, ctx, font)
+  end
+  pcall(ensure_seq_role_icons)
+  pcall(ensure_vfx_icons)
+  log("ImGui context recreated after an error")
+  return true
+end
+
 -- --- Main loop ---------------------------------------------------------------
+-- The whole frame runs under xpcall so one error never kills the defer loop.
 function loop()
   if SampleMapInstance.shutdown_done then
     return
   end
+  local ok, err = xpcall(sm_loop_frame, sm_error_traceback)
+  if not ok then
+    sm_report_error("main loop", err)
+    state.sm_imgui_recover_pending = true
+  end
+  if SampleMapInstance.shutdown_done then
+    return
+  end
+  if running then
+    r.defer(loop)
+  else
+    shutdown_script("stop")
+  end
+end
 
+function sm_loop_frame()
   local stop_requested = (not running)
-    or (r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) ~= "1")
+    or (r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) ~= SampleMapInstance.token)
   if ctx and r.ImGui_ValidatePtr and not r.ImGui_ValidatePtr(ctx, "ImGui_Context*") then
-    log("ImGui context invalid; stopping loop")
-    stop_requested = true
+    if not sm_imgui_try_recover_context() then
+      log("ImGui context invalid; stopping loop")
+      stop_requested = true
+    end
+  else
+    -- Context survived the last error (or there was none): nothing to recover.
+    state.sm_imgui_recover_pending = false
   end
   if stop_requested then
     shutdown_script(running and "shortcut" or "stop")
     return
   end
+
+  -- UI-side calls: an error here may leave the ImGui stack unbalanced.
+  local function ui_call(site, fn)
+    local ok = sm_pcall(site, fn)
+    if not ok then
+      state.sm_imgui_recover_pending = true
+    end
+  end
   
-  stop_preview_if_transport_started()
-  sync_project_state_if_needed()
-  ingest_seq_from_arrange()
-  pcall(seq_stem_import_poll_external_request)
-  pcall(seq_stem_import_tick)
+  sm_pcall("stop_preview_if_transport_started", stop_preview_if_transport_started)
+  sm_pcall("sync_project_state_if_needed", sync_project_state_if_needed)
+  sm_pcall("ingest_seq_from_arrange", ingest_seq_from_arrange)
+  sm_pcall("seq_stem_import_poll_external_request", seq_stem_import_poll_external_request)
+  sm_pcall("seq_stem_import_tick", seq_stem_import_tick)
   if state.seq_random_sync_run and not state.seq_random_knob_drag then
     state.seq_random_sync_run = false
-    seq_flush_pending_random_sync()
+    sm_pcall("seq_flush_pending_random_sync", seq_flush_pending_random_sync)
   end
 
   local loading = is_library_loading()
   if loading then
-    process_library_load_slice(LIBRARY_LOAD_SLICE_MS)
+    sm_pcall("process_library_load_slice", process_library_load_slice, LIBRARY_LOAD_SLICE_MS)
     loading = is_library_loading()
   end
 
   -- Start scan after a miss, but defer cache rewrite until after first interactive frame.
   if state._enqueue_scan_after_load then
     state._enqueue_scan_after_load = false
-    enqueue_scan()
+    sm_pcall("enqueue_scan", enqueue_scan)
   end
 
   if not loading then
     if SampleMapAutoCheckForUpdates then
-      SampleMapAutoCheckForUpdates()
+      sm_pcall("update check", SampleMapAutoCheckForUpdates)
     end
-    process_scan_slice()
-    process_waveform_slice(6.0)
+    sm_pcall("seq_gmd_bg_tick", seq_gmd_bg_tick)
+    sm_pcall("process_scan_slice", process_scan_slice)
+    sm_pcall("process_waveform_slice", process_waveform_slice, 6.0)
 
     -- Poll removable-drive mount state so dots gray/restore without restarting.
     local now = r.time_precise()
     if (now - (state.last_volume_check_time or 0)) >= 1.5 then
-      refresh_scan_folder_availability()
+      sm_pcall("refresh_scan_folder_availability", refresh_scan_folder_availability)
     end
-    seq_midi_poll()
+    sm_pcall("seq_midi_poll", seq_midi_poll)
   end
   
   ui_push_theme()
   local visible, open, began = false, true, false
-  local ui_ok, ui_err = pcall(function()
+  local ui_ok, ui_err = xpcall(function()
   visible, open, began = begin_window()
   if visible then
     if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
@@ -54698,7 +54867,6 @@ function loop()
       render_header()
 
       handle_script_keyboard_shortcuts()
-      stop_preview_if_transport_started()
 
       local _, avail_y = r.ImGui_GetContentRegionAvail(ctx)
 
@@ -54770,28 +54938,26 @@ function loop()
 
     end
   end
-  end)
+  end, sm_error_traceback)
   end_window(visible, began)
   if ui_ok and not loading then
-    pcall(render_seq_neighbor_popup)
-    local mini_ok, mini_err = pcall(render_seq_minimap_popup)
-    if not mini_ok then
-      log("Mini map: " .. tostring(mini_err))
-    end
-    pcall(render_preview_history_popup)
-    pcall(render_seq_layering_window)
-    pcall(render_sample_map_float_window)
-    pcall(render_sequencer_float_window)
-    pcall(render_settings)
-    pcall(render_scan_complete_dialog)
-    pcall(seq_stem_import_render_dialog)
-    pcall(render_explorer_window)
+    ui_call("render_seq_neighbor_popup", render_seq_neighbor_popup)
+    ui_call("render_seq_minimap_popup", render_seq_minimap_popup)
+    ui_call("render_preview_history_popup", render_preview_history_popup)
+    ui_call("render_seq_layering_window", render_seq_layering_window)
+    ui_call("render_sample_map_float_window", render_sample_map_float_window)
+    ui_call("render_sequencer_float_window", render_sequencer_float_window)
+    ui_call("render_settings", render_settings)
+    ui_call("render_scan_complete_dialog", render_scan_complete_dialog)
+    ui_call("seq_stem_import_render_dialog", seq_stem_import_render_dialog)
+    ui_call("render_explorer_window", render_explorer_window)
   elseif not ui_ok then
-    log("ImGui frame skipped during window host change: " .. tostring(ui_err))
+    sm_report_error("main window", ui_err)
+    state.sm_imgui_recover_pending = true
   end
   if ui_ok then
-    pcall(draw_sample_drag_ghost)
-    pcall(complete_pending_sample_drop)
+    ui_call("draw_sample_drag_ghost", draw_sample_drag_ghost)
+    sm_pcall("complete_pending_sample_drop", complete_pending_sample_drop)
   end
   pcall(ui_pop_theme)
 
@@ -54803,32 +54969,39 @@ function loop()
   state._text_input_item_active_now = false
 
   if (not loading) and running then
-    pcall(seq_update_arrange_item_follow)
-    pcall(seq_render_arrange_item_overlay)
-    pcall(seq_render_link_parent_overlay)
-    pcall(seq_pump_script_refocus)
+    sm_pcall("seq_update_arrange_item_follow", seq_update_arrange_item_follow)
+    sm_pcall("seq_render_arrange_item_overlay", seq_render_arrange_item_overlay)
+    sm_pcall("seq_render_link_parent_overlay", seq_render_link_parent_overlay)
+    sm_pcall("seq_pump_script_refocus", seq_pump_script_refocus)
   end
 
   -- Migrate/stamp cache after the first ready frame so load UI stays smooth.
   if (not loading) and state._save_library_after_load then
     state._save_library_after_load = false
-    save_samples()
-    state.tag_schema_dirty = false
+    if sm_pcall("save_samples", save_samples) then
+      state.tag_schema_dirty = false
+    end
   end
   
-  if (open ~= false) and running then
-    r.defer(loop)
-  else
+  if not ((open ~= false) and running) then
     shutdown_script(open == false and "window" or "stop")
   end
 end
 
 
 -- --- Main entry point --------------------------------------------------------
+-- Per-instance token stored in the "alive" ExtState. A running instance stops
+-- as soon as the stored value is no longer its own token.
+function SampleMap_NewInstanceToken()
+  local t = (r.time_precise and r.time_precise()) or os.clock()
+  return string.format("%d-%d-%06d", os.time(), math.floor((t % 1000) * 1000), math.random(0, 999999))
+end
+
 function SampleMap_BeginInstance()
   SampleMapInstance.shutdown_done = false
   running = true
-  r.SetExtState(SampleMapInstance.section, SampleMapInstance.key, "1", false)
+  SampleMapInstance.token = SampleMapInstance.token or SampleMap_NewInstanceToken()
+  r.SetExtState(SampleMapInstance.section, SampleMapInstance.key, SampleMapInstance.token, false)
   if r.atexit then
     r.atexit(function()
       shutdown_script("atexit")
@@ -54871,10 +55044,11 @@ function SampleMap_WaitThenBegin(n)
     win = r.JS_Window_Find(SCRIPT_NAME, true)
   end
   local flag = r.GetExtState(SampleMapInstance.section, SampleMapInstance.key)
-  if n < 90 and (win or flag == "1") then
-    if flag == "1" then
-      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
-    end
+  if flag ~= "" and flag ~= SampleMapInstance.token then
+    -- An even newer launch claimed the key while we waited: let it win.
+    return
+  end
+  if n < 90 and win then
     r.defer(function()
       SampleMap_WaitThenBegin(n)
     end)
@@ -54884,14 +55058,16 @@ function SampleMap_WaitThenBegin(n)
 end
 
 function main()
-  if r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) == "1" then
+  SampleMapInstance.token = SampleMap_NewInstanceToken()
+  if r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) ~= "" then
     local existing = true
     if r.JS_Window_Find then
       existing = r.JS_Window_Find(SCRIPT_NAME, true) ~= nil
     end
     if existing then
-      -- Already running: quit the live instance, then start THIS (new) copy.
-      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
+      -- Already running: claim the key with this instance's token (the live
+      -- instance sees a foreign token and quits), then start THIS (new) copy.
+      r.SetExtState(SampleMapInstance.section, SampleMapInstance.key, SampleMapInstance.token, false)
       if r.ShowConsoleMsg then
         r.ShowConsoleMsg("[Sample Map] Reloading from disk…\n")
       end
