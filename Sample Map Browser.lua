@@ -3565,6 +3565,18 @@ end
 
 function stop_analyzer_workers(requeue)
   local workers = state.analyzer_workers or {}
+  -- Signal every worker first so idle ones exit in parallel.
+  for _, w in ipairs(workers) do
+    if w.quit_path then
+      pcall(function()
+        local qf = io.open(w.quit_path, "w")
+        if qf then
+          qf:write("1")
+          qf:close()
+        end
+      end)
+    end
+  end
   for _, w in ipairs(workers) do
     if requeue and w.path and w.path ~= "" then
       table.insert(state.analyzer_queue, 1, w.path)
@@ -3860,8 +3872,9 @@ function collect_worker_result(w)
   os.remove(w.res_path)
   local path = w.path
   local mode = w.mode
+  local ok_peek, peek = false, nil
   if output and output ~= "" then
-    local ok_peek, peek = pcall(json_decode, output)
+    ok_peek, peek = pcall(json_decode, output)
     local result_path = ok_peek and type(peek) == "table" and peek._path or nil
     if type(result_path) == "string" and result_path ~= ""
         and not sm_analyzer_paths_equal(result_path, path) then
@@ -3873,7 +3886,7 @@ function collect_worker_result(w)
   w.path = nil
   w.mode = nil
   if output and output ~= "" then
-    local success, data = pcall(json_decode, output)
+    local success, data = ok_peek, peek
     if success and type(data) == "table" then
       data._debug = nil
       local err = data._error
@@ -5176,6 +5189,7 @@ function sm_scan_enum_file(enum, dir, file)
     end
     table.insert(state.analyzer_queue, path)
     enum.already[path] = true
+    state.analyzer_path_mode = state.analyzer_path_mode or {}
     state.analyzer_path_mode[path] = mode
     return true
   end
