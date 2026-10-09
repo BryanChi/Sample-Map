@@ -735,8 +735,75 @@ local function get_scan_logs_text()
 end
 
 
+SM_IS_WINDOWS = (package and package.config and package.config:sub(1, 1) == "\\") or false
+
 local function shell_escape(str)
-  return '"' .. tostring(str):gsub('"', '\\"') .. '"'
+  str = tostring(str)
+  if SM_IS_WINDOWS then
+    -- cmd.exe: double quotes; '"' is not a legal filename character on Windows, so drop it.
+    return '"' .. str:gsub('"', "") .. '"'
+  end
+  -- POSIX sh: single quotes disable $(), backticks and every other expansion.
+  return "'" .. str:gsub("'", "'\\''") .. "'"
+end
+
+-- Write `content` to `path` atomically: write path.tmp, keep the previous file as
+-- path.bak, then rename the temp file into place. Returns true or false, err.
+function sm_atomic_write(path, content)
+  if type(content) ~= "string" then
+    return false, "content is not a string"
+  end
+  local tmp = path .. ".tmp"
+  local f, open_err = io.open(tmp, "wb")
+  if not f then
+    return false, "cannot open " .. tmp .. ": " .. tostring(open_err)
+  end
+  local ok_w, write_err = f:write(content)
+  local ok_c, close_err = f:close()
+  if not ok_w or not ok_c then
+    os.remove(tmp)
+    return false, "write failed: " .. tostring(write_err or close_err)
+  end
+  local bak = path .. ".bak"
+  local cur = io.open(path, "rb")
+  if cur then
+    local size = cur:seek("end") or 0
+    cur:close()
+    if size > 0 then
+      os.remove(bak)
+      os.rename(path, bak)
+    end
+  end
+  local ok_r, rename_err = os.rename(tmp, path)
+  if not ok_r then
+    -- Windows cannot rename over an existing file.
+    os.remove(path)
+    ok_r, rename_err = os.rename(tmp, path)
+  end
+  if not ok_r then
+    local chk = io.open(path, "rb")
+    if chk then
+      chk:close()
+    else
+      os.rename(bak, path)
+    end
+    return false, "rename failed: " .. tostring(rename_err)
+  end
+  return true
+end
+
+-- Read a whole file; nil when missing or empty.
+function sm_read_nonempty_file(path)
+  local f = io.open(path, "rb")
+  if not f then
+    return nil
+  end
+  local content = f:read("*a")
+  f:close()
+  if not content or content == "" then
+    return nil
+  end
+  return content
 end
 
 
@@ -1655,6 +1722,9 @@ local function rebuild_tag_index()
   state.samples_by_tag = by_tag
   state.tag_counts = counts
   state.tag_index_epoch = (state.tag_index_epoch or 0) + 1
+  state.tag_index_samples_ref = state.samples
+  state.tag_index_sample_count = #state.samples
+  state.tag_category_rev = (state.tag_category_rev or 0) + 1
   state.tag_list = {}
   for tag, count in pairs(counts) do
     table.insert(state.tag_list, {tag = tag, count = count})
@@ -1667,16 +1737,29 @@ local function rebuild_tag_index()
   end)
 end
 
+-- Rebuild the tag index only when the library changed since the last rebuild
+-- (an untagged library would otherwise be re-indexed every frame).
+function sm_tag_index_rebuild_if_stale()
+  if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0
+      and (state.tag_index_samples_ref ~= state.samples
+        or state.tag_index_sample_count ~= #state.samples) then
+    rebuild_tag_index()
+  end
+end
+
 
 -- --- JSON helpers (improved) ----------------------------------------------------
+SM_JSON_ESCAPE_MAP = { ['"'] = '\\"', ["\\"] = "\\\\", ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t", ["\b"] = "\\b", ["\f"] = "\\f" }
+for code = 0, 31 do
+  local ch = string.char(code)
+  if not SM_JSON_ESCAPE_MAP[ch] then
+    SM_JSON_ESCAPE_MAP[ch] = string.format("\\u%04x", code)
+  end
+end
+
 local function json_encode_string(s)
-  -- Escape special characters in strings
-  s = s:gsub('\\', '\\\\')
-  s = s:gsub('"', '\\"')
-  s = s:gsub('\n', '\\n')
-  s = s:gsub('\r', '\\r')
-  s = s:gsub('\t', '\\t')
-  return '"' .. s .. '"'
+  -- Escape quotes, backslashes and every control character.
+  return '"' .. s:gsub('[%z\1-\31"\\]', SM_JSON_ESCAPE_MAP) .. '"'
 end
 
 local function json_encode(val)
@@ -1706,6 +1789,9 @@ local function json_encode(val)
   elseif type(val) == "string" then
     return json_encode_string(val)
   elseif type(val) == "number" then
+    if val ~= val or val == math.huge or val == -math.huge then
+      return "null"
+    end
     return tostring(val)
   elseif type(val) == "boolean" then
     return val and "true" or "false"
@@ -1716,198 +1802,187 @@ end
 
 
 local function json_decode(str)
-  -- Improved JSON decoder that handles strings with commas and special chars
-  str = str:match("%s*(.*)")
-  if str:sub(1, 1) == "{" then
-    local obj = {}
-    str = str:sub(2, -2) -- remove {}
-    
-    -- Parse key-value pairs, handling quoted strings properly
-    local pos = 1
-    while pos <= #str do
-      -- Skip whitespace
-      while pos <= #str and str:sub(pos, pos):match("%s") do
-        pos = pos + 1
+  -- Single-pass recursive-descent JSON decoder.
+  -- Returns the decoded value, or nil, err on malformed/truncated input.
+  -- `null` decodes to nil; arrays keep the positions of later elements.
+  if type(str) ~= "string" then
+    return nil, "json_decode: expected string, got " .. type(str)
+  end
+  local byte, sub, find = string.byte, string.sub, string.find
+  local len = #str
+  local pos = 1
+  local escapes = { [34] = '"', [92] = "\\", [47] = "/", [98] = "\b", [102] = "\f", [110] = "\n", [114] = "\r", [116] = "\t" }
+
+  local function fail(msg)
+    error({ json_decode_error = string.format("%s at position %d", msg, pos) }, 0)
+  end
+
+  local function skip_ws()
+    pos = find(str, "[^ \t\r\n]", pos) or (len + 1)
+  end
+
+  local function parse_string()
+    -- pos is on the opening quote
+    local i = pos + 1
+    local parts, n = nil, 0
+    while true do
+      local j = find(str, '["\\]', i)
+      if not j then
+        pos = len + 1
+        fail("unterminated string")
       end
-      if pos > #str then break end
-      
-      -- Find key (quoted string)
-      if str:sub(pos, pos) ~= '"' then break end
-      local key_start = pos + 1
-      local key_end = key_start
-      while key_end <= #str do
-        if str:sub(key_end, key_end) == '"' and str:sub(key_end - 1, key_end - 1) ~= '\\' then
-          break
+      if byte(str, j) == 34 then
+        pos = j + 1
+        if parts then
+          n = n + 1
+          parts[n] = sub(str, i, j - 1)
+          return table.concat(parts, "", 1, n)
         end
-        key_end = key_end + 1
+        return sub(str, i, j - 1)
       end
-      local key = str:sub(key_start, key_end - 1):gsub('\\"', '"'):gsub('\\\\', '\\')
-      
-      -- Skip to colon
-      pos = key_end + 1
-      while pos <= #str and str:sub(pos, pos) ~= ':' do pos = pos + 1 end
-      pos = pos + 1
-      
-      -- Skip whitespace
-      while pos <= #str and str:sub(pos, pos):match("%s") do pos = pos + 1 end
-      
-      -- Parse value
-      if str:sub(pos, pos) == '"' then
-        -- String value
-        local val_start = pos + 1
-        local val_end = val_start
-        while val_end <= #str do
-          if str:sub(val_end, val_end) == '"' and str:sub(val_end - 1, val_end - 1) ~= '\\' then
-            break
+      parts = parts or {}
+      n = n + 1
+      parts[n] = sub(str, i, j - 1)
+      local e = byte(str, j + 1)
+      if e == 117 then -- \uXXXX
+        local hex = sub(str, j + 2, j + 5)
+        if not find(hex, "^%x%x%x%x$") then
+          pos = j
+          fail("invalid \\u escape")
+        end
+        local cp = tonumber(hex, 16)
+        local next_i = j + 6
+        if cp >= 0xD800 and cp <= 0xDBFF and sub(str, next_i, next_i + 1) == "\\u" then
+          local hex2 = sub(str, next_i + 2, next_i + 5)
+          local lo = find(hex2, "^%x%x%x%x$") and tonumber(hex2, 16)
+          if lo and lo >= 0xDC00 and lo <= 0xDFFF then
+            cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
+            next_i = next_i + 6
           end
-          val_end = val_end + 1
         end
-        obj[key] = str:sub(val_start, val_end - 1):gsub('\\"', '"'):gsub('\\\\', '\\'):gsub('\\n', '\n'):gsub('\\r', '\r'):gsub('\\t', '\t')
-        pos = val_end + 1
-      elseif str:sub(pos, pos) == '[' then
-        -- Array value - find matching bracket
-        local depth = 1
-        local arr_start = pos
-        pos = pos + 1
-        while pos <= #str and depth > 0 do
-          if str:sub(pos, pos) == '[' then depth = depth + 1
-          elseif str:sub(pos, pos) == ']' then depth = depth - 1 end
-          pos = pos + 1
-        end
-        local arr_str = str:sub(arr_start, pos - 1)
-        obj[key] = json_decode(arr_str)
-      elseif str:sub(pos, pos) == '{' then
-        -- Object value - find matching brace
-        local depth = 1
-        local obj_start = pos
-        pos = pos + 1
-        while pos <= #str and depth > 0 do
-          if str:sub(pos, pos) == '{' then depth = depth + 1
-          elseif str:sub(pos, pos) == '}' then depth = depth - 1 end
-          pos = pos + 1
-        end
-        local obj_str = str:sub(obj_start, pos - 1)
-        obj[key] = json_decode(obj_str)
+        n = n + 1
+        parts[n] = utf8.char(cp)
+        i = next_i
       else
-        -- Number or boolean
-        local val_end = pos
-        while val_end <= #str and str:sub(val_end, val_end) ~= ',' and str:sub(val_end, val_end) ~= '}' do
-          val_end = val_end + 1
+        local rep = e and escapes[e]
+        if not rep then
+          pos = j
+          fail(e and "invalid escape" or "unterminated string")
         end
-        local val_str = str:sub(pos, val_end - 1):match("^%s*(.-)%s*$")
-        if val_str == "true" then
-          obj[key] = true
-        elseif val_str == "false" then
-          obj[key] = false
-        elseif tonumber(val_str) then
-          obj[key] = tonumber(val_str)
-        end
-        pos = val_end
-      end
-      
-      -- Skip comma
-      while pos <= #str and (str:sub(pos, pos) == ',' or str:sub(pos, pos):match("%s")) do
-        pos = pos + 1
+        n = n + 1
+        parts[n] = rep
+        i = j + 2
       end
     end
-    return obj
-  elseif str:sub(1, 1) == "[" then
-    local arr = {}
-    str = str:sub(2, -2) -- remove []
-    
-    -- Handle empty array
-    if str:match("^%s*$") then
+  end
+
+  local parse_value
+
+  local function parse_array()
+    pos = pos + 1
+    local arr, n = {}, 0
+    skip_ws()
+    if byte(str, pos) == 93 then
+      pos = pos + 1
       return arr
     end
-    
-    -- Parse array items, handling strings with commas, nested objects, and nested arrays
-    local pos = 1
-    while pos <= #str do
-      -- Skip whitespace
-      while pos <= #str and str:sub(pos, pos):match("%s") do pos = pos + 1 end
-      if pos > #str then break end
-      
-      if str:sub(pos, pos) == '"' then
-        -- String item
-        local item_start = pos + 1
-        local item_end = item_start
-        while item_end <= #str do
-          if str:sub(item_end, item_end) == '"' and str:sub(item_end - 1, item_end - 1) ~= '\\' then
-            break
-          end
-          item_end = item_end + 1
-        end
-        if item_end <= #str then
-          local item_str = str:sub(item_start, item_end - 1)
-          item_str = item_str:gsub('\\"', '"'):gsub('\\\\', '\\')
-          table.insert(arr, item_str)
-        end
-        pos = item_end + 1
-      elseif str:sub(pos, pos) == '{' then
-        -- Nested object - find matching brace
-        local depth = 1
-        local obj_start = pos
+    while true do
+      n = n + 1
+      arr[n] = parse_value()
+      skip_ws()
+      local b = byte(str, pos)
+      if b == 44 then
         pos = pos + 1
-        while pos <= #str and depth > 0 do
-          if str:sub(pos, pos) == '{' then depth = depth + 1
-          elseif str:sub(pos, pos) == '}' then depth = depth - 1 end
-          pos = pos + 1
-        end
-        local obj_str = str:sub(obj_start, pos - 1)
-        table.insert(arr, json_decode(obj_str))
-      elseif str:sub(pos, pos) == '[' then
-        -- Nested array - find matching bracket
-        local depth = 1
-        local arr_start = pos
+      elseif b == 93 then
         pos = pos + 1
-        while pos <= #str and depth > 0 do
-          if str:sub(pos, pos) == '[' then depth = depth + 1
-          elseif str:sub(pos, pos) == ']' then depth = depth - 1 end
-          pos = pos + 1
-        end
-        local arr_str = str:sub(arr_start, pos - 1)
-        table.insert(arr, json_decode(arr_str))
-      elseif tonumber(str:sub(pos, pos)) or str:sub(pos, pos) == '-' then
-        -- Number item
-        local item_end = pos
-        while item_end <= #str and str:sub(item_end, item_end) ~= ',' and str:sub(item_end, item_end) ~= ']' do
-          item_end = item_end + 1
-        end
-        local num_str = str:sub(pos, item_end - 1):match("^%s*(.-)%s*$")
-        local num = tonumber(num_str)
-        if num then 
-          table.insert(arr, num) 
-        end
-        pos = item_end
-      elseif str:sub(pos, pos) == 't' or str:sub(pos, pos) == 'f' then
-        -- Boolean or null
-        local item_end = pos
-        while item_end <= #str and str:sub(item_end, item_end) ~= ',' and str:sub(item_end, item_end) ~= ']' do
-          item_end = item_end + 1
-        end
-        local val_str = str:sub(pos, item_end - 1):match("^%s*(.-)%s*$")
-        if val_str == "true" then
-          table.insert(arr, true)
-        elseif val_str == "false" then
-          table.insert(arr, false)
-        elseif val_str == "null" then
-          table.insert(arr, nil)
-        end
-        pos = item_end
+        return arr
       else
-        -- Skip unknown character (shouldn't happen in valid JSON)
-        log("Warning: Unexpected character in array at position " .. pos .. ": " .. str:sub(pos, pos))
-        pos = pos + 1
-      end
-      
-      -- Skip comma
-      while pos <= #str and (str:sub(pos, pos) == ',' or str:sub(pos, pos):match("%s")) do
-        pos = pos + 1
+        fail(b and "expected ',' or ']'" or "unexpected end of input in array")
       end
     end
-    return arr
   end
-  return nil
+
+  local function parse_object()
+    pos = pos + 1
+    local obj = {}
+    skip_ws()
+    if byte(str, pos) == 125 then
+      pos = pos + 1
+      return obj
+    end
+    while true do
+      skip_ws()
+      if byte(str, pos) ~= 34 then
+        fail(pos > len and "unexpected end of input in object" or "expected string key")
+      end
+      local key = parse_string()
+      skip_ws()
+      if byte(str, pos) ~= 58 then
+        fail("expected ':'")
+      end
+      pos = pos + 1
+      obj[key] = parse_value()
+      skip_ws()
+      local b = byte(str, pos)
+      if b == 44 then
+        pos = pos + 1
+      elseif b == 125 then
+        pos = pos + 1
+        return obj
+      else
+        fail(b and "expected ',' or '}'" or "unexpected end of input in object")
+      end
+    end
+  end
+
+  parse_value = function()
+    skip_ws()
+    local b = byte(str, pos)
+    if b == 123 then
+      return parse_object()
+    elseif b == 91 then
+      return parse_array()
+    elseif b == 34 then
+      return parse_string()
+    elseif b == 116 then
+      if sub(str, pos, pos + 3) ~= "true" then fail("invalid literal") end
+      pos = pos + 4
+      return true
+    elseif b == 102 then
+      if sub(str, pos, pos + 4) ~= "false" then fail("invalid literal") end
+      pos = pos + 5
+      return false
+    elseif b == 110 then
+      if sub(str, pos, pos + 3) ~= "null" then fail("invalid literal") end
+      pos = pos + 4
+      return nil
+    elseif b == 45 or (b and b >= 48 and b <= 57) then
+      local s, e = find(str, "^-?%d+%.?%d*[eE]?[-+]?%d*", pos)
+      local num = s and tonumber(sub(str, s, e))
+      if not num then fail("invalid number") end
+      pos = e + 1
+      return num
+    elseif not b then
+      fail("unexpected end of input")
+    end
+    fail("unexpected character '" .. string.char(b) .. "'")
+  end
+
+  local ok, result = pcall(function()
+    local value = parse_value()
+    skip_ws()
+    if pos <= len then
+      fail("trailing characters")
+    end
+    return value
+  end)
+  if ok then
+    return result
+  end
+  if type(result) == "table" and result.json_decode_error then
+    return nil, result.json_decode_error
+  end
+  return nil, tostring(result)
 end
 
 
@@ -2806,7 +2881,10 @@ function save_seq_project_state(proj)
   end
   local ok, serialized = pcall(json_encode, build_seq_project_state_payload())
   if ok and type(serialized) == "string" then
-    pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER, serialized)
+    local set_ok = pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER, serialized)
+    if set_ok then
+      state.seq_last_ext_state = serialized
+    end
   end
 end
 
@@ -2824,6 +2902,7 @@ function load_seq_project_state(proj)
       if parse_ok and type(cfg) == "table" then
         apply_seq_project_state(cfg)
         loaded = true
+        state.seq_last_ext_state = serialized
       end
     end
   end
@@ -2845,9 +2924,32 @@ function sync_project_state_if_needed()
     -- Project is closing or none is active; keep in-memory state.
     return
   end
-  local token = tostring(proj)
+  -- REAPER can reuse a ReaProject pointer when another project is opened in the
+  -- same tab, so the project file path is part of the identity.
+  local proj_fn = ""
+  if r.EnumProjects then
+    local cur, fn = r.EnumProjects(-1, "")
+    if cur == proj and type(fn) == "string" then
+      proj_fn = fn
+    end
+  end
+  local token = tostring(proj) .. "|" .. proj_fn
   if loaded_project_token ~= token then
-    if is_valid_project(loaded_project) then
+    local same_pointer = loaded_project ~= nil and tostring(loaded_project) == tostring(proj)
+    if same_pointer and r.GetProjExtState then
+      -- Same pointer, new path: either "Save As" of this project, or another
+      -- project opened into this tab. If the project still holds exactly what we
+      -- last wrote/read, it is the same project: keep the in-memory state.
+      local _, ext = r.GetProjExtState(proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER)
+      if type(ext) == "string" and ext ~= "" and ext == state.seq_last_ext_state then
+        save_seq_project_state(proj)
+        loaded_project = proj
+        loaded_project_token = token
+        return
+      end
+    end
+    -- Never write the old state into a pointer that may now be another project.
+    if is_valid_project(loaded_project) and not same_pointer then
       save_seq_project_state(loaded_project)
     end
     load_seq_project_state(proj)
@@ -2857,12 +2959,24 @@ function sync_project_state_if_needed()
 end
 
 local function load_config()
-  local file = io.open(CONFIG_PATH, "r")
-  if file then
-    local content = file:read("*all")
-    file:close()
-    if content and content ~= "" then
-      local success, cfg = pcall(json_decode, content)
+  local content = sm_read_nonempty_file(CONFIG_PATH)
+  local success, cfg = false, nil
+  if content then
+    success, cfg = pcall(json_decode, content)
+  end
+  if not (success and type(cfg) == "table") then
+    -- Missing, empty or corrupt config: fall back to the previous good copy.
+    local bak_content = sm_read_nonempty_file(CONFIG_PATH .. ".bak")
+    if bak_content then
+      local ok_bak, cfg_bak = pcall(json_decode, bak_content)
+      if ok_bak and type(cfg_bak) == "table" then
+        log("Config file unreadable; using SampleMapBrowser.json.bak")
+        content, success, cfg = bak_content, ok_bak, cfg_bak
+      end
+    end
+  end
+  if content then
+    do
       if success and cfg and type(cfg) == "table" then
         -- Ensure folders is an array of strings (normalized)
         if cfg.folders and type(cfg.folders) == "table" then
@@ -3159,7 +3273,7 @@ local function serialize_table(t, indent)
   for k, v in pairs(t) do
     result = result .. indent .. "  "
     if type(k) == "string" then
-      result = result .. '["' .. k .. '"]'
+      result = result .. "[" .. string.format("%q", k) .. "]"
     else
       result = result .. '[' .. tostring(k) .. ']'
     end
@@ -3167,7 +3281,7 @@ local function serialize_table(t, indent)
     if type(v) == "table" then
       result = result .. serialize_table(v, indent .. "  ")
     elseif type(v) == "string" then
-      result = result .. '"' .. v .. '"'
+      result = result .. string.format("%q", v)
     else
       result = result .. tostring(v)
     end
@@ -3175,6 +3289,53 @@ local function serialize_table(t, indent)
   end
   result = result .. indent .. "}"
   return result
+end
+
+-- Tag colour presets: the user's copy (tag_presets.lua, gitignored) wins over the
+-- shipped defaults (tag_presets.default.lua). Kept in memory; re-read at most every 2 s.
+SM_TAG_PRESETS_PATH = CONFIG_DIR .. "/tag_presets.lua"
+SM_TAG_PRESETS_DEFAULT_PATH = CONFIG_DIR .. "/tag_presets.default.lua"
+
+function sm_read_tag_presets_file()
+  local sources = { SM_TAG_PRESETS_PATH, SM_TAG_PRESETS_PATH .. ".bak", SM_TAG_PRESETS_DEFAULT_PATH }
+  for i = 1, #sources do
+    local content = sm_read_nonempty_file(sources[i])
+    if content then
+      local chunk = load(content, "@tag_presets.lua", "t", {})
+      if chunk then
+        local ok, presets = pcall(chunk)
+        if ok and type(presets) == "table" then
+          return presets
+        end
+      end
+    end
+  end
+  return {}
+end
+
+function sm_get_tag_presets(force)
+  local now = r.time_precise()
+  if force or type(state.tag_presets_cache) ~= "table"
+      or (now - (state.tag_presets_cache_time or 0)) > 2.0 then
+    state.tag_presets_cache = sm_read_tag_presets_file()
+    state.tag_presets_cache_time = now
+  end
+  return state.tag_presets_cache
+end
+
+function sm_save_tag_presets(presets)
+  state.tag_presets_cache = presets
+  state.tag_presets_cache_time = r.time_precise()
+  local ok_ser, content = pcall(serialize_table, presets)
+  if not ok_ser then
+    log("Failed to serialize tag presets: " .. tostring(content))
+    return false
+  end
+  local ok, err = sm_atomic_write(SM_TAG_PRESETS_PATH, "return " .. content)
+  if not ok then
+    log("Failed to save tag presets: " .. tostring(err))
+  end
+  return ok
 end
 
 local function save_config()
@@ -3221,14 +3382,17 @@ local function save_config()
     map_tab_next_id = state.map_tab_next_id,
     map_ui_layout = map_ui_clone(state.map_ui_layout) or state.map_ui_layout,
   }
-  local file = io.open(CONFIG_PATH, "w")
-  if file then
-    local json_str = json_encode(cfg)
-    file:write(json_str)
-    file:close()
+  local ok_enc, json_str = pcall(json_encode, cfg)
+  local saved, save_err = false, nil
+  if ok_enc and type(json_str) == "string" then
+    saved, save_err = sm_atomic_write(CONFIG_PATH, json_str)
+  else
+    save_err = "encode failed: " .. tostring(json_str)
+  end
+  if saved then
     log("Saved config with " .. #state.folders .. " folder(s)")
   else
-    log("Failed to save config file")
+    log("Failed to save config file: " .. tostring(save_err))
   end
   save_seq_project_state(loaded_project or get_current_project())
 end
@@ -3314,13 +3478,132 @@ function analyzer_work_dir()
   if state.analyzer_work_dir and state.analyzer_work_dir ~= "" then
     return state.analyzer_work_dir
   end
-  local tmp = os.getenv("TMPDIR") or "/tmp"
+  local tmp
+  if SM_IS_WINDOWS then
+    tmp = os.getenv("TEMP") or os.getenv("TMP") or "C:/Windows/Temp"
+  else
+    tmp = os.getenv("TMPDIR") or "/tmp"
+  end
+  tmp = tmp:gsub("\\", "/")
   if tmp:sub(-1) == "/" then
     tmp = tmp:sub(1, -2)
   end
   state.analyzer_work_dir = tmp .. "/sma_workers_" .. tostring(os.time())
-  os.execute("mkdir -p " .. shell_escape(state.analyzer_work_dir))
+  if r.RecursiveCreateDirectory then
+    r.RecursiveCreateDirectory(state.analyzer_work_dir, 0)
+  else
+    os.execute("mkdir -p " .. shell_escape(state.analyzer_work_dir))
+  end
   return state.analyzer_work_dir
+end
+
+-- Pid written by the worker (SampleMapAnalyzer.py --worker) into pid_<slot>.
+function sm_analyzer_worker_pid(w)
+  if not w or not w.pid_path then
+    return nil
+  end
+  local f = io.open(w.pid_path, "r")
+  if not f then
+    return nil
+  end
+  local pid = tonumber((f:read("*l") or ""):match("%d+"))
+  f:close()
+  if pid and pid > 1 then
+    w.pid_seen = true
+    return pid
+  end
+  return nil
+end
+
+function sm_kill_pid(pid)
+  pid = tonumber(pid)
+  if not pid or pid <= 1 then
+    return
+  end
+  if SM_IS_WINDOWS then
+    os.execute(string.format("taskkill /F /PID %d >NUL 2>&1", pid))
+  else
+    os.execute(string.format("kill %d >/dev/null 2>&1", pid))
+  end
+end
+
+-- Stop one worker without blocking: ask it to quit, kill it if it is busy
+-- (or force is set) and its pid is known, then close the pipe.
+-- Returns false when the pipe was left open because closing could block.
+function sm_stop_analyzer_worker(w, force)
+  if not w then
+    return true
+  end
+  if w.quit_path then
+    pcall(function()
+      local qf = io.open(w.quit_path, "w")
+      if qf then
+        qf:write("1")
+        qf:close()
+      end
+    end)
+  end
+  local pid = sm_analyzer_worker_pid(w)
+  if pid and (force or w.path) then
+    sm_kill_pid(pid)
+  elseif w.path then
+    -- Busy and no pid: pclose would wait for the job to finish; leave it.
+    return false
+  end
+  if w.pipe then
+    pcall(function()
+      w.pipe:close()
+    end)
+    w.pipe = nil
+  end
+  return true
+end
+
+-- Replace a dead or hung worker with a fresh process in the same slot (in place).
+function sm_restart_analyzer_worker(w)
+  if not w then
+    return false
+  end
+  if not sm_stop_analyzer_worker(w, true) then
+    return false
+  end
+  if w.pid_path then
+    os.remove(w.pid_path)
+  end
+  local nw = start_analyzer_worker(w.slot)
+  if not nw then
+    return false
+  end
+  for k in pairs(w) do
+    w[k] = nil
+  end
+  for k, v in pairs(nw) do
+    w[k] = v
+  end
+  return true
+end
+
+-- False once a worker that has written its pid file removed it again (idle exit / crash).
+function sm_analyzer_worker_alive(w)
+  if not w then
+    return false
+  end
+  if sm_analyzer_worker_pid(w) then
+    return true
+  end
+  if not w.pid_seen then
+    -- Still starting up (or an older analyzer script without pid files).
+    return true
+  end
+  return false
+end
+
+function sm_analyzer_paths_equal(a, b)
+  local function norm(p)
+    p = tostring(p or ""):gsub("\\", "/"):gsub("^%s+", ""):gsub("%s+$", "")
+    return p
+  end
+  return norm(a) == norm(b)
 end
 
 function write_worker_file(path, contents)
@@ -3342,14 +3625,8 @@ end
 
 function stop_analyzer_workers(requeue)
   local workers = state.analyzer_workers or {}
+  -- Signal every worker first so idle ones exit in parallel.
   for _, w in ipairs(workers) do
-    if requeue and w.path and w.path ~= "" then
-      table.insert(state.analyzer_queue, 1, w.path)
-      if w.mode then
-        state.analyzer_path_mode = state.analyzer_path_mode or {}
-        state.analyzer_path_mode[w.path] = w.mode
-      end
-    end
     if w.quit_path then
       pcall(function()
         local qf = io.open(w.quit_path, "w")
@@ -3359,11 +3636,18 @@ function stop_analyzer_workers(requeue)
         end
       end)
     end
-    if w.pipe then
-      pcall(function()
-        w.pipe:close()
-      end)
+  end
+  for _, w in ipairs(workers) do
+    if requeue and w.path and w.path ~= "" then
+      table.insert(state.analyzer_queue, 1, w.path)
+      if w.mode then
+        state.analyzer_path_mode = state.analyzer_path_mode or {}
+        state.analyzer_path_mode[w.path] = w.mode
+      end
     end
+    -- Quit file for idle workers; busy ones are killed by pid so closing
+    -- the pipe does not wait for their current job.
+    sm_stop_analyzer_worker(w, false)
   end
   state.analyzer_workers = {}
   state.active_processes = {}
@@ -3389,19 +3673,20 @@ function start_analyzer_worker(slot)
     shell_escape(dir),
   }, " ")
   local log_path = dir .. "/worker_" .. tostring(slot) .. ".log"
-  local pipe = io.popen(cmd .. " 2>> " .. shell_escape(log_path), "r")
+  os.remove(dir .. "/quit_" .. tostring(slot))
+  local pipe = io.popen(sm_shell_cmd(cmd .. " 2>> " .. shell_escape(log_path)), "r")
   if not pipe then
     return nil
   end
-  pcall(function()
-    pipe:read("*line")
-  end)
+  -- Don't wait for the worker's "ready" line: a job written to req_<slot>
+  -- before the worker is up is picked up as soon as it starts polling.
   return {
     slot = slot,
     pipe = pipe,
     req_path = dir .. "/req_" .. tostring(slot),
     res_path = dir .. "/res_" .. tostring(slot),
     quit_path = dir .. "/quit_" .. tostring(slot),
+    pid_path = dir .. "/pid_" .. tostring(slot),
     path = nil,
     mode = nil,
     start_time = 0,
@@ -3449,11 +3734,22 @@ function apply_cpu_analyzer_workers()
   state.max_concurrent_analyzers = recommended_analyzer_workers(cores)
 end
 
-function python_has_numpy(bin)
+-- cmd.exe strips the first and last quote of a command that starts with a
+-- quote; wrapping the whole command in one more pair keeps it intact.
+function sm_shell_cmd(cmd)
+  if SM_IS_WINDOWS then
+    return '"' .. cmd .. '"'
+  end
+  return cmd
+end
+
+-- Run `<python> -c <code>` quietly; true when it exits with status 0.
+function sm_python_check(bin, code)
   if not bin or bin == "" then
     return false
   end
-  local pipe = io.popen(shell_escape(bin) .. ' -c "import numpy" 2>/dev/null')
+  local null_dev = SM_IS_WINDOWS and "NUL" or "/dev/null"
+  local pipe = io.popen(sm_shell_cmd(shell_escape(bin) .. ' -c "' .. code .. '" 2>' .. null_dev))
   if not pipe then
     return false
   end
@@ -3462,45 +3758,114 @@ function python_has_numpy(bin)
   return ok == true
 end
 
+function python_has_numpy(bin)
+  return sm_python_check(bin, "import numpy")
+end
+
+-- On macOS /usr/bin/python3 is a stub that pops up the "install command line
+-- developer tools" dialog when the tools are missing; don't probe it then.
+function sm_macos_clt_missing()
+  if state.macos_clt_missing ~= nil then
+    return state.macos_clt_missing
+  end
+  local os_name = (r.GetOS and r.GetOS()) or ""
+  if SM_IS_WINDOWS or not (os_name:match("^OSX") or os_name:match("^macOS")) then
+    state.macos_clt_missing = false
+    return false
+  end
+  local ok = os.execute("/usr/bin/xcode-select -p >/dev/null 2>&1")
+  state.macos_clt_missing = not ok
+  return state.macos_clt_missing
+end
+
 function resolve_analyzer_python()
   if state.python_resolved then
     return PYTHON_BIN
   end
   state.python_resolved = true
-  local candidates = {
-    PYTHON_BIN,
-    "/usr/bin/python3",
-    "/opt/homebrew/bin/python3",
-    "/usr/local/bin/python3",
-    "python3",
-  }
+  local candidates
+  if SM_IS_WINDOWS then
+    candidates = { "py", "python", "python3" }
+    if PYTHON_BIN ~= "/usr/bin/python3" then
+      table.insert(candidates, 1, PYTHON_BIN)
+    end
+  else
+    candidates = {
+      PYTHON_BIN,
+      "/opt/homebrew/bin/python3",
+      "/usr/local/bin/python3",
+      "/usr/bin/python3",
+      "python3",
+    }
+  end
+  local skip_system = sm_macos_clt_missing()
   local seen = {}
-  local fallback = PYTHON_BIN
+  local fallback = nil
   for i = 1, #candidates do
     local bin = candidates[i]
-    if bin and bin ~= "" and not seen[bin] then
+    local is_bare = bin and not bin:find("[/\\]")
+    local stub = skip_system and (bin == "/usr/bin/python3" or bin == "python3")
+    if bin and bin ~= "" and not seen[bin] and not stub then
       seen[bin] = true
-      if bin == "python3" or r.file_exists(bin) then
-        if r.file_exists(bin) then
-          fallback = bin
-        end
+      if is_bare or r.file_exists(bin) then
         if python_has_numpy(bin) then
           PYTHON_BIN = bin
+          state.analyzer_numpy_missing = false
           add_scan_log("Analyzer Python: " .. bin .. " (numpy)")
           return PYTHON_BIN
+        end
+        if not fallback and (not is_bare or sm_python_check(bin, "import sys")) then
+          fallback = bin
         end
       end
     end
   end
-  add_scan_log("numpy not found — installing in the background (FFT stays built-in until reload)")
-  os.execute(shell_escape(fallback) .. " -m pip install --user numpy >/dev/null 2>&1 &")
+  if not fallback then
+    state.analyzer_no_python = true
+    add_scan_log("Analyzer: no working Python 3 found — install Python 3 to enable audio analysis")
+    return PYTHON_BIN
+  end
   PYTHON_BIN = fallback
-  add_scan_log("Analyzer Python: " .. fallback .. " (no numpy yet)")
+  state.analyzer_numpy_missing = true
+  add_scan_log("Analyzer Python: " .. fallback .. " (numpy not installed — using the slower built-in FFT)")
+  add_scan_log("To speed up analysis, use Library > Re-analyze > Install numpy…, or run: "
+    .. sm_numpy_install_command())
   return PYTHON_BIN
+end
+
+function sm_numpy_install_command()
+  return shell_escape(PYTHON_BIN) .. " -m pip install --user numpy"
+end
+
+-- Only runs when the user picks the menu item (never automatically).
+function sm_install_numpy()
+  local cmd = sm_numpy_install_command()
+  local answer = r.ShowMessageBox(
+    "Install numpy for the analyzer's Python?\n\nThis runs:\n" .. cmd
+      .. "\n\nAnalysis keeps working without it, just slower. New analyzer workers use numpy once the install finishes.",
+    "Install numpy", 4)
+  if answer ~= 6 then
+    return
+  end
+  state.analyzer_numpy_install_started = true
+  if SM_IS_WINDOWS then
+    os.execute(sm_shell_cmd('start "" /B ' .. cmd .. " >NUL 2>&1"))
+  else
+    os.execute(cmd .. " >/dev/null 2>&1 &")
+  end
+  add_scan_log("Installing numpy in the background: " .. cmd)
 end
 
 function ensure_analyzer_workers()
   resolve_analyzer_python()
+  if state.analyzer_no_python then
+    -- Fail queued jobs instead of starting workers that cannot run.
+    for _, path in ipairs(state.analyzer_queue) do
+      state.analyzer_results[path] = {data = nil, err = "no Python 3 found"}
+    end
+    state.analyzer_queue = {}
+    return false
+  end
   if not state.cpu_core_count or state.cpu_core_count < 1 then
     apply_cpu_analyzer_workers()
   end
@@ -3554,6 +3919,10 @@ function collect_worker_result(w)
       note_scan_session_analyzer(false)
       w.path = nil
       w.mode = nil
+      -- Restart the hung worker so its late result can't land on the next job.
+      if sm_analyzer_worker_pid(w) then
+        sm_restart_analyzer_worker(w)
+      end
       return true
     end
     return false
@@ -3563,10 +3932,21 @@ function collect_worker_result(w)
   os.remove(w.res_path)
   local path = w.path
   local mode = w.mode
+  local ok_peek, peek = false, nil
+  if output and output ~= "" then
+    ok_peek, peek = pcall(json_decode, output)
+    local result_path = ok_peek and type(peek) == "table" and peek._path or nil
+    if type(result_path) == "string" and result_path ~= ""
+        and not sm_analyzer_paths_equal(result_path, path) then
+      -- Late result for an earlier job (e.g. after a timeout): drop it, keep waiting.
+      add_scan_log(string.format("Dropped stale analyzer result for %s", result_path:match("([^/]+)$") or result_path))
+      return false
+    end
+  end
   w.path = nil
   w.mode = nil
   if output and output ~= "" then
-    local success, data = pcall(json_decode, output)
+    local success, data = ok_peek, peek
     if success and type(data) == "table" then
       data._debug = nil
       local err = data._error
@@ -3610,6 +3990,12 @@ function assign_worker_job(w, path, mode)
   end
   if mode ~= "transient" and mode ~= "weight" then
     mode = "full"
+  end
+  if not sm_analyzer_worker_alive(w) then
+    -- Worker exited (idle timeout or crash): start a fresh one in this slot.
+    if not sm_restart_analyzer_worker(w) then
+      return false
+    end
   end
   os.remove(w.res_path)
   if not write_worker_file(w.req_path, mode .. "\t" .. path .. "\n") then
@@ -4002,6 +4388,80 @@ local function finish_library_miss(reason)
   end
 end
 
+-- `folders` must already be normalized (see normalize_path).
+function sm_path_in_folders(path, folders)
+  local p = normalize_path(path or "")
+  for _, f in ipairs(folders or {}) do
+    if f ~= "" and (p == f or (p:sub(1, #f) == f and p:sub(#f + 1, #f + 1) == "/")) then
+      return true
+    end
+  end
+  return false
+end
+
+-- The configured folder list differs from the cached one: keep the cache, drop
+-- entries outside the current folders, and scan only folders the cache lacks.
+function sm_library_note_folder_change(job, cached_folders)
+  local cached = {}
+  for _, f in ipairs(cached_folders or {}) do
+    if type(f) == "string" then
+      cached[normalize_path(f)] = true
+    end
+  end
+  job.folder_filter = true
+  job.new_folders = {}
+  for _, f in ipairs(state.folders) do
+    local nf = normalize_path(f)
+    if nf ~= "" and not cached[nf] then
+      job.new_folders[#job.new_folders + 1] = nf
+    end
+  end
+  log(string.format("Folder list changed: keeping cache for current folders, %d new folder(s) to scan", #job.new_folders))
+end
+
+function sm_library_apply_folder_filter(job)
+  local folders = {}
+  for _, f in ipairs(state.folders) do
+    folders[#folders + 1] = normalize_path(f)
+  end
+  local kept = {}
+  local removed = 0
+  for _, sample in ipairs(state.samples) do
+    if not sample.path or sm_path_in_folders(sample.path, folders) then
+      kept[#kept + 1] = sample
+    else
+      removed = removed + 1
+    end
+  end
+  state.samples = kept
+  local function filter_list(list)
+    local out = {}
+    for _, p in ipairs(list or {}) do
+      if sm_path_in_folders(p, folders) then
+        out[#out + 1] = p
+      end
+    end
+    return out
+  end
+  state.scan_queue = filter_list(state.scan_queue)
+  state.analyzer_queue = filter_list(state.analyzer_queue)
+  for path in pairs(state.analyzer_results or {}) do
+    if not sm_path_in_folders(path, folders) then
+      state.analyzer_results[path] = nil
+    end
+  end
+  if #state.scan_queue == 0 then
+    state.scan_total = 0
+  end
+  if removed > 0 then
+    log("Removed " .. removed .. " cached sample(s) outside the current folders")
+  end
+  state._save_library_after_load = true
+  if job.new_folders and #job.new_folders > 0 then
+    state._enqueue_scan_after_load = job.new_folders
+  end
+end
+
 local function finish_library_hit(job)
   state.samples = job.cleaned
 
@@ -4050,6 +4510,10 @@ local function finish_library_hit(job)
     end
   end
 
+  if job.folder_filter then
+    sm_library_apply_folder_filter(job)
+  end
+
   if job.needs_layout then
     layout_samples()
     log("Re-layouting samples (missing/invalid coordinates)")
@@ -4086,6 +4550,40 @@ local function finish_library_hit(job)
   ))
 end
 
+-- Pick the next readable cache file: main Lua, main JSON, then their .bak copies.
+function sm_library_load_next_source(job)
+  local candidates = {
+    { "lua", DATA_LUA_PATH },
+    { "json", DATA_PATH },
+    { "lua", DATA_LUA_PATH .. ".bak" },
+    { "json", DATA_PATH .. ".bak" },
+  }
+  local i = (job.source_index or 0) + 1
+  while i <= #candidates do
+    local c = candidates[i]
+    local f = io.open(c[2], "rb")
+    if f then
+      local size = f:seek("end") or 0
+      f:close()
+      if size > 0 then
+        job.source_index = i
+        job.format = c[1]
+        job.path = c[2]
+        job.content = nil
+        job.phase = "read"
+        job.message = (c[1] == "lua") and "Reading Lua cache…" or "Reading JSON cache…"
+        if i > 2 then
+          log("Using backup sample cache: " .. c[2])
+        end
+        return true
+      end
+    end
+    i = i + 1
+  end
+  job.source_index = i
+  return false
+end
+
 local function process_library_load_slice(max_ms)
   local job = state.library_load
   if not job or job.phase == "done" or job.phase == "miss" then
@@ -4096,25 +4594,10 @@ local function process_library_load_slice(max_ms)
 
   while r.time_precise() < deadline do
     if job.phase == "init" then
-      local lua_file = io.open(DATA_LUA_PATH, "r")
-      if lua_file then
-        lua_file:close()
-        job.format = "lua"
-        job.path = DATA_LUA_PATH
-        job.message = "Reading Lua cache…"
-      else
-        local json_file = io.open(DATA_PATH, "r")
-        if json_file then
-          json_file:close()
-          job.format = "json"
-          job.path = DATA_PATH
-          job.message = "Reading JSON cache…"
-        else
-          finish_library_miss("Cache file not found")
-          return false
-        end
+      if not sm_library_load_next_source(job) then
+        finish_library_miss("Cache file not found")
+        return false
       end
-      job.phase = "read"
 
     elseif job.phase == "read" then
       if job.format == "lua" then
@@ -4125,19 +4608,28 @@ local function process_library_load_slice(max_ms)
       else
         local file = io.open(job.path, "r")
         if not file then
-          finish_library_miss("Cache file cannot be opened")
-          return false
+          if not sm_library_load_next_source(job) then
+            finish_library_miss("Cache file cannot be opened")
+            return false
+          end
+        else
+          job.content = file:read("*all")
+          file:close()
+          if not job.content or job.content == "" or not job.content:sub(-64):find("}%s*$") then
+            -- Empty or truncated (a complete cache ends with '}').
+            log("JSON cache empty or truncated: " .. tostring(job.path))
+            job.content = nil
+            if not sm_library_load_next_source(job) then
+              finish_library_miss("Cache file is empty")
+              return false
+            end
+          else
+            log(string.format("Cache file size: %d bytes (json)", #job.content))
+            job.message = "Decoding JSON cache…"
+            job.phase = "decode"
+            job.progress = 0.05
+          end
         end
-        job.content = file:read("*all")
-        file:close()
-        if not job.content or job.content == "" then
-          finish_library_miss("Cache file is empty")
-          return false
-        end
-        log(string.format("Cache file size: %d bytes (json)", #job.content))
-        job.message = "Decoding JSON cache…"
-        job.phase = "decode"
-        job.progress = 0.05
       end
 
     elseif job.phase == "decode" then
@@ -4167,20 +4659,24 @@ local function process_library_load_slice(max_ms)
         end
         if not loader then
           log("Failed to load Lua cache: " .. tostring(err))
-          pcall(os.remove, DATA_LUA_PATH)
-          job.format = "json"
-          job.path = DATA_PATH
-          job.phase = "read"
-          job.message = "Lua cache invalid; reading JSON…"
+          if job.path == DATA_LUA_PATH then
+            pcall(os.remove, DATA_LUA_PATH)
+          end
+          if not sm_library_load_next_source(job) then
+            finish_library_miss("Failed to load Lua cache")
+            return false
+          end
         else
           local ok, result = pcall(loader)
           if not ok or type(result) ~= "table" then
             log("Failed to execute Lua cache: " .. tostring(result))
-            pcall(os.remove, DATA_LUA_PATH)
-            job.format = "json"
-            job.path = DATA_PATH
-            job.phase = "read"
-            job.message = "Lua cache invalid; reading JSON…"
+            if job.path == DATA_LUA_PATH then
+              pcall(os.remove, DATA_LUA_PATH)
+            end
+            if not sm_library_load_next_source(job) then
+              finish_library_miss("Failed to execute Lua cache")
+              return false
+            end
           else
             data = result
           end
@@ -4190,17 +4686,20 @@ local function process_library_load_slice(max_ms)
         job.content = nil
         if not ok or type(result) ~= "table" then
           log("Fast JSON decode failed (" .. tostring(result) .. "); trying full decoder")
-          local file = io.open(DATA_PATH, "r")
-          if not file then
-            finish_library_miss("Failed to decode JSON cache")
-            return false
+          local content = sm_read_nonempty_file(job.path)
+          if content then
+            ok, result = pcall(json_decode, content)
+          else
+            ok, result = false, "cannot read " .. tostring(job.path)
           end
-          local content = file:read("*all")
-          file:close()
-          ok, result = pcall(json_decode, content)
+          content = nil
           if not ok or type(result) ~= "table" then
-            finish_library_miss("Failed to decode JSON: " .. tostring(result))
-            return false
+            log("Failed to decode JSON cache " .. tostring(job.path) .. ": " .. tostring(result))
+            result = nil
+            if not sm_library_load_next_source(job) then
+              finish_library_miss("Failed to decode JSON cache")
+              return false
+            end
           end
         end
         data = result
@@ -4208,11 +4707,10 @@ local function process_library_load_slice(max_ms)
 
       if not data then
         -- Waiting for fallback read path
-      elseif data.folders and not folders_match(state.folders, data.folders) then
-        log("Cached samples ignored: folder list changed")
-        finish_library_miss("Folder list changed; rescanning")
-        return false
       else
+        if data.folders and not folders_match(state.folders, data.folders) then
+          sm_library_note_folder_change(job, data.folders)
+        end
         local streaming = data._samples_content ~= nil and data._samples_pos ~= nil
         local count = 0
         if streaming then
@@ -4343,13 +4841,16 @@ local function save_samples()
   local sample_count = #payload.samples
 
   -- Fast Lua cache (primary load path)
-  local lua_str = encode_lua_cache(payload)
-  local lua_file = io.open(DATA_LUA_PATH, "w")
-  if lua_file then
-    lua_file:write(lua_str)
-    lua_file:close()
+  local ok_lua_enc, lua_str = pcall(encode_lua_cache, payload)
+  local lua_saved, lua_err = false, nil
+  if ok_lua_enc and type(lua_str) == "string" then
+    lua_saved, lua_err = sm_atomic_write(DATA_LUA_PATH, lua_str)
   else
-    log("Failed to write Lua cache: " .. DATA_LUA_PATH)
+    lua_err = "encode failed: " .. tostring(lua_str)
+  end
+  lua_str = nil
+  if not lua_saved then
+    log("Failed to write Lua cache: " .. DATA_LUA_PATH .. " (" .. tostring(lua_err) .. ")")
   end
 
   -- Compact JSON for companion scripts (Quick Swap, etc.)
@@ -4365,7 +4866,7 @@ local function save_samples()
     return table.concat(out)
   end
 
-  local json_str = table.concat({
+  local ok_json_enc, json_str = pcall(function() return table.concat({
     "{",
     "\"v\":", json_encode(payload.v), ",",
     "\"tag_schema_version\":", json_encode(payload.tag_schema_version), ",",
@@ -4382,22 +4883,29 @@ local function save_samples()
     "\"analyzer_results\":", json_encode(payload.analyzer_results), ",",
     "\"analyzer_mode\":", json_encode(payload.analyzer_mode),
     "}"
-  })
+  }) end)
 
-  local file = io.open(DATA_PATH, "w")
-  if file then
-    file:write(json_str)
-    file:close()
+  if ok_json_enc and type(json_str) == "string" then
+    local json_saved, json_err = sm_atomic_write(DATA_PATH, json_str)
+    if not json_saved then
+      log("Failed to write JSON cache: " .. tostring(json_err))
+    end
+  else
+    log("Failed to encode JSON cache: " .. tostring(json_str))
   end
 
   state.last_save_time = r.time_precise()
+  state.scan_unsaved_results = false
   log(string.format("Saved sample cache in %.0fms (%d samples, compact v%d)", (state.last_save_time - save_start) * 1000, sample_count, payload.v or 2))
 end
 
 
 local function clear_sample_cache()
-  os.remove(DATA_PATH)
-  os.remove(DATA_LUA_PATH)
+  for _, p in ipairs({ DATA_PATH, DATA_LUA_PATH }) do
+    os.remove(p)
+    os.remove(p .. ".bak")
+    os.remove(p .. ".tmp")
+  end
 end
 
 local function filter_samples_by_folders()
@@ -4715,133 +5223,163 @@ function enqueue_weight_analysis()
   )
 end
 
-local function enqueue_scan(folder_only)
-  state.debug_count = 0  -- Reset debug counter for new scan
-  state.external_disabled = false
-  state.analyzer_warned = false
-  state.analyzer_path_mode = state.analyzer_path_mode or {}
-  rebuild_samples_path_index()
-
-  local already = {}
-  for _, path in ipairs(state.analyzer_queue) do
-    already[path] = true
+-- Folder enumeration for scans is time-sliced (see sm_scan_enum_step) so large
+-- libraries don't freeze the UI. process_scan_slice waits until it has finished.
+function sm_scan_enum_file(enum, dir, file)
+  local ext = file:match("%.([^%.]+)$")
+  if not ext or not AUDIO_EXTS["." .. ext:lower()] then
+    return
   end
-  for _, w in ipairs(state.analyzer_workers or {}) do
-    if w.path then
-      already[w.path] = true
+  local normalized_full_path = normalize_path(dir .. "/" .. file)
+  local existing = samples_by_path[normalized_full_path]
+  if not existing then
+    existing = samples_by_path[path_index_key(normalized_full_path)]
+  end
+  if not existing then
+    if not enum.queued[normalized_full_path] then
+      enum.queued[normalized_full_path] = true
+      enum.paths[#enum.paths + 1] = normalized_full_path
     end
+    return
   end
-
-  local paths = {}
-  local skipped_count = 0
-  local reanalyze_count = 0
-  local incomplete_count = 0
-  local folders_to_scan = state.folders
-  if folder_only and folder_only ~= "" then
-    folders_to_scan = { normalize_path(folder_only) }
+  local function queue_existing(sample, mode)
+    local path = normalize_path(sample.path)
+    if path == "" or enum.already[path] then
+      return false
+    end
+    table.insert(state.analyzer_queue, path)
+    enum.already[path] = true
+    state.analyzer_path_mode = state.analyzer_path_mode or {}
+    state.analyzer_path_mode[path] = mode
+    return true
   end
-
-  for _, folder in ipairs(folders_to_scan) do
-    folder = normalize_path(folder)
-    local files_found = 0
-
-    local function queue_existing(sample, mode)
-      local path = normalize_path(sample.path)
-      if path == "" or already[path] then
-        return false
+  local size, mtime = file_identity(normalized_full_path)
+  if sample_file_changed(existing, size, mtime) then
+    stamp_sample_file_id(existing, size, mtime)
+    clear_sample_analysis_fields(existing)
+    refresh_sample_file_meta(existing, normalized_full_path)
+    if queue_existing(existing, nil) then
+      enum.reanalyze = enum.reanalyze + 1
+    else
+      enum.skipped = enum.skipped + 1
+    end
+  else
+    stamp_sample_file_id(existing, size, mtime)
+    if sample_analysis_incomplete(existing) then
+      if queue_existing(existing, nil) then
+        enum.incomplete = enum.incomplete + 1
+      else
+        enum.skipped = enum.skipped + 1
       end
-      table.insert(state.analyzer_queue, path)
-      already[path] = true
-      state.analyzer_path_mode[path] = mode
-      return true
+    elseif sample_transient_incomplete(existing) then
+      if queue_existing(existing, "transient") then
+        enum.incomplete = enum.incomplete + 1
+      else
+        enum.skipped = enum.skipped + 1
+      end
+    else
+      enum.skipped = enum.skipped + 1
     end
+  end
+end
 
-    local function scan_dir(dir)
-      dir = normalize_path(dir)
+function sm_scan_enum_error(enum, where, err)
+  enum.errors = (enum.errors or 0) + 1
+  if enum.errors <= 20 then
+    add_scan_log(string.format("Scan error (%s): %s", tostring(where), tostring(err)))
+  end
+end
 
-      local i = 0
-      local file = r.EnumerateFiles(dir, i)
-      while file do
-        local ext = file:match("%.(.+)$")
-        if ext then
-          ext = "." .. ext:lower()
-          if AUDIO_EXTS[ext] then
-            local full_path = dir .. "/" .. file
-            local normalized_full_path = normalize_path(full_path)
-            local existing = samples_by_path[normalized_full_path] or samples_by_path[full_path]
-            if not existing then
-              existing = samples_by_path[path_index_key(normalized_full_path)]
-            end
-            if not existing then
-              table.insert(paths, normalized_full_path)
-              files_found = files_found + 1
-            else
-              local size, mtime = file_identity(normalized_full_path)
-              if sample_file_changed(existing, size, mtime) then
-                stamp_sample_file_id(existing, size, mtime)
-                clear_sample_analysis_fields(existing)
-                refresh_sample_file_meta(existing, normalized_full_path)
-                if queue_existing(existing, nil) then
-                  reanalyze_count = reanalyze_count + 1
-                else
-                  skipped_count = skipped_count + 1
-                end
-              else
-                stamp_sample_file_id(existing, size, mtime)
-                if sample_analysis_incomplete(existing) then
-                  if queue_existing(existing, nil) then
-                    incomplete_count = incomplete_count + 1
-                  else
-                    skipped_count = skipped_count + 1
-                  end
-                elseif sample_transient_incomplete(existing) then
-                  if queue_existing(existing, "transient") then
-                    incomplete_count = incomplete_count + 1
-                  else
-                    skipped_count = skipped_count + 1
-                  end
-                else
-                  skipped_count = skipped_count + 1
-                end
-              end
-            end
-          end
+-- Process queued directories until the time budget runs out.
+-- Returns true when enumeration has finished (or none is running).
+function sm_scan_enum_step(max_ms)
+  local enum = state.scan_enum
+  if not enum then
+    return true
+  end
+  local deadline = r.time_precise() + (max_ms or 12.0) / 1000.0
+  repeat
+    if not enum.cur_dir then
+      local dir = table.remove(enum.stack)
+      if not dir then
+        sm_scan_enum_finish()
+        return true
+      end
+      enum.dirs_done = (enum.dirs_done or 0) + 1
+      -- Index -1 makes REAPER drop its cached listing so new files show up.
+      local ok, err = pcall(function()
+        r.EnumerateFiles(dir, -1)
+        r.EnumerateSubdirectories(dir, -1)
+        local subs = {}
+        local i = 0
+        local sub = r.EnumerateSubdirectories(dir, i)
+        while sub do
+          subs[#subs + 1] = dir .. "/" .. sub
+          i = i + 1
+          sub = r.EnumerateSubdirectories(dir, i)
         end
-        i = i + 1
-        file = r.EnumerateFiles(dir, i)
+        for k = #subs, 1, -1 do
+          enum.stack[#enum.stack + 1] = subs[k]
+        end
+      end)
+      if not ok then
+        sm_scan_enum_error(enum, dir, err)
       end
-
-      i = 0
-      local subdir = r.EnumerateSubdirectories(dir, i)
-      while subdir do
-        scan_dir(dir .. "/" .. subdir)
-        i = i + 1
-        subdir = r.EnumerateSubdirectories(dir, i)
+      enum.cur_dir = dir
+      enum.file_idx = 0
+    else
+      local dir = enum.cur_dir
+      local ok_enum, file = pcall(r.EnumerateFiles, dir, enum.file_idx)
+      if not ok_enum then
+        sm_scan_enum_error(enum, dir, file)
+        file = nil
+      end
+      if not file then
+        enum.cur_dir = nil
+      else
+        enum.file_idx = enum.file_idx + 1
+        local ok, err = pcall(sm_scan_enum_file, enum, dir, file)
+        if not ok then
+          sm_scan_enum_error(enum, dir .. "/" .. tostring(file), err)
+        end
       end
     end
+  until r.time_precise() >= deadline
+  return false
+end
 
-    local success, err = pcall(scan_dir, folder)
-    if not success then
-      -- Error scanning folder - silent during scan, errors visible in scan logs
-    end
+function sm_scan_enum_finish()
+  local enum = state.scan_enum
+  if not enum then
+    return
   end
-
-  if #state.samples == 0 then
-    state.samples = {}
+  state.scan_enum = nil
+  local paths = enum.paths
+  local base_total = 0
+  if #state.scan_queue > 0 then
+    base_total = math.max(tonumber(state.scan_total) or 0, #state.scan_queue)
   end
-
-  state.scan_queue = paths
-  state.scan_total = #paths + skipped_count + reanalyze_count + incomplete_count
-  state.scan_started = r.time_precise()
+  for i = 1, #paths do
+    state.scan_queue[#state.scan_queue + 1] = paths[i]
+  end
+  local skipped_count, reanalyze_count, incomplete_count = enum.skipped, enum.reanalyze, enum.incomplete
+  state.scan_total = base_total + #paths + skipped_count + reanalyze_count + incomplete_count
+  if not (state.scan_started and state.scan_started > 0) then
+    state.scan_started = r.time_precise()
+  end
   state.scan_running = true
   state.last_save_time = r.time_precise()
+  if enum.errors and enum.errors > 0 then
+    add_scan_log(string.format("Folder enumeration hit %d error(s)", enum.errors))
+  end
 
-  if folder_only and folder_only ~= "" then
+  local folder_label = enum.folder_label
+  if folder_label then
     add_scan_log(string.format(
       "Folder rescan: %s (%d new, %d changed, %d incomplete, %d unchanged)",
-      folder_only, #paths, reanalyze_count, incomplete_count, skipped_count
+      folder_label, #paths, reanalyze_count, incomplete_count, skipped_count
     ))
-    log(string.format("Rescanning folder (%d new file(s)): %s", #paths, folder_only))
+    log(string.format("Rescanning folder (%d new file(s)): %s", #paths, folder_label))
   else
     add_scan_log(string.format(
       "Scan started: %d new, %d changed, %d incomplete, %d unchanged",
@@ -4849,14 +5387,93 @@ local function enqueue_scan(folder_only)
     ))
     log(string.format("Scan started: %d new file(s), %d already indexed", #paths, skipped_count))
   end
-  begin_scan_session((folder_only and folder_only ~= "") and "Folder rescan" or "Library scan", {
-    detail = (folder_only and folder_only ~= "") and folder_only or nil,
-    new_files = #paths,
-    changed_files = reanalyze_count,
-    incomplete_files = incomplete_count,
-    unchanged_files = skipped_count,
-    queued = reanalyze_count + incomplete_count,
-  })
+  local session = state.scan_session
+  if enum.appending and type(session) == "table" then
+    session.new_files = (session.new_files or 0) + #paths
+    session.changed_files = (session.changed_files or 0) + reanalyze_count
+    session.incomplete_files = (session.incomplete_files or 0) + incomplete_count
+    session.unchanged_files = (session.unchanged_files or 0) + skipped_count
+    session.queued = (session.queued or 0) + reanalyze_count + incomplete_count
+    if not session.started_at then
+      session.started_at = r.time_precise()
+    end
+  else
+    begin_scan_session(folder_label and "Folder rescan" or "Library scan", {
+      detail = folder_label,
+      new_files = #paths,
+      changed_files = reanalyze_count,
+      incomplete_files = incomplete_count,
+      unchanged_files = skipped_count,
+      queued = reanalyze_count + incomplete_count,
+    })
+  end
+end
+
+-- folder_only: nil (all folders), one folder path, or a list of folder paths.
+-- New files are appended (deduplicated) to any pending scan_queue.
+local function enqueue_scan(folder_only)
+  local folders_to_scan = state.folders
+  local folder_label = nil
+  if type(folder_only) == "table" then
+    folders_to_scan = folder_only
+    if #folder_only == 1 then
+      folder_label = normalize_path(folder_only[1])
+    elseif #folder_only > 1 then
+      folder_label = string.format("%d new folder(s)", #folder_only)
+    end
+  elseif folder_only and folder_only ~= "" then
+    folders_to_scan = { normalize_path(folder_only) }
+    folder_label = folder_only
+  end
+
+  local enum = state.scan_enum
+  if not enum then
+    state.debug_count = 0  -- Reset debug counter for new scan
+    state.external_disabled = false
+    state.analyzer_warned = false
+    state.analyzer_path_mode = state.analyzer_path_mode or {}
+    rebuild_samples_path_index()
+
+    enum = {
+      stack = {},
+      paths = {},
+      queued = {},
+      already = {},
+      skipped = 0,
+      reanalyze = 0,
+      incomplete = 0,
+      errors = 0,
+      folder_label = folder_label,
+      appending = #state.scan_queue > 0
+        or (state.scan_running and (#state.analyzer_queue > 0 or #state.active_processes > 0)),
+    }
+    for _, path in ipairs(state.analyzer_queue) do
+      enum.already[path] = true
+    end
+    for _, w in ipairs(state.analyzer_workers or {}) do
+      if w.path then
+        enum.already[w.path] = true
+      end
+    end
+    for _, path in ipairs(state.scan_queue) do
+      enum.queued[path] = true
+    end
+    state.scan_enum = enum
+    add_scan_log(folder_label and ("Listing files in " .. folder_label .. "…") or "Listing files in library folders…")
+  elseif enum.folder_label ~= folder_label then
+    enum.folder_label = (enum.folder_label and folder_label) and "several folders" or nil
+  end
+
+  for i = #folders_to_scan, 1, -1 do
+    local folder = normalize_path(folders_to_scan[i])
+    if folder and folder ~= "" then
+      enum.stack[#enum.stack + 1] = folder
+    end
+  end
+
+  -- Keep the menu in "scanning" state while files are listed; process_scan_slice
+  -- does no queue work or finalize until sm_scan_enum_finish has run.
+  state.scan_running = true
 end
 
 function scan_is_active()
@@ -4874,6 +5491,9 @@ function scan_is_active()
 end
 
 function start_scan(folder_only)
+  if state.scan_enum and (not folder_only or folder_only == "") then
+    return -- already listing library folders
+  end
   local resume = (not folder_only or folder_only == "")
     and (#state.scan_queue > 0 or #state.analyzer_queue > 0 or #state.active_processes > 0)
   if resume then
@@ -4900,6 +5520,8 @@ function start_scan(folder_only)
 end
 
 function stop_scan()
+  -- Abandon an in-progress folder listing; files already found are not queued.
+  state.scan_enum = nil
   local remaining_files = #state.scan_queue
   local remaining_analyzer = #state.analyzer_queue + #state.active_processes
   if not state.scan_running and remaining_files == 0 and remaining_analyzer == 0 then
@@ -5129,6 +5751,12 @@ end
 local function process_scan_slice(max_ms)
   max_ms = max_ms or 12.0
 
+  -- Folder listing runs first, time-sliced; nothing else proceeds until it is done.
+  if state.scan_enum then
+    sm_scan_enum_step(max_ms)
+    return
+  end
+
   local analyzer_complete = (#state.analyzer_queue == 0 and #state.active_processes == 0)
   local workers_busy = false
   for _, w in ipairs(state.analyzer_workers or {}) do
@@ -5259,6 +5887,7 @@ local function process_scan_slice(max_ms)
   if merged_count > 0 then
     -- Defer full layout until scan/analyzers settle — per-result layout is too expensive
     state._pending_layout = true
+    state.scan_unsaved_results = true
   end
 
   if not state.scan_running then
@@ -5318,6 +5947,13 @@ local function process_scan_slice(max_ms)
     return true
   end
 
+  -- Save progress every few minutes during long scans so a crash loses little.
+  if state.scan_unsaved_results and state.scan_started > 0
+      and (r.time_precise() - (state.last_save_time or 0)) >= 180.0 then
+    save_samples()
+    add_scan_log("Scan progress saved")
+  end
+
   if #state.scan_queue == 0 and not analyzer_complete then
     return
   end
@@ -5330,6 +5966,7 @@ local function process_scan_slice(max_ms)
     local sample = analyze_file(path)
     if sample then
       table.insert(state.samples, sample)
+      state.scan_unsaved_results = true
       if sample.path then
         samples_by_path[sample.path] = sample
       end
@@ -8037,6 +8674,7 @@ function confirm_delete_tag(tag)
   if state.discovered_library_tag_set then
     state.discovered_library_tag_set[needle] = nil
   end
+  state.tag_category_rev = (state.tag_category_rev or 0) + 1
   if state.tag_colors then
     for key, _ in pairs(state.tag_colors) do
       if string.lower(tostring(key)) == needle then
@@ -8685,20 +9323,8 @@ end
 
 -- Function to save tag colors to current preset
 local function save_tag_color_to_preset(tag, color)
-  -- Load current presets
-  local tag_presets = {}
-  local function load_tag_presets()
-    local preset_file = io.open(CONFIG_DIR .. "/tag_presets.lua", "r")
-    if preset_file then
-      local content = preset_file:read("*all")
-      preset_file:close()
-      local success, presets = pcall(load, content)
-      if success and type(presets) == "function" then
-        tag_presets = presets() or {}
-      end
-    end
-  end
-  load_tag_presets()
+  -- Load current presets (cached in memory)
+  local tag_presets = sm_get_tag_presets()
   
   -- Ensure current preset exists
   if not tag_presets[state.current_preset_name] then
@@ -8709,16 +9335,55 @@ local function save_tag_color_to_preset(tag, color)
   tag_presets[state.current_preset_name][tag] = color
   
   -- Save presets back to file
-  local preset_content = "return " .. serialize_table(tag_presets)
-  local preset_file = io.open(CONFIG_DIR .. "/tag_presets.lua", "w")
-  if preset_file then
-    preset_file:write(preset_content)
-    preset_file:close()
-  end
+  sm_save_tag_presets(tag_presets)
 end
 
--- Helper function to categorize tags
-function categorize_tags(tag)
+-- Persist a tag colour edited in the picker once the edit finishes (not on every drag frame).
+function sm_flush_tag_color_save()
+  local pending = state.tag_color_pending_save
+  if not pending then
+    return
+  end
+  state.tag_color_pending_save = nil
+  save_tag_color_to_preset(pending.tag, pending.color)
+  save_config()
+end
+
+-- Built-in tag categories (case-insensitive keys).
+SM_TAG_CATEGORY_DRUM = {
+  kick = true, snare = true, clap = true, snap = true, rim = true, hat = true,
+  tom = true, ride = true, crash = true, perc = true, fx = true,
+  bass = true, ["808"] = true, ["808s"] = true, drum = true
+}
+SM_TAG_CATEGORY_MELODIC = {
+  vocal = true, pluck = true, lead = true, pad = true,
+  keys = true, guitar = true, swell = true  -- Swell is melodic
+}
+-- Loop/oneshot category tags (handle both "One shot" and "oneshot")
+SM_TAG_CATEGORY_LOOP = {
+  loop = true, ["one shot"] = true, oneshot = true
+}
+
+-- Per-tag category memo. Dropped when tag_parent_map / the discovered library
+-- tags are replaced, or when state.tag_category_rev is bumped (in-place edits,
+-- rebuild_tag_index).
+function sm_tag_category_cache()
+  local c = state.tag_category_cache
+  if not c or c.parent_map ~= state.tag_parent_map
+      or c.discovered ~= state.discovered_library_tag_set
+      or c.rev ~= (state.tag_category_rev or 0) then
+    c = {
+      parent_map = state.tag_parent_map,
+      discovered = state.discovered_library_tag_set,
+      rev = state.tag_category_rev or 0,
+      map = {},
+    }
+    state.tag_category_cache = c
+  end
+  return c.map
+end
+
+function sm_compute_tag_category(tag)
   -- Normalize tag to lowercase for comparison (but preserve original for display)
   local tag_lower = string.lower(tostring(tag or ""))
   if tag_lower == "" then
@@ -8727,36 +9392,52 @@ function categorize_tags(tag)
   if state.tag_parent_map and state.tag_parent_map[tag_lower] then
     return state.tag_parent_map[tag_lower]
   end
-  
-  -- Drum category tags (case-insensitive)
-  local drum_tags = {
-    kick = true, snare = true, clap = true, snap = true, rim = true, hat = true,
-    tom = true, ride = true, crash = true, perc = true, fx = true,
-    bass = true, ["808"] = true, ["808s"] = true, drum = true
-  }
-  
-  -- Melodic category tags (case-insensitive)
-  local melodic_tags = {
-    vocal = true, pluck = true, lead = true, pad = true,
-    keys = true, guitar = true, swell = true  -- Swell is melodic
-  }
-  
-  -- Loop/oneshot category tags (case-insensitive, handle both "One shot" and "oneshot")
-  local loop_tags = {
-    loop = true, ["one shot"] = true, oneshot = true
-  }
-  
-  if drum_tags[tag_lower] then
+  if SM_TAG_CATEGORY_DRUM[tag_lower] then
     return "drum"
-  elseif melodic_tags[tag_lower] then
+  elseif SM_TAG_CATEGORY_MELODIC[tag_lower] then
     return "melodic"
   elseif GENRE_TAG_SET[tag_lower] or (state.discovered_library_tag_set and state.discovered_library_tag_set[tag_lower]) then
     return "genre"
-  elseif loop_tags[tag_lower] then
+  elseif SM_TAG_CATEGORY_LOOP[tag_lower] then
     return "loop"
   end
-  
   return nil
+end
+
+-- Helper function to categorize tags
+function categorize_tags(tag)
+  if tag == nil then
+    return nil
+  end
+  local map = sm_tag_category_cache()
+  local cat = map[tag]
+  if cat == nil then
+    cat = sm_compute_tag_category(tag) or false
+    map[tag] = cat
+  end
+  return cat or nil
+end
+
+-- Tags of the current tag_list grouped by category (rebuilt with the tag index).
+function sm_tag_category_lists()
+  local map = sm_tag_category_cache()
+  local c = state.tag_category_lists
+  if not c or c.map ~= map or c.list ~= state.tag_list or c.epoch ~= state.tag_index_epoch then
+    c = { map = map, list = state.tag_list, epoch = state.tag_index_epoch, by_cat = {} }
+    for _, entry in ipairs(state.tag_list or {}) do
+      local cat = categorize_tags(entry.tag)
+      if cat then
+        local list = c.by_cat[cat]
+        if not list then
+          list = {}
+          c.by_cat[cat] = list
+        end
+        list[#list + 1] = entry.tag
+      end
+    end
+    state.tag_category_lists = c
+  end
+  return c.by_cat
 end
 
 function builtin_tag_parents()
@@ -8813,6 +9494,7 @@ function assign_tag_parent(tag, parent_id)
   end
   state.tag_parent_map = state.tag_parent_map or {}
   state.tag_parent_map[string.lower(tag)] = parent_id
+  state.tag_category_rev = (state.tag_category_rev or 0) + 1
   return true
 end
 
@@ -9289,16 +9971,16 @@ function parent_category_fully_active(cat)
   if cat ~= "drum" and cat ~= "melodic" and cat ~= "genre" then
     return false
   end
-  local found = false
-  for _, entry in ipairs(state.tag_list or {}) do
-    if categorize_tags(entry.tag) == cat then
-      found = true
-      if not state.active_tags[entry.tag] then
-        return false
-      end
+  local tags = sm_tag_category_lists()[cat]
+  if not tags or #tags == 0 then
+    return false
+  end
+  for i = 1, #tags do
+    if not state.active_tags[tags[i]] then
+      return false
     end
   end
-  return found
+  return true
 end
 
 function should_hide_active_tag_in_search_bar(tag)
@@ -9628,8 +10310,8 @@ function render_tag_filters()
       if color_changed then
         local rgb_color = new_color & 0xFFFFFF  -- Extract RGB part only
         state.tag_colors[state.tag_color_picker_tag] = rgb_color
-        save_tag_color_to_preset(state.tag_color_picker_tag, rgb_color)
-        save_config()  -- Also save to main config
+        -- Persisted by sm_flush_tag_color_save() when the drag/edit ends.
+        state.tag_color_pending_save = { tag = state.tag_color_picker_tag, color = rgb_color }
         invalidate_sample_render_colors(state.tag_color_picker_tag)
       end
       
@@ -9652,6 +10334,9 @@ function render_tag_filters()
       r.ImGui_CloseCurrentPopup(ctx)
     end
     r.ImGui_EndPopup(ctx)
+  end
+  if state.tag_color_pending_save and not (r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0)) then
+    sm_flush_tag_color_save()
   end
 
   r.ImGui_Separator(ctx)
@@ -38108,9 +38793,7 @@ end
 
 -- Genres present in the scanned library (for Randomize Kit popup).
 function collect_library_genre_tags()
-  if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0 then
-    rebuild_tag_index()
-  end
+  sm_tag_index_rebuild_if_stale()
   local out = {}
   for _, entry in ipairs(state.tag_list or {}) do
     local tag = tostring(entry.tag or "")
@@ -38746,9 +39429,7 @@ end
 
 function open_seq_kit_random_popup()
   state.seq_kit_random_query = state.seq_kit_random_query or ""
-  if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0 then
-    rebuild_tag_index()
-  end
+  sm_tag_index_rebuild_if_stale()
   if r.ImGui_SetNextWindowSize then
     local cond = r.ImGui_Cond_Appearing and r.ImGui_Cond_Appearing() or 0
     r.ImGui_SetNextWindowSize(ctx, 440, 620, cond)
@@ -41114,9 +41795,7 @@ function render_seq_kit_random_popup()
     return
   end
 
-  if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0 then
-    rebuild_tag_index()
-  end
+  sm_tag_index_rebuild_if_stale()
 
   r.ImGui_TextColored(ctx, UI_THEME.text, "Randomize Kit")
   r.ImGui_Separator(ctx)
@@ -52671,6 +53350,7 @@ function clear_all_folders_and_samples()
   end
   state.folders = {}
   filter_samples_by_folders()  -- This will clear samples and tag data
+  state.scan_enum = nil
   state.scan_queue = {}
   state.scan_running = false
   state.scan_started = 0
@@ -52737,6 +53417,13 @@ function render_header()
         enqueue_weight_analysis()
       end
       menu_item_tooltip("Recompute weight only (skips crop, loop/one-shot, and transients).\nUse this after the weight formula changes.")
+      if state.analyzer_numpy_missing and not state.analyzer_numpy_install_started then
+        r.ImGui_Separator(ctx)
+        if r.ImGui_MenuItem(ctx, "Install numpy…") then
+          sm_install_numpy()
+        end
+        menu_item_tooltip("numpy was not found for the analyzer's Python.\nInstalling it makes analysis faster.")
+      end
       r.ImGui_EndMenu(ctx)
     end
 
@@ -53325,17 +54012,8 @@ function settings_render_tag_layout()
 end
 
 function settings_render_tag_colors()
-  -- Load tag presets
-  local tag_presets = {}
-  local preset_file = io.open(CONFIG_DIR .. "/tag_presets.lua", "r")
-  if preset_file then
-    local content = preset_file:read("*all")
-    preset_file:close()
-    local success, presets = pcall(load, content)
-    if success and type(presets) == "function" then
-      tag_presets = presets() or {}
-    end
-  end
+  -- Load tag presets (cached; re-read at most every 2 s)
+  local tag_presets = sm_get_tag_presets()
 
   local preset_names = {}
   for name, _ in pairs(tag_presets) do
@@ -53377,10 +54055,11 @@ function settings_render_tag_colors()
 
     if r.ImGui_BeginPopup(ctx, "save_tag_preset") then
       r.ImGui_Text(ctx, "Preset Name:")
-      local preset_name = ""
+      local preset_name = state.settings_preset_name_buf or ""
       local changed, new_name = r.ImGui_InputText(ctx, "##preset_name", preset_name, 0)
       if changed then
         preset_name = new_name
+        state.settings_preset_name_buf = new_name
       end
 
       if draw_ui_button("settings_save_preset_confirm", "Save") and preset_name ~= "" then
@@ -53389,13 +54068,9 @@ function settings_render_tag_colors()
           tag_presets[preset_name][tag] = color
         end
         state.current_preset_name = preset_name
+        state.settings_preset_name_buf = nil
 
-        local preset_content = "return " .. serialize_table(tag_presets)
-        local out_file = io.open(CONFIG_DIR .. "/tag_presets.lua", "w")
-        if out_file then
-          out_file:write(preset_content)
-          out_file:close()
-        end
+        sm_save_tag_presets(tag_presets)
 
         r.ImGui_CloseCurrentPopup(ctx)
       end
@@ -55486,8 +56161,9 @@ function sm_loop_frame()
 
   -- Start scan after a miss, but defer cache rewrite until after first interactive frame.
   if state._enqueue_scan_after_load then
+    local scan_folders = state._enqueue_scan_after_load
     state._enqueue_scan_after_load = false
-    sm_pcall("enqueue_scan", enqueue_scan)
+    sm_pcall("enqueue_scan", enqueue_scan, type(scan_folders) == "table" and scan_folders or nil)
   end
 
   if not loading then

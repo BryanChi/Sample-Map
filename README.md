@@ -45,7 +45,7 @@ REAPER script that scans audio folders into an interactive 2D sample map, with a
 | `Effects/SampleMapPlayer.jsfx` | Per-track layered sampler |
 | `Effects/SampleMapPreview.jsfx` | Preview bus passthrough |
 | `assets/` | Sequencer / map icons |
-| `tag_presets.lua` | Tag color palettes |
+| `tag_presets.default.lua` | Default tag color palettes (your edits are saved to `tag_presets.lua`) |
 
 Local files such as `SampleMapData.json` and `SampleMapBrowser.json` are generated at runtime and are not committed.
 

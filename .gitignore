@@ -5,6 +5,12 @@ SampleMapBrowser.json
 SampleMapData.json
 SampleMapData.cache.lua
 .samplemap_player_status.json
+# Atomic-save temp files and backups
+*.tmp
+*.bak
+
+# User tag colour presets (defaults ship as tag_presets.default.lua)
+tag_presets.lua
 
 # Magenta Groove MIDI Dataset cache
 .groove_midi/
