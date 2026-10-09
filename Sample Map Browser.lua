@@ -17206,7 +17206,33 @@ function seq_arrange_imgui_rect(octx, geo)
   return x0, y0, x1, y1
 end
 
+-- Follow and overlay both ask for the hovered items each frame; scan once.
 function seq_find_hovered_arrange_items()
+  local hover = state.seq_grid_hover
+  local frame = nil
+  if r.ImGui_GetFrameCount and ctx then
+    local ok, fc = pcall(r.ImGui_GetFrameCount, ctx)
+    if ok then frame = fc end
+  end
+  local c = state.seq_hover_items_frame_cache
+  if frame and c and c.frame == frame and hover and c.hover == hover
+      and c.slot_id == hover.slot_id and c.region_id == hover.region_id
+      and c.step_key == hover.step_key and c.note == hover.note then
+    return c.items, c.track
+  end
+  local items, track = seq_find_hovered_arrange_items_scan()
+  if frame and hover then
+    state.seq_hover_items_frame_cache = {
+      frame = frame, hover = hover, slot_id = hover.slot_id, region_id = hover.region_id,
+      step_key = hover.step_key, note = hover.note, items = items, track = track,
+    }
+  else
+    state.seq_hover_items_frame_cache = nil
+  end
+  return items, track
+end
+
+function seq_find_hovered_arrange_items_scan()
   local hover = state.seq_grid_hover
   if not hover or not hover.slot_id or not hover.note then
     return nil, nil
@@ -17697,6 +17723,19 @@ function seq_arrange_hl_flush()
   if not seq_arrange_hl_bm then
     return
   end
+  -- Skip clear/redraw/composite when the same rects are already composited.
+  local sig_parts = { tostring(w), tostring(h) }
+  for i = 1, #pending do
+    local p = pending[i]
+    sig_parts[#sig_parts + 1] = string.format("%s,%s,%s,%s,%s,%s,%s",
+      math.floor(p.x0 + 0.5), math.floor(p.y0 + 0.5),
+      math.floor(p.x1 - p.x0 + 0.5), math.floor(p.y1 - p.y0 + 0.5),
+      tostring(p.fill_rgb), tostring(p.fill_a), tostring(p.edge_rgb))
+  end
+  local sig = table.concat(sig_parts, ";")
+  if seq_arrange_hl_linked and seq_arrange_hl_hwnd == hwnd and state.seq_arrange_hl_last_sig == sig then
+    return
+  end
   r.JS_LICE_Clear(seq_arrange_hl_bm, 0)
   for i = 1, #pending do
     seq_arrange_hl_draw_rect(seq_arrange_hl_bm, pending[i])
@@ -17704,6 +17743,7 @@ function seq_arrange_hl_flush()
   seq_arrange_hl_hwnd = hwnd
   r.JS_Composite(hwnd, 0, 0, w, h, seq_arrange_hl_bm, 0, 0, w, h, true)
   seq_arrange_hl_linked = true
+  state.seq_arrange_hl_last_sig = sig
 end
 
 function seq_update_arrange_item_follow()
@@ -17762,10 +17802,10 @@ function seq_render_link_parent_overlay()
     local t0, t1 = get_arrange_view_range()
     if geo and geo.view_w and geo.view_h and t0 and t1 then
       -- #region agent log
-      local zoom = (r.GetHZoomLevel and r.GetHZoomLevel()) or 0
+      local zoom = SEQ_DEBUG_LOG and (r.GetHZoomLevel and r.GetHZoomLevel()) or 0
       local hz_w = (t1 - t0) * zoom
       local now = (r.time_precise and r.time_precise()) or 0
-      if not seq_dbg_link_hl_t or (now - seq_dbg_link_hl_t) > 0.35 then
+      if SEQ_DEBUG_LOG and (not seq_dbg_link_hl_t or (now - seq_dbg_link_hl_t) > 0.35) then
         seq_dbg_link_hl_t = now
         seq_debug_ndjson("A", "seq_render_link_parent_overlay", "arrange width compare", {
           view_w = geo.view_w or -1,
@@ -17791,6 +17831,7 @@ function seq_render_link_parent_overlay()
             local x0, y0, x1, y1 = seq_item_imgui_rect(nil, item, track, 0, 0, geo.view_w, geo.view_h, t0, t1)
             if x0 then
               -- #region agent log
+              if SEQ_DEBUG_LOG then
               local pos = r.GetMediaItemInfo_Value(item, "D_POSITION") or 0
               local len = r.GetMediaItemInfo_Value(item, "D_LENGTH") or 0
               local hz_x0 = (pos - t0) * zoom
@@ -17840,6 +17881,7 @@ function seq_render_link_parent_overlay()
                     hz_x0 = hz_x0,
                   })
                 end
+              end
               end
               -- #endregion
               seq_arrange_hl_add(x0, y0, x1, y1, seq_lice_color(255, 229, 153), 0.33, seq_lice_color(255, 229, 153))
@@ -24383,14 +24425,14 @@ function seq_ingest_parent_items()
       local renamed = rec.name and rec.name ~= "" and rec.name ~= (region.name or "")
       if moved or resized or renamed then
         -- #region agent log
-        seq_debug_ndjson("E3", "arrange_parent_geometry", "mutate region", {
+        if SEQ_DEBUG_LOG then seq_debug_ndjson("E3", "arrange_parent_geometry", "mutate region", {
           id = region.id, old_start = old_start, new_start = new_start,
           old_bars = region.length_bars or 0, new_bars = new_bars,
           new_len = new_len, moved = moved, resized = resized, renamed = renamed,
           selected = (r.CountSelectedMediaItems and r.CountSelectedMediaItems(0)) or 0,
           snap_before = seq_debug_region_snapshot(),
           runId = "post-fix",
-        })
+        }) end
         -- #endregion
         if moved then
           region.start_qn = new_start
@@ -24422,11 +24464,11 @@ function seq_ingest_parent_items()
       end
       sync_seq_region(region)
       -- #region agent log
-      seq_debug_ndjson("E3", "arrange_parent_geometry", "after sync", {
+      if SEQ_DEBUG_LOG then seq_debug_ndjson("E3", "arrange_parent_geometry", "after sync", {
         id = region.id, start = region.start_qn or 0, bars = region.length_bars or 0,
         snap_after = seq_debug_region_snapshot(),
         runId = "post-fix",
-      })
+      }) end
       -- #endregion
     end
     seq_mark_self_arrange_write()
