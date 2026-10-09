@@ -38692,14 +38692,139 @@ function seq_collect_current_role_positions(region)
   return map
 end
 
+-- Unique temp file under REAPER's resource path. os.tmpname() points at the
+-- drive root on Windows, which is usually not writable.
+function sm_temp_path(prefix, ext)
+  local base = (r.GetResourcePath and r.GetResourcePath()) or ""
+  if base == "" then
+    base = SCRIPT_DIR
+  end
+  local dir = base .. "/Data/SampleMap/tmp"
+  if state.sm_temp_dir ~= dir then
+    r.RecursiveCreateDirectory(dir, 0)
+    state.sm_temp_dir = dir
+  end
+  state.sm_temp_counter = (state.sm_temp_counter or 0) + 1
+  local t = r.time_precise()
+  return string.format(
+    "%s/%s_%d_%06d_%d_%05d%s",
+    dir, prefix or "tmp", os.time(), math.floor((t % 1) * 1000000),
+    state.sm_temp_counter, math.random(0, 99999), ext or ".tmp"
+  )
+end
+
+-- --- Background processes ----------------------------------------------------
+-- Run argv without blocking the UI thread: a small sh/batch script is launched
+-- with ExecProcess(-1/-2); it captures stdout+stderr to <base>.out and writes
+-- the exit code to <base>.rc when done. Poll with sm_bg_poll on later frames.
+function sm_bg_is_windows()
+  return ((r.GetOS and r.GetOS()) or ""):match("Win") ~= nil
+end
+
+function sm_bg_quote(arg)
+  arg = tostring(arg or "")
+  if sm_bg_is_windows() then
+    -- Batch files expand %VAR%; double each % so it stays literal.
+    local q = arg:gsub('"', ""):gsub("%%", "%%%%")
+    return '"' .. q .. '"'
+  end
+  local q = arg:gsub("'", "'\\''")
+  return "'" .. q .. "'"
+end
+
+function sm_bg_start(argv, timeout_s)
+  if not r.ExecProcess then
+    return nil, "ExecProcess is unavailable"
+  end
+  local base = sm_temp_path("bg", "")
+  local job = {
+    out_path = base .. ".out",
+    rc_path = base .. ".rc",
+    started = r.time_precise(),
+    timeout = timeout_s or 60,
+  }
+  local parts = {}
+  for i = 1, #argv do
+    parts[i] = sm_bg_quote(argv[i])
+  end
+  local cmd = table.concat(parts, " ")
+  local body, launch, wait_mode
+  if sm_bg_is_windows() then
+    local function win(path)
+      return sm_bg_quote((path:gsub("/", "\\")))
+    end
+    job.script_path = base .. ".bat"
+    body = table.concat({
+      "@echo off",
+      "chcp 65001 >nul",
+      cmd .. " > " .. win(job.out_path) .. " 2>&1",
+      "(echo %ERRORLEVEL%)> " .. win(job.rc_path .. ".tmp"),
+      "move /Y " .. win(job.rc_path .. ".tmp") .. " " .. win(job.rc_path) .. " >nul",
+      "",
+    }, "\r\n")
+    local script_win = job.script_path:gsub("/", "\\")
+    launch = 'cmd.exe /C ""' .. script_win .. '""'
+    wait_mode = -2 -- no wait, minimized console
+  else
+    job.script_path = base .. ".sh"
+    body = table.concat({
+      cmd .. " > " .. sm_bg_quote(job.out_path) .. " 2>&1",
+      "echo $? > " .. sm_bg_quote(job.rc_path .. ".tmp"),
+      "mv -f " .. sm_bg_quote(job.rc_path .. ".tmp") .. " " .. sm_bg_quote(job.rc_path),
+      "",
+    }, "\n")
+    launch = '/bin/sh "' .. job.script_path .. '"'
+    wait_mode = -1 -- no wait
+  end
+  local fh = io.open(job.script_path, "wb")
+  if not fh then
+    return nil, "could not write temp script"
+  end
+  fh:write(body)
+  fh:close()
+  if not pcall(r.ExecProcess, launch, wait_mode) then
+    os.remove(job.script_path)
+    return nil, "could not start background process"
+  end
+  return job
+end
+
+-- Returns "running" | "done", output, exit_code | "timeout".
+function sm_bg_poll(job)
+  local fh = io.open(job.rc_path, "rb")
+  if fh then
+    local rc = tonumber((fh:read("*a") or ""):match("%-?%d+")) or -1
+    fh:close()
+    local output = ""
+    local oh = io.open(job.out_path, "rb")
+    if oh then
+      output = oh:read("*a") or ""
+      oh:close()
+    end
+    os.remove(job.rc_path)
+    os.remove(job.out_path)
+    os.remove(job.script_path)
+    return "done", output, rc
+  end
+  if r.time_precise() - job.started > job.timeout then
+    os.remove(job.script_path)
+    return "timeout"
+  end
+  return "running"
+end
+
 function seq_drum_ai_sidecar_path()
   return SCRIPT_DIR .. "/SampleMapDrumAI.py"
 end
 
 function seq_drum_ai_available()
-  local fh = io.open(seq_drum_ai_sidecar_path(), "r")
-  if fh then fh:close() return true end
-  return false
+  -- Cached: queried every frame by the Pattern Presets window.
+  if state.seq_drum_ai_present == nil then
+    local fh = io.open(seq_drum_ai_sidecar_path(), "r")
+    state.seq_drum_ai_present = fh ~= nil
+    if fh then fh:close() end
+  end
+  return state.seq_drum_ai_present
 end
 
 -- Call the local Python model. Returns role_map (table) on success, or nil + err.
@@ -38727,8 +38852,7 @@ function seq_call_drum_ai(style_key, role_positions, variation, seed, steps_per_
   local ok_enc, json_payload = pcall(json_encode, payload)
   if not ok_enc then return nil, "failed to encode AI request" end
 
-  local tmp = os.tmpname()
-  if not tmp or tmp == "" then return nil, "could not create temp file" end
+  local tmp = sm_temp_path("ai_req", ".json")
   local wf = io.open(tmp, "w")
   if not wf then return nil, "could not write temp file" end
   wf:write(json_payload)
@@ -38782,6 +38906,25 @@ function run_seq_ai_variation(region, style_key, variation)
   local style = state.seq_gen_style
   variation = math.max(0.0, math.min(1.0, variation or 0.5))
 
+  -- Run the (blocking) model subprocess before opening the undo block, so a
+  -- slow or failing Python call never runs inside an open undo session.
+  -- Roles the template would add are requested too (with no hits) so tracks
+  -- created below still get generated parts.
+  local seed = seq_new_seed()
+  local role_map, err = nil, "no region"
+  if region then
+    local pre_grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
+    local pre_steps_per_bar = math.max(1, math.floor((4.0 / pre_grid_qn) + 0.5))
+    local pre_bar_count = math.max(1, math.floor((get_seq_region_length_qn(region) / 4.0) + 0.5))
+    local pre_positions = seq_collect_current_role_positions(region)
+    for _, role in ipairs(seq_template_roles(style)) do
+      if pre_positions[role] == nil then
+        pre_positions[role] = {}
+      end
+    end
+    role_map, err = seq_call_drum_ai(style, pre_positions, variation, seed, pre_steps_per_bar, pre_bar_count)
+  end
+
   local label = begin_seq_undo("AI pattern variation")
   local created = ensure_seq_tracks_for_roles(seq_template_roles(style))
   if created > 0 then
@@ -38797,15 +38940,7 @@ function run_seq_ai_variation(region, style_key, variation)
     return false
   end
 
-  local grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
-  local steps_per_bar = math.max(1, math.floor((4.0 / grid_qn) + 0.5))
-  local bar_count = math.max(1, math.floor((get_seq_region_length_qn(region) / 4.0) + 0.5))
-
-  local role_positions = seq_collect_current_role_positions(region)
-  local seed = seq_new_seed()
-
   seq_pattern_confirm_capture(region)
-  local role_map, err = seq_call_drum_ai(style, role_positions, variation, seed, steps_per_bar, bar_count)
   if not role_map then
     -- Graceful fallback: use the built-in randomizer so the click still does
     -- something musical even when the model can't be reached.
@@ -38844,22 +38979,47 @@ function seq_gmd_available()
   return state.seq_gmd_script_present
 end
 
--- Call the Groove MIDI sidecar. Returns decoded table on success, or nil + err.
+-- Write a Groove MIDI request to a temp JSON file. Returns path or nil + err.
+function seq_gmd_write_request(payload)
+  local ok_enc, json_payload = pcall(json_encode, payload or {})
+  if not ok_enc then return nil, "failed to encode Groove MIDI request" end
+  local tmp = sm_temp_path("gmd_req", ".json")
+  local wf = io.open(tmp, "w")
+  if not wf then return nil, "could not write temp file" end
+  wf:write(json_payload)
+  wf:close()
+  return tmp
+end
+
+-- Decode sidecar stdout. Returns decoded table or nil + err.
+function seq_gmd_parse_output(output)
+  if not output or output:match("^%s*$") then
+    return nil, "Groove MIDI returned no output (is python3 / network available?)"
+  end
+  local json_str = output:match("(%b{})")
+  if not json_str then
+    return nil, "Groove MIDI output not understood"
+  end
+  local ok_dec, decoded = pcall(json_decode, json_str)
+  if not ok_dec or type(decoded) ~= "table" then
+    return nil, "Groove MIDI output invalid"
+  end
+  if decoded.error then
+    return nil, tostring(decoded.error)
+  end
+  return decoded
+end
+
+-- Call the Groove MIDI sidecar synchronously (only for quick local actions
+-- such as "get"). Returns decoded table on success, or nil + err.
 function seq_call_gmd(payload)
   local sidecar = seq_gmd_sidecar_path()
   local fh = io.open(sidecar, "r")
   if not fh then return nil, "Groove MIDI script not found (SampleMapGrooveMIDI.py)" end
   fh:close()
 
-  local ok_enc, json_payload = pcall(json_encode, payload or {})
-  if not ok_enc then return nil, "failed to encode Groove MIDI request" end
-
-  local tmp = os.tmpname()
-  if not tmp or tmp == "" then return nil, "could not create temp file" end
-  local wf = io.open(tmp, "w")
-  if not wf then return nil, "could not write temp file" end
-  wf:write(json_payload)
-  wf:close()
+  local tmp, werr = seq_gmd_write_request(payload)
+  if not tmp then return nil, werr end
 
   local cmd = table.concat({
     shell_escape(PYTHON_BIN),
@@ -38875,24 +39035,114 @@ function seq_call_gmd(payload)
   end
   os.remove(tmp)
 
-  if not output or output:match("^%s*$") then
-    return nil, "Groove MIDI returned no output (is python3 / network available?)"
-  end
-
-  local json_str = output:match("(%b{})")
-  if not json_str then
-    return nil, "Groove MIDI output not understood"
-  end
-  local ok_dec, decoded = pcall(json_decode, json_str)
-  if not ok_dec or type(decoded) ~= "table" then
-    return nil, "Groove MIDI output invalid"
-  end
-  if decoded.error then
-    return nil, tostring(decoded.error)
-  end
-  return decoded
+  return seq_gmd_parse_output(output)
 end
 
+-- --- Background Groove MIDI jobs ("status", "ensure", "list") ----------------
+-- These can take long (dataset download) and must not block the UI. One job
+-- per kind runs in the background; seq_gmd_bg_tick (called from the main loop)
+-- applies the result. Failures back off for SEQ_GMD_RETRY_S unless the user
+-- clicks again.
+SEQ_GMD_RETRY_S = 60.0
+
+function seq_gmd_job_running(kind)
+  return state.seq_gmd_jobs ~= nil and state.seq_gmd_jobs[kind] ~= nil
+end
+
+function seq_gmd_start_job(kind, payload, timeout_s)
+  state.seq_gmd_jobs = state.seq_gmd_jobs or {}
+  if state.seq_gmd_jobs[kind] then
+    return state.seq_gmd_jobs[kind]
+  end
+  if not seq_gmd_available() then
+    return nil, "Groove MIDI script not found (SampleMapGrooveMIDI.py)"
+  end
+  local req, werr = seq_gmd_write_request(payload)
+  if not req then
+    return nil, werr
+  end
+  local job, err = sm_bg_start({ PYTHON_BIN, seq_gmd_sidecar_path(), req }, timeout_s)
+  if not job then
+    os.remove(req)
+    return nil, err
+  end
+  job.req_path = req
+  state.seq_gmd_jobs[kind] = job
+  return job
+end
+
+function seq_gmd_on_job_done(kind, job, result, err)
+  local now = r.time_precise()
+  if kind == "status" then
+    if result and result.ready then
+      state.seq_gmd_ready = true
+      state.seq_gmd_status_msg = string.format("Ready — %d grooves", tonumber(result.count) or 0)
+    else
+      state.seq_gmd_ready = false
+      state.seq_gmd_status_msg = "Not downloaded yet"
+    end
+  elseif kind == "ensure" then
+    if not result then
+      state.seq_gmd_ready = false
+      state.seq_gmd_status_msg = tostring(err)
+      state.seq_gmd_ensure_failed_at = now
+      log("Groove MIDI ensure failed: " .. tostring(err))
+      return
+    end
+    state.seq_gmd_ensure_failed_at = nil
+    state.seq_gmd_ready = result.ready == true
+    state.seq_gmd_status_msg = string.format(
+      "Ready — %d grooves",
+      tonumber(result.count) or 0
+    )
+    state.seq_gmd_list_key = nil
+    log("Groove MIDI Dataset ready (" .. tostring(result.count or 0) .. " files)")
+  elseif kind == "list" then
+    if not result then
+      state.seq_gmd_status_msg = tostring(err)
+      state.seq_gmd_list_failed_at = now
+      state.seq_gmd_list_failed_key = job.list_key
+      return
+    end
+    state.seq_gmd_list_failed_at = nil
+    state.seq_gmd_items = result.items or {}
+    state.seq_gmd_total = tonumber(result.total) or #state.seq_gmd_items
+    state.seq_gmd_list_key = job.list_key
+    local groups = seq_gmd_rebuild_groups()
+    state.seq_gmd_status_msg = string.format(
+      "%d preset%s · %d groove%s",
+      #groups,
+      #groups == 1 and "" or "s",
+      state.seq_gmd_total,
+      state.seq_gmd_total == 1 and "" or "s"
+    )
+  end
+end
+
+function seq_gmd_bg_tick()
+  local jobs = state.seq_gmd_jobs
+  if not jobs or next(jobs) == nil then
+    return
+  end
+  for kind, job in pairs(jobs) do
+    local status, output = sm_bg_poll(job)
+    if status ~= "running" then
+      jobs[kind] = nil
+      os.remove(job.req_path)
+      local result, err
+      if status == "timeout" then
+        err = "Groove MIDI request timed out"
+      else
+        result, err = seq_gmd_parse_output(output)
+      end
+      seq_gmd_on_job_done(kind, job, result, err)
+    end
+  end
+end
+
+-- Returns true when the dataset is ready. Otherwise starts the download in the
+-- background (unless one is running or a recent failure is backing off;
+-- force = user click bypasses the back-off) and returns false.
 function seq_gmd_ensure(force)
   if state.seq_gmd_ready and not force then
     return true
@@ -38902,22 +39152,23 @@ function seq_gmd_ensure(force)
     state.seq_gmd_status_msg = "SampleMapGrooveMIDI.py missing"
     return false
   end
-  state.seq_gmd_status_msg = "Downloading Groove MIDI Dataset..."
-  local result, err = seq_call_gmd({ action = "ensure" })
-  if not result then
+  if seq_gmd_job_running("ensure") then
+    return false
+  end
+  if not force and state.seq_gmd_ensure_failed_at
+      and (r.time_precise() - state.seq_gmd_ensure_failed_at) < SEQ_GMD_RETRY_S then
+    return false
+  end
+  local job, err = seq_gmd_start_job("ensure", { action = "ensure" }, 300)
+  if not job then
     state.seq_gmd_ready = false
     state.seq_gmd_status_msg = tostring(err)
+    state.seq_gmd_ensure_failed_at = r.time_precise()
     log("Groove MIDI ensure failed: " .. tostring(err))
     return false
   end
-  state.seq_gmd_ready = result.ready == true
-  state.seq_gmd_status_msg = string.format(
-    "Ready — %d grooves",
-    tonumber(result.count) or 0
-  )
-  state.seq_gmd_list_key = nil
-  log("Groove MIDI Dataset ready (" .. tostring(result.count or 0) .. " files)")
-  return state.seq_gmd_ready
+  state.seq_gmd_status_msg = "Downloading Groove MIDI Dataset…"
+  return false
 end
 
 function seq_gmd_list_cache_key()
@@ -39100,29 +39351,32 @@ function seq_gmd_refresh_list(force)
     return true
   end
 
-  local result, err = seq_call_gmd({
+  -- Listing runs in the background (seq_gmd_bg_tick applies the result);
+  -- after a failure, retry only on force or after SEQ_GMD_RETRY_S.
+  if seq_gmd_job_running("list") then
+    return false
+  end
+  if not force and state.seq_gmd_list_failed_at
+      and state.seq_gmd_list_failed_key == key
+      and (r.time_precise() - state.seq_gmd_list_failed_at) < SEQ_GMD_RETRY_S then
+    return false
+  end
+  local job, err = seq_gmd_start_job("list", {
     action = "list",
     style = "all",
     beat_type = state.seq_gmd_beat_type or "beat",
     limit = 0, -- 0 = return every matching groove
     offset = 0,
-  })
-  if not result then
+  }, 60)
+  if not job then
     state.seq_gmd_status_msg = tostring(err)
+    state.seq_gmd_list_failed_at = r.time_precise()
+    state.seq_gmd_list_failed_key = key
     return false
   end
-  state.seq_gmd_items = result.items or {}
-  state.seq_gmd_total = tonumber(result.total) or #state.seq_gmd_items
-  state.seq_gmd_list_key = key
-  local groups = seq_gmd_rebuild_groups()
-  state.seq_gmd_status_msg = string.format(
-    "%d preset%s · %d groove%s",
-    #groups,
-    #groups == 1 and "" or "s",
-    state.seq_gmd_total,
-    state.seq_gmd_total == 1 and "" or "s"
-  )
-  return true
+  job.list_key = key
+  state.seq_gmd_status_msg = "Loading grooves…"
+  return false
 end
 
 function seq_gmd_cycle_beat_type()
@@ -39289,15 +39543,17 @@ function seq_gmd_probe_ready()
     state.seq_gmd_status_msg = "SampleMapGrooveMIDI.py not found"
     return false
   end
-  local st = seq_call_gmd({ action = "status" })
-  if st and st.ready then
-    state.seq_gmd_ready = true
-    state.seq_gmd_status_msg = string.format("Ready — %d grooves", tonumber(st.count) or 0)
-  else
-    state.seq_gmd_ready = false
-    state.seq_gmd_status_msg = "Not downloaded yet"
+  -- Probe in the background; seq_gmd_bg_tick sets seq_gmd_ready when done.
+  if not seq_gmd_job_running("status") then
+    local job = seq_gmd_start_job("status", { action = "status" }, 30)
+    if job then
+      state.seq_gmd_status_msg = "Checking Groove MIDI…"
+    else
+      state.seq_gmd_ready = false
+      state.seq_gmd_status_msg = "Not downloaded yet"
+    end
   end
-  return state.seq_gmd_ready
+  return false
 end
 
 function seq_pattern_query_matches(query, haystack)
@@ -39416,6 +39672,12 @@ function render_seq_gmd_toolbar()
 
   seq_gmd_probe_ready()
   if not state.seq_gmd_ready then
+    if seq_gmd_job_running("ensure") or seq_gmd_job_running("status") then
+      -- Background download / probe in progress: show its status, no button.
+      local dots = string.rep(".", 1 + math.floor(r.time_precise() * 2) % 3)
+      r.ImGui_TextColored(ctx, UI_THEME.text_dim, tostring(state.seq_gmd_status_msg or "Working"):gsub("[.…]+$", "") .. dots)
+      return
+    end
     if draw_ui_button("seq_gmd_download", "Download Groove MIDI (~3 MB)", nil, nil, { style = "success", compact = true }) then
       seq_gmd_ensure(true)
     end
