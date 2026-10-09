@@ -495,7 +495,7 @@ local state = {
   seq_random_popup_close = false,  -- Close the random settings popup after a reset
   seq_random_popup_active_key = nil, -- Active knob key while dragging in the region random popup
   seq_random_flyout = nil,         -- Momentary extras panel: { kind, slot_id, anchor, rect, hold_until, pinned }
-  seq_random_sync_pending = nil,   -- { pattern_id, track_ids } flushed on mouse release
+  seq_random_sync_pending = nil,   -- { by_pattern = { [pid] = { track_ids, all_tracks } } } flushed on mouse release
   seq_random_sync_run = false,     -- flush pending random rebuild on the next frame
   seq_pattern_popup_last_style = nil, -- Last popup preset targeted by a dice strength button
   seq_pattern_popup_last_strength = nil,
@@ -11546,9 +11546,7 @@ function seq_clear_track_document_data(track_id)
     state.seq_razors = kept
   end
 
-  if state.seq_random_sync_pending and state.seq_random_sync_pending.track_ids then
-    state.seq_random_sync_pending.track_ids[track_id] = nil
-  end
+  seq_random_sync_pending_forget_track(track_id)
   if state.seq_layering_slot_id == track_id then
     state.seq_layering_slot_id = nil
   end
@@ -20337,16 +20335,33 @@ function seq_queue_random_sync(pattern_id, track_id)
   if not pattern_id then
     return
   end
-  local pending = state.seq_random_sync_pending
+  -- Pending syncs are keyed by pattern so rapid edits across patterns all flush.
+  local all = state.seq_random_sync_pending
+  if not all then
+    all = { by_pattern = {} }
+    state.seq_random_sync_pending = all
+  end
+  local pending = all.by_pattern[pattern_id]
   if not pending then
     pending = { pattern_id = pattern_id, track_ids = {} }
-    state.seq_random_sync_pending = pending
+    all.by_pattern[pattern_id] = pending
   end
-  pending.pattern_id = pattern_id
   if track_id then
     pending.track_ids[track_id] = true
   else
     pending.all_tracks = true
+  end
+end
+
+function seq_random_sync_pending_forget_track(track_id)
+  local all = state.seq_random_sync_pending
+  if not (all and all.by_pattern) then
+    return
+  end
+  for _, pending in pairs(all.by_pattern) do
+    if pending.track_ids then
+      pending.track_ids[track_id] = nil
+    end
   end
 end
 
@@ -20363,49 +20378,43 @@ function seq_repair_collapsed_note_velocities(pattern, track_id)
 end
 
 function seq_flush_pending_random_sync()
-  local pending = state.seq_random_sync_pending
-  if not pending then
+  local all = state.seq_random_sync_pending
+  if not all then
     return
   end
   state.seq_random_sync_pending = nil
   state.seq_random_sync_run = false
-  local pattern = get_seq_pattern(pending.pattern_id, false)
-  if pattern and pending.track_ids and not pending.all_tracks then
-    for track_id, _ in pairs(pending.track_ids) do
-      seq_repair_collapsed_note_velocities(pattern, track_id)
-    end
-  elseif pattern then
-    for _, slot in ipairs(state.seq_tracks or {}) do
-      seq_repair_collapsed_note_velocities(pattern, slot.id)
-    end
-  end
+  -- Note: quiet notes are no longer forced back to 1.0 here (that wiped
+  -- deliberate ghost notes on every random-setting edit).
   if seq_schedule_ingest_save then
     seq_schedule_ingest_save()
   elseif save_seq_project_state then
     save_seq_project_state()
   end
-  if pending.all_tracks or not pending.track_ids then
-    sync_seq_pattern_regions(pending.pattern_id)
-    return
-  end
-  local any = false
-  for _ in pairs(pending.track_ids) do
-    any = true
-    break
-  end
-  if not any then
-    sync_seq_pattern_regions(pending.pattern_id)
-    return
-  end
-  if r.PreventUIRefresh then r.PreventUIRefresh(1) end
-  for track_id, _ in pairs(pending.track_ids) do
-    local slot = seq_find_track_slot_by_id(track_id) or seq_find_slot_by_id(track_id)
-    if slot then
-      sync_seq_pattern_track(pending.pattern_id, slot, { skip_arrange = true, force_rebuild = true })
+  local need_arrange = false
+  for _, pending in pairs(all.by_pattern or {}) do
+    local any = false
+    if not pending.all_tracks and pending.track_ids then
+      for _ in pairs(pending.track_ids) do
+        any = true
+        break
+      end
+    end
+    if not any then
+      sync_seq_pattern_regions(pending.pattern_id)
+    else
+      if r.PreventUIRefresh then r.PreventUIRefresh(1) end
+      for track_id, _ in pairs(pending.track_ids) do
+        local slot = seq_find_track_slot_by_id(track_id) or seq_find_slot_by_id(track_id)
+        if slot then
+          sync_seq_pattern_track(pending.pattern_id, slot, { skip_arrange = true, force_rebuild = true })
+        end
+      end
+      if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+      need_arrange = true
     end
   end
-  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
-  if r.UpdateArrange then
+  if need_arrange and r.UpdateArrange then
     r.UpdateArrange()
   end
 end
@@ -29227,7 +29236,6 @@ function seq_layering_sync_arrange(slot, opts)
     return
   end
   opts = opts or {}
-  seq_layering_repair_note_volumes(slot)
   if r.PreventUIRefresh then
     r.PreventUIRefresh(1)
   end
@@ -32579,17 +32587,6 @@ function insert_seq_note_hit(tr, region, track_id, step_key, note, resolved_path
   if scale == nil then scale = 1.0 end
   if take then
     local vel = tonumber(note.volume) or 1.0
-    if opts.layer_piece and vel < 0.1 then vel = 1.0 end
-    local pattern = region and get_seq_pattern(region.pattern_id, false)
-    local vel_settings = get_seq_track_settings(pattern, track_id, false)
-    -- Previous humanize bake-in drove stored level to 0; restore unity so
-    -- further tweaks can be heard instead of staying at -inf.
-    if vel < 0.08 and (not opts.ghost) and seq_settings_vel_humanize_active(vel_settings) then
-      vel = 1.0
-      if type(note) == "table" then
-        note.volume = 1.0
-      end
-    end
     if not opts.ghost then
       vel = seq_humanize_note_velocity(vel, region, track_id, step_key, hit_start_qn, opts.hit_idx)
     end
@@ -37298,6 +37295,22 @@ function seq_locked_step_seen(locked, track_id)
   return seen
 end
 
+-- Clear only the tracks a generator writes to (role present in role_lookup);
+-- other tracks (bass, loops, roles the generator doesn't cover) keep their notes.
+function seq_clear_generated_role_tracks(pattern, role_lookup)
+  if not pattern or type(pattern.notes) ~= "table" or type(role_lookup) ~= "table" then
+    return
+  end
+  for _, slot in ipairs(state.seq_tracks or {}) do
+    if slot.sample_path and slot.id ~= nil then
+      local role = infer_seq_track_role(slot)
+      if type(role_lookup[role]) == "table" then
+        pattern.notes[tostring(slot.id)] = nil
+      end
+    end
+  end
+end
+
 function generate_seq_pattern(region, style_key, opts)
   if not region then
     return 0
@@ -37326,7 +37339,7 @@ function generate_seq_pattern(region, style_key, opts)
   local add_prob = (dens_pct / 100.0) * 0.4
 
   local locked_notes = seq_collect_locked_notes(pattern, grid_qn)
-  pattern.notes = {}
+  seq_clear_generated_role_tracks(pattern, template)
   state.selected_seq_note = nil
   local hit_count = seq_restore_locked_notes(region, locked_notes)
 
@@ -38547,7 +38560,7 @@ function seq_write_role_positions(region, style_key, role_map)
   local max_steps = math.max(1, math.floor((region_len_qn / grid_qn) + 0.5))
 
   local locked_notes = seq_collect_locked_notes(pattern, grid_qn)
-  pattern.notes = {}
+  seq_clear_generated_role_tracks(pattern, role_map)
   state.selected_seq_note = nil
   local hit_count = seq_restore_locked_notes(region, locked_notes)
 
