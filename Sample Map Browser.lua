@@ -9123,7 +9123,13 @@ end
 
 -- Child border flag: ReaImGui 0.9.2+ names it ChildFlags_Borders, older
 -- builds ChildFlags_Border. Both are functions and must be called.
+-- The old code passed the function itself, which on current ReaImGui meant
+-- no borders; SM_CHILD_BORDERS stays false so the look doesn't change.
+SM_CHILD_BORDERS = false
 function sm_child_border_flag()
+  if not SM_CHILD_BORDERS then
+    return 0
+  end
   local getter = r.ImGui_ChildFlags_Borders or r.ImGui_ChildFlags_Border
   if type(getter) == "function" then
     local ok, v = pcall(getter)
