@@ -660,6 +660,65 @@ end
 
 -- --- Helper functions ---------------------------------------------------------
 local function log(msg)
+  -- Bounded in-memory ring buffer (last 200 lines); read via sm_error_log_lines().
+  local buf = state.error_log
+  if type(buf) ~= "table" or type(buf.lines) ~= "table" then
+    buf = { lines = {}, next = 1, count = 0, max = 200 }
+    state.error_log = buf
+  end
+  buf.lines[buf.next] = tostring(msg)
+  buf.next = (buf.next % buf.max) + 1
+  if buf.count < buf.max then
+    buf.count = buf.count + 1
+  end
+end
+
+function sm_error_log_lines()
+  local buf = state.error_log
+  local out = {}
+  if type(buf) ~= "table" or type(buf.lines) ~= "table" then
+    return out
+  end
+  local start = (buf.count < buf.max) and 1 or buf.next
+  for i = 0, buf.count - 1 do
+    out[#out + 1] = buf.lines[((start - 1 + i) % buf.max) + 1]
+  end
+  return out
+end
+
+function sm_error_traceback(err)
+  if debug and debug.traceback then
+    return debug.traceback(tostring(err), 2)
+  end
+  return tostring(err)
+end
+
+-- Log every error; show the first one from each site in the REAPER console.
+function sm_report_error(site, err)
+  site = tostring(site or "?")
+  log("[error] " .. site .. ": " .. tostring(err))
+  state.sm_error_sites = state.sm_error_sites or {}
+  if state.sm_error_sites[site] then
+    return
+  end
+  state.sm_error_sites[site] = true
+  if r.ShowConsoleMsg then
+    r.ShowConsoleMsg(string.format(
+      "[Sample Map] Error in %s (repeats are only logged):\n%s\n\n", site, tostring(err)
+    ))
+  end
+end
+
+-- xpcall with traceback + reporting. Returns ok, results...
+function sm_pcall(site, fn, ...)
+  if type(fn) ~= "function" then
+    return true -- optional hook not defined: nothing to run
+  end
+  local res = table.pack(xpcall(fn, sm_error_traceback, ...))
+  if not res[1] then
+    sm_report_error(site, res[2])
+  end
+  return table.unpack(res, 1, res.n)
 end
 
 local function add_scan_log(msg)
@@ -9062,8 +9121,22 @@ function imgui_window_right_x()
   return win_x + win_w - (pad_x or 8)
 end
 
--- ReaImGui auto-calls EndChild when BeginChild returns false (clipped/collapsed).
--- Only EndChild when the matching BeginChild returned true.
+-- Child border flag: ReaImGui 0.9.2+ names it ChildFlags_Borders, older
+-- builds ChildFlags_Border. Both are functions and must be called.
+function sm_child_border_flag()
+  local getter = r.ImGui_ChildFlags_Borders or r.ImGui_ChildFlags_Border
+  if type(getter) == "function" then
+    local ok, v = pcall(getter)
+    if ok and type(v) == "number" then
+      return v
+    end
+  end
+  return 0
+end
+
+-- ReaImGui convention (0.9+), used for every window/child in this script:
+-- End()/EndChild() only when the matching Begin()/BeginChild() returned true
+-- (see also end_window()).
 function imgui_end_child(opened)
   if opened then
     -- Trailing SetCursorScreenPos() without an item asserts on EndChild.
@@ -14700,9 +14773,6 @@ function render_seq_neighbor_popup()
     if r.ImGui_PopStyleVar then
       pcall(r.ImGui_PopStyleVar, ctx, 1)
     end
-    if began_ok then
-      pcall(r.ImGui_End, ctx)
-    end
     return
   end
 
@@ -15531,7 +15601,6 @@ function render_seq_minimap_popup()
     return
   end
   if not visible then
-    r.ImGui_End(ctx)
     pop_minimap_alpha()
     return
   end
@@ -15890,7 +15959,6 @@ function render_preview_history_popup()
     return
   end
   if not visible then
-    r.ImGui_End(ctx)
     pop_hist_style()
     return
   end
@@ -19395,8 +19463,8 @@ function render_seq_region_name_suggest_popup(edit_x, edit_y, edit_w)
     if chosen then
       seq_commit_region_rename(chosen)
     end
+    r.ImGui_End(ctx)
   end
-  r.ImGui_End(ctx)
   if style_cols > 0 then
     r.ImGui_PopStyleColor(ctx, style_cols)
   end
@@ -22518,8 +22586,8 @@ function seq_render_random_flyout(dl, pattern, host)
         f.force_below = true
       end
       changed, active = seq_render_random_flyout_body(fdl, f.kind, settings, body_id, x0, y0, w)
+      r.ImGui_End(ctx)
     end
-    r.ImGui_End(ctx)
     if style_vars > 0 then
       r.ImGui_PopStyleVar(ctx, style_vars)
     end
@@ -29164,7 +29232,7 @@ function render_seq_env_editor_popup()
     end
   end
 
-  r.ImGui_End(ctx)
+  end_window(visible, true)
   if style_vars > 0 then r.ImGui_PopStyleVar(ctx, style_vars) end
   if style_colors > 0 then r.ImGui_PopStyleColor(ctx, style_colors) end
   return changed and true or false
@@ -39064,14 +39132,139 @@ function seq_collect_current_role_positions(region)
   return map
 end
 
+-- Unique temp file under REAPER's resource path. os.tmpname() points at the
+-- drive root on Windows, which is usually not writable.
+function sm_temp_path(prefix, ext)
+  local base = (r.GetResourcePath and r.GetResourcePath()) or ""
+  if base == "" then
+    base = SCRIPT_DIR
+  end
+  local dir = base .. "/Data/SampleMap/tmp"
+  if state.sm_temp_dir ~= dir then
+    r.RecursiveCreateDirectory(dir, 0)
+    state.sm_temp_dir = dir
+  end
+  state.sm_temp_counter = (state.sm_temp_counter or 0) + 1
+  local t = r.time_precise()
+  return string.format(
+    "%s/%s_%d_%06d_%d_%05d%s",
+    dir, prefix or "tmp", os.time(), math.floor((t % 1) * 1000000),
+    state.sm_temp_counter, math.random(0, 99999), ext or ".tmp"
+  )
+end
+
+-- --- Background processes ----------------------------------------------------
+-- Run argv without blocking the UI thread: a small sh/batch script is launched
+-- with ExecProcess(-1/-2); it captures stdout+stderr to <base>.out and writes
+-- the exit code to <base>.rc when done. Poll with sm_bg_poll on later frames.
+function sm_bg_is_windows()
+  return ((r.GetOS and r.GetOS()) or ""):match("Win") ~= nil
+end
+
+function sm_bg_quote(arg)
+  arg = tostring(arg or "")
+  if sm_bg_is_windows() then
+    -- Batch files expand %VAR%; double each % so it stays literal.
+    local q = arg:gsub('"', ""):gsub("%%", "%%%%")
+    return '"' .. q .. '"'
+  end
+  local q = arg:gsub("'", "'\\''")
+  return "'" .. q .. "'"
+end
+
+function sm_bg_start(argv, timeout_s)
+  if not r.ExecProcess then
+    return nil, "ExecProcess is unavailable"
+  end
+  local base = sm_temp_path("bg", "")
+  local job = {
+    out_path = base .. ".out",
+    rc_path = base .. ".rc",
+    started = r.time_precise(),
+    timeout = timeout_s or 60,
+  }
+  local parts = {}
+  for i = 1, #argv do
+    parts[i] = sm_bg_quote(argv[i])
+  end
+  local cmd = table.concat(parts, " ")
+  local body, launch, wait_mode
+  if sm_bg_is_windows() then
+    local function win(path)
+      return sm_bg_quote((path:gsub("/", "\\")))
+    end
+    job.script_path = base .. ".bat"
+    body = table.concat({
+      "@echo off",
+      "chcp 65001 >nul",
+      cmd .. " > " .. win(job.out_path) .. " 2>&1",
+      "(echo %ERRORLEVEL%)> " .. win(job.rc_path .. ".tmp"),
+      "move /Y " .. win(job.rc_path .. ".tmp") .. " " .. win(job.rc_path) .. " >nul",
+      "",
+    }, "\r\n")
+    local script_win = job.script_path:gsub("/", "\\")
+    launch = 'cmd.exe /C ""' .. script_win .. '""'
+    wait_mode = -2 -- no wait, minimized console
+  else
+    job.script_path = base .. ".sh"
+    body = table.concat({
+      cmd .. " > " .. sm_bg_quote(job.out_path) .. " 2>&1",
+      "echo $? > " .. sm_bg_quote(job.rc_path .. ".tmp"),
+      "mv -f " .. sm_bg_quote(job.rc_path .. ".tmp") .. " " .. sm_bg_quote(job.rc_path),
+      "",
+    }, "\n")
+    launch = '/bin/sh "' .. job.script_path .. '"'
+    wait_mode = -1 -- no wait
+  end
+  local fh = io.open(job.script_path, "wb")
+  if not fh then
+    return nil, "could not write temp script"
+  end
+  fh:write(body)
+  fh:close()
+  if not pcall(r.ExecProcess, launch, wait_mode) then
+    os.remove(job.script_path)
+    return nil, "could not start background process"
+  end
+  return job
+end
+
+-- Returns "running" | "done", output, exit_code | "timeout".
+function sm_bg_poll(job)
+  local fh = io.open(job.rc_path, "rb")
+  if fh then
+    local rc = tonumber((fh:read("*a") or ""):match("%-?%d+")) or -1
+    fh:close()
+    local output = ""
+    local oh = io.open(job.out_path, "rb")
+    if oh then
+      output = oh:read("*a") or ""
+      oh:close()
+    end
+    os.remove(job.rc_path)
+    os.remove(job.out_path)
+    os.remove(job.script_path)
+    return "done", output, rc
+  end
+  if r.time_precise() - job.started > job.timeout then
+    os.remove(job.script_path)
+    return "timeout"
+  end
+  return "running"
+end
+
 function seq_drum_ai_sidecar_path()
   return SCRIPT_DIR .. "/SampleMapDrumAI.py"
 end
 
 function seq_drum_ai_available()
-  local fh = io.open(seq_drum_ai_sidecar_path(), "r")
-  if fh then fh:close() return true end
-  return false
+  -- Cached: queried every frame by the Pattern Presets window.
+  if state.seq_drum_ai_present == nil then
+    local fh = io.open(seq_drum_ai_sidecar_path(), "r")
+    state.seq_drum_ai_present = fh ~= nil
+    if fh then fh:close() end
+  end
+  return state.seq_drum_ai_present
 end
 
 -- Call the local Python model. Returns role_map (table) on success, or nil + err.
@@ -39099,8 +39292,7 @@ function seq_call_drum_ai(style_key, role_positions, variation, seed, steps_per_
   local ok_enc, json_payload = pcall(json_encode, payload)
   if not ok_enc then return nil, "failed to encode AI request" end
 
-  local tmp = os.tmpname()
-  if not tmp or tmp == "" then return nil, "could not create temp file" end
+  local tmp = sm_temp_path("ai_req", ".json")
   local wf = io.open(tmp, "w")
   if not wf then return nil, "could not write temp file" end
   wf:write(json_payload)
@@ -39154,6 +39346,25 @@ function run_seq_ai_variation(region, style_key, variation)
   local style = state.seq_gen_style
   variation = math.max(0.0, math.min(1.0, variation or 0.5))
 
+  -- Run the (blocking) model subprocess before opening the undo block, so a
+  -- slow or failing Python call never runs inside an open undo session.
+  -- Roles the template would add are requested too (with no hits) so tracks
+  -- created below still get generated parts.
+  local seed = seq_new_seed()
+  local role_map, err = nil, "no region"
+  if region then
+    local pre_grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
+    local pre_steps_per_bar = math.max(1, math.floor((4.0 / pre_grid_qn) + 0.5))
+    local pre_bar_count = math.max(1, math.floor((get_seq_region_length_qn(region) / 4.0) + 0.5))
+    local pre_positions = seq_collect_current_role_positions(region)
+    for _, role in ipairs(seq_template_roles(style)) do
+      if pre_positions[role] == nil then
+        pre_positions[role] = {}
+      end
+    end
+    role_map, err = seq_call_drum_ai(style, pre_positions, variation, seed, pre_steps_per_bar, pre_bar_count)
+  end
+
   local label = begin_seq_undo("AI pattern variation")
   local created = ensure_seq_tracks_for_roles(seq_template_roles(style))
   if created > 0 then
@@ -39169,15 +39380,7 @@ function run_seq_ai_variation(region, style_key, variation)
     return false
   end
 
-  local grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
-  local steps_per_bar = math.max(1, math.floor((4.0 / grid_qn) + 0.5))
-  local bar_count = math.max(1, math.floor((get_seq_region_length_qn(region) / 4.0) + 0.5))
-
-  local role_positions = seq_collect_current_role_positions(region)
-  local seed = seq_new_seed()
-
   seq_pattern_confirm_capture(region)
-  local role_map, err = seq_call_drum_ai(style, role_positions, variation, seed, steps_per_bar, bar_count)
   if not role_map then
     -- Graceful fallback: use the built-in randomizer so the click still does
     -- something musical even when the model can't be reached.
@@ -39216,22 +39419,47 @@ function seq_gmd_available()
   return state.seq_gmd_script_present
 end
 
--- Call the Groove MIDI sidecar. Returns decoded table on success, or nil + err.
+-- Write a Groove MIDI request to a temp JSON file. Returns path or nil + err.
+function seq_gmd_write_request(payload)
+  local ok_enc, json_payload = pcall(json_encode, payload or {})
+  if not ok_enc then return nil, "failed to encode Groove MIDI request" end
+  local tmp = sm_temp_path("gmd_req", ".json")
+  local wf = io.open(tmp, "w")
+  if not wf then return nil, "could not write temp file" end
+  wf:write(json_payload)
+  wf:close()
+  return tmp
+end
+
+-- Decode sidecar stdout. Returns decoded table or nil + err.
+function seq_gmd_parse_output(output)
+  if not output or output:match("^%s*$") then
+    return nil, "Groove MIDI returned no output (is python3 / network available?)"
+  end
+  local json_str = output:match("(%b{})")
+  if not json_str then
+    return nil, "Groove MIDI output not understood"
+  end
+  local ok_dec, decoded = pcall(json_decode, json_str)
+  if not ok_dec or type(decoded) ~= "table" then
+    return nil, "Groove MIDI output invalid"
+  end
+  if decoded.error then
+    return nil, tostring(decoded.error)
+  end
+  return decoded
+end
+
+-- Call the Groove MIDI sidecar synchronously (only for quick local actions
+-- such as "get"). Returns decoded table on success, or nil + err.
 function seq_call_gmd(payload)
   local sidecar = seq_gmd_sidecar_path()
   local fh = io.open(sidecar, "r")
   if not fh then return nil, "Groove MIDI script not found (SampleMapGrooveMIDI.py)" end
   fh:close()
 
-  local ok_enc, json_payload = pcall(json_encode, payload or {})
-  if not ok_enc then return nil, "failed to encode Groove MIDI request" end
-
-  local tmp = os.tmpname()
-  if not tmp or tmp == "" then return nil, "could not create temp file" end
-  local wf = io.open(tmp, "w")
-  if not wf then return nil, "could not write temp file" end
-  wf:write(json_payload)
-  wf:close()
+  local tmp, werr = seq_gmd_write_request(payload)
+  if not tmp then return nil, werr end
 
   local cmd = table.concat({
     shell_escape(PYTHON_BIN),
@@ -39247,24 +39475,114 @@ function seq_call_gmd(payload)
   end
   os.remove(tmp)
 
-  if not output or output:match("^%s*$") then
-    return nil, "Groove MIDI returned no output (is python3 / network available?)"
-  end
-
-  local json_str = output:match("(%b{})")
-  if not json_str then
-    return nil, "Groove MIDI output not understood"
-  end
-  local ok_dec, decoded = pcall(json_decode, json_str)
-  if not ok_dec or type(decoded) ~= "table" then
-    return nil, "Groove MIDI output invalid"
-  end
-  if decoded.error then
-    return nil, tostring(decoded.error)
-  end
-  return decoded
+  return seq_gmd_parse_output(output)
 end
 
+-- --- Background Groove MIDI jobs ("status", "ensure", "list") ----------------
+-- These can take long (dataset download) and must not block the UI. One job
+-- per kind runs in the background; seq_gmd_bg_tick (called from the main loop)
+-- applies the result. Failures back off for SEQ_GMD_RETRY_S unless the user
+-- clicks again.
+SEQ_GMD_RETRY_S = 60.0
+
+function seq_gmd_job_running(kind)
+  return state.seq_gmd_jobs ~= nil and state.seq_gmd_jobs[kind] ~= nil
+end
+
+function seq_gmd_start_job(kind, payload, timeout_s)
+  state.seq_gmd_jobs = state.seq_gmd_jobs or {}
+  if state.seq_gmd_jobs[kind] then
+    return state.seq_gmd_jobs[kind]
+  end
+  if not seq_gmd_available() then
+    return nil, "Groove MIDI script not found (SampleMapGrooveMIDI.py)"
+  end
+  local req, werr = seq_gmd_write_request(payload)
+  if not req then
+    return nil, werr
+  end
+  local job, err = sm_bg_start({ PYTHON_BIN, seq_gmd_sidecar_path(), req }, timeout_s)
+  if not job then
+    os.remove(req)
+    return nil, err
+  end
+  job.req_path = req
+  state.seq_gmd_jobs[kind] = job
+  return job
+end
+
+function seq_gmd_on_job_done(kind, job, result, err)
+  local now = r.time_precise()
+  if kind == "status" then
+    if result and result.ready then
+      state.seq_gmd_ready = true
+      state.seq_gmd_status_msg = string.format("Ready — %d grooves", tonumber(result.count) or 0)
+    else
+      state.seq_gmd_ready = false
+      state.seq_gmd_status_msg = "Not downloaded yet"
+    end
+  elseif kind == "ensure" then
+    if not result then
+      state.seq_gmd_ready = false
+      state.seq_gmd_status_msg = tostring(err)
+      state.seq_gmd_ensure_failed_at = now
+      log("Groove MIDI ensure failed: " .. tostring(err))
+      return
+    end
+    state.seq_gmd_ensure_failed_at = nil
+    state.seq_gmd_ready = result.ready == true
+    state.seq_gmd_status_msg = string.format(
+      "Ready — %d grooves",
+      tonumber(result.count) or 0
+    )
+    state.seq_gmd_list_key = nil
+    log("Groove MIDI Dataset ready (" .. tostring(result.count or 0) .. " files)")
+  elseif kind == "list" then
+    if not result then
+      state.seq_gmd_status_msg = tostring(err)
+      state.seq_gmd_list_failed_at = now
+      state.seq_gmd_list_failed_key = job.list_key
+      return
+    end
+    state.seq_gmd_list_failed_at = nil
+    state.seq_gmd_items = result.items or {}
+    state.seq_gmd_total = tonumber(result.total) or #state.seq_gmd_items
+    state.seq_gmd_list_key = job.list_key
+    local groups = seq_gmd_rebuild_groups()
+    state.seq_gmd_status_msg = string.format(
+      "%d preset%s · %d groove%s",
+      #groups,
+      #groups == 1 and "" or "s",
+      state.seq_gmd_total,
+      state.seq_gmd_total == 1 and "" or "s"
+    )
+  end
+end
+
+function seq_gmd_bg_tick()
+  local jobs = state.seq_gmd_jobs
+  if not jobs or next(jobs) == nil then
+    return
+  end
+  for kind, job in pairs(jobs) do
+    local status, output = sm_bg_poll(job)
+    if status ~= "running" then
+      jobs[kind] = nil
+      os.remove(job.req_path)
+      local result, err
+      if status == "timeout" then
+        err = "Groove MIDI request timed out"
+      else
+        result, err = seq_gmd_parse_output(output)
+      end
+      seq_gmd_on_job_done(kind, job, result, err)
+    end
+  end
+end
+
+-- Returns true when the dataset is ready. Otherwise starts the download in the
+-- background (unless one is running or a recent failure is backing off;
+-- force = user click bypasses the back-off) and returns false.
 function seq_gmd_ensure(force)
   if state.seq_gmd_ready and not force then
     return true
@@ -39274,22 +39592,23 @@ function seq_gmd_ensure(force)
     state.seq_gmd_status_msg = "SampleMapGrooveMIDI.py missing"
     return false
   end
-  state.seq_gmd_status_msg = "Downloading Groove MIDI Dataset..."
-  local result, err = seq_call_gmd({ action = "ensure" })
-  if not result then
+  if seq_gmd_job_running("ensure") then
+    return false
+  end
+  if not force and state.seq_gmd_ensure_failed_at
+      and (r.time_precise() - state.seq_gmd_ensure_failed_at) < SEQ_GMD_RETRY_S then
+    return false
+  end
+  local job, err = seq_gmd_start_job("ensure", { action = "ensure" }, 300)
+  if not job then
     state.seq_gmd_ready = false
     state.seq_gmd_status_msg = tostring(err)
+    state.seq_gmd_ensure_failed_at = r.time_precise()
     log("Groove MIDI ensure failed: " .. tostring(err))
     return false
   end
-  state.seq_gmd_ready = result.ready == true
-  state.seq_gmd_status_msg = string.format(
-    "Ready — %d grooves",
-    tonumber(result.count) or 0
-  )
-  state.seq_gmd_list_key = nil
-  log("Groove MIDI Dataset ready (" .. tostring(result.count or 0) .. " files)")
-  return state.seq_gmd_ready
+  state.seq_gmd_status_msg = "Downloading Groove MIDI Dataset…"
+  return false
 end
 
 function seq_gmd_list_cache_key()
@@ -39472,29 +39791,32 @@ function seq_gmd_refresh_list(force)
     return true
   end
 
-  local result, err = seq_call_gmd({
+  -- Listing runs in the background (seq_gmd_bg_tick applies the result);
+  -- after a failure, retry only on force or after SEQ_GMD_RETRY_S.
+  if seq_gmd_job_running("list") then
+    return false
+  end
+  if not force and state.seq_gmd_list_failed_at
+      and state.seq_gmd_list_failed_key == key
+      and (r.time_precise() - state.seq_gmd_list_failed_at) < SEQ_GMD_RETRY_S then
+    return false
+  end
+  local job, err = seq_gmd_start_job("list", {
     action = "list",
     style = "all",
     beat_type = state.seq_gmd_beat_type or "beat",
     limit = 0, -- 0 = return every matching groove
     offset = 0,
-  })
-  if not result then
+  }, 60)
+  if not job then
     state.seq_gmd_status_msg = tostring(err)
+    state.seq_gmd_list_failed_at = r.time_precise()
+    state.seq_gmd_list_failed_key = key
     return false
   end
-  state.seq_gmd_items = result.items or {}
-  state.seq_gmd_total = tonumber(result.total) or #state.seq_gmd_items
-  state.seq_gmd_list_key = key
-  local groups = seq_gmd_rebuild_groups()
-  state.seq_gmd_status_msg = string.format(
-    "%d preset%s · %d groove%s",
-    #groups,
-    #groups == 1 and "" or "s",
-    state.seq_gmd_total,
-    state.seq_gmd_total == 1 and "" or "s"
-  )
-  return true
+  job.list_key = key
+  state.seq_gmd_status_msg = "Loading grooves…"
+  return false
 end
 
 function seq_gmd_cycle_beat_type()
@@ -39661,15 +39983,17 @@ function seq_gmd_probe_ready()
     state.seq_gmd_status_msg = "SampleMapGrooveMIDI.py not found"
     return false
   end
-  local st = seq_call_gmd({ action = "status" })
-  if st and st.ready then
-    state.seq_gmd_ready = true
-    state.seq_gmd_status_msg = string.format("Ready — %d grooves", tonumber(st.count) or 0)
-  else
-    state.seq_gmd_ready = false
-    state.seq_gmd_status_msg = "Not downloaded yet"
+  -- Probe in the background; seq_gmd_bg_tick sets seq_gmd_ready when done.
+  if not seq_gmd_job_running("status") then
+    local job = seq_gmd_start_job("status", { action = "status" }, 30)
+    if job then
+      state.seq_gmd_status_msg = "Checking Groove MIDI…"
+    else
+      state.seq_gmd_ready = false
+      state.seq_gmd_status_msg = "Not downloaded yet"
+    end
   end
-  return state.seq_gmd_ready
+  return false
 end
 
 function seq_pattern_query_matches(query, haystack)
@@ -39788,6 +40112,12 @@ function render_seq_gmd_toolbar()
 
   seq_gmd_probe_ready()
   if not state.seq_gmd_ready then
+    if seq_gmd_job_running("ensure") or seq_gmd_job_running("status") then
+      -- Background download / probe in progress: show its status, no button.
+      local dots = string.rep(".", 1 + math.floor(r.time_precise() * 2) % 3)
+      r.ImGui_TextColored(ctx, UI_THEME.text_dim, tostring(state.seq_gmd_status_msg or "Working"):gsub("[.…]+$", "") .. dots)
+      return
+    end
     if draw_ui_button("seq_gmd_download", "Download Groove MIDI (~3 MB)", nil, nil, { style = "success", compact = true }) then
       seq_gmd_ensure(true)
     end
@@ -40335,7 +40665,7 @@ function render_seq_pattern_popup(region)
     render_seq_pattern_variations_popup(region)
   end
 
-  r.ImGui_End(ctx)
+  end_window(visible, true)
 end
 
 function render_seq_pattern_variation_row(region, style_key, entry)
@@ -46406,7 +46736,7 @@ function seq_stem_import_render_dialog()
       seq_stem_import_commit_dialog()
     end
   end
-  r.ImGui_End(ctx)
+  end_window(visible, true)
   if open == false then
     seq_stem_import_close_dialog()
   end
@@ -46500,12 +46830,51 @@ function seq_stem_import_begin(path, opts)
   return true
 end
 
+-- SampleMapStemImport.lua is loaded once at startup. Developer hot-reload is
+-- opt-in: set ExtState SampleMapBrowser/stem_hot_reload=1 (or the global
+-- SAMPLE_MAP_STEM_HOT_RELOAD = true); the file is then re-read at most once a
+-- second and re-run only when its contents changed.
+function seq_stem_import_hot_reload_if_changed()
+  local now = r.time_precise()
+  if now - (state.seq_stem_hot_reload_checked or 0) < 1.0 then
+    return
+  end
+  state.seq_stem_hot_reload_checked = now
+  if not (SAMPLE_MAP_STEM_HOT_RELOAD or r.GetExtState("SampleMapBrowser", "stem_hot_reload") == "1") then
+    return
+  end
+  local path = SCRIPT_DIR .. "/SampleMapStemImport.lua"
+  local fh = io.open(path, "rb")
+  if not fh then
+    return
+  end
+  local src = fh:read("*a")
+  fh:close()
+  if not src or src == state.seq_stem_hot_reload_src then
+    return
+  end
+  local first = state.seq_stem_hot_reload_src == nil
+  state.seq_stem_hot_reload_src = src
+  if first then
+    return -- baseline: the startup dofile already ran this version
+  end
+  local ok, err = pcall(dofile, path)
+  if not ok then
+    log("Stem import hot-reload failed: " .. tostring(err))
+    return
+  end
+  state.seq_stem_hooks_installed = false
+end
+
 function seq_stem_import_tick()
-  -- Reload stem-import + tempo-map from disk each tick so extract picks up
-  -- file edits without depending on a stale live instance.
-  pcall(dofile, SCRIPT_DIR .. "/SampleMapStemImport.lua")
-  if SampleMapStemImport and SampleMapStemImport.install_browser_hooks then
-    SampleMapStemImport.install_browser_hooks()
+  seq_stem_import_hot_reload_if_changed()
+  -- Hooks reference browser functions defined after the startup dofile, so
+  -- install them lazily on the first tick (and again after a hot-reload).
+  if not state.seq_stem_hooks_installed then
+    state.seq_stem_hooks_installed = true
+    if SampleMapStemImport and SampleMapStemImport.install_browser_hooks then
+      SampleMapStemImport.install_browser_hooks()
+    end
   end
   local job = state.seq_stem_import
   if not job then
@@ -46756,7 +47125,7 @@ function render_sequencer_map()
   local map_body_h = rows_h + add_track_row_h
 
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then child_flags = r.ImGui_ChildFlags_Border end
+  child_flags = sm_child_border_flag()
   local no_scroll_flags = r.ImGui_WindowFlags_NoScrollbar() | r.ImGui_WindowFlags_NoScrollWithMouse()
   if not r.ImGui_BeginChild(ctx, "sequencer_map_area", 0, math.max(0, avail_y), child_flags, no_scroll_flags) then
     state.seq_link_hover_region_id = nil
@@ -47546,7 +47915,7 @@ function render_sequencer_map()
   end
 
   if not r.ImGui_BeginChild(ctx, "sequencer_map_tracks", 0, math.max(0, tracks_avail_y), child_flags) then
-    r.ImGui_EndChild(ctx)
+    -- Tracks child did not open (no EndChild for it); close sequencer_map_area.
     r.ImGui_Dummy(ctx, 0, 0)
     r.ImGui_EndChild(ctx)
     return
@@ -49591,9 +49960,15 @@ function explorer_pump_disk_refresh()
   if not queue or #queue == 0 then
     return
   end
-  local path = table.remove(queue, 1)
-  state.explorer_disk_queued[path] = nil
-  explorer_list_dir_from_disk(path)
+  -- List directories until the per-frame budget (checked before each one) runs out.
+  local started = r.time_precise()
+  local listed = 0
+  while #queue > 0 and (listed == 0 or (r.time_precise() - started) < 0.004) do
+    local path = table.remove(queue, 1)
+    state.explorer_disk_queued[path] = nil
+    explorer_list_dir_from_disk(path)
+    listed = listed + 1
+  end
   explorer_invalidate_rows()
 end
 
@@ -49601,58 +49976,11 @@ function explorer_shell_quote(path)
   return "'" .. tostring(path or ""):gsub("'", "'\\''") .. "'"
 end
 
-function explorer_list_dir_via_shell(path, dirs, files)
-  local function read_popen(cmd, on_line)
-    local ok, handle = pcall(io.popen, cmd)
-    if not ok or not handle then
-      return false
-    end
-    for line in handle:lines() do
-      on_line(line)
-    end
-    handle:close()
-    return true
-  end
-
-  local osname = (r.GetOS and r.GetOS()) or ""
-  if osname:match("Win") then
-    local win = path:gsub("/", "\\"):gsub('"', "")
-    local quoted = '"' .. win .. '"'
-    local ok_dirs = read_popen("cmd /c dir /b /ad " .. quoted .. " 2>nul", function(line)
-      if line ~= "" and not line:match("^%.") and #dirs < EXPLORER_MAX_LIST then
-        dirs[#dirs + 1] = line
-      end
-    end)
-    local ok_files = read_popen("cmd /c dir /b /a-d " .. quoted .. " 2>nul", function(line)
-      if line ~= "" and explorer_is_audio_name(line) and #files < EXPLORER_MAX_LIST then
-        files[#files + 1] = line
-      end
-    end)
-    return ok_dirs or ok_files
-  end
-
-  return read_popen("/bin/ls -1p " .. explorer_shell_quote(path) .. " 2>/dev/null", function(name)
-    if name == "" then
-      return
-    end
-    local is_dir = name:sub(-1) == "/"
-    if is_dir then
-      name = name:sub(1, -2)
-    end
-    if name == "" or name:match("^%.") then
-      return
-    end
-    if is_dir then
-      if #dirs < EXPLORER_MAX_LIST then
-        dirs[#dirs + 1] = name
-      end
-    elseif explorer_is_audio_name(name) and #files < EXPLORER_MAX_LIST then
-      files[#files + 1] = name
-    end
-  end)
-end
-
+-- REAPER's directory enumeration (no shell process per directory).
 function explorer_list_dir_via_enumerate(path, dirs, files)
+  -- Index -1 clears REAPER's cached listing so a refresh sees disk changes.
+  pcall(r.EnumerateSubdirectories, path, -1)
+  pcall(r.EnumerateFiles, path, -1)
   local i = 0
   local subdir = r.EnumerateSubdirectories(path, i)
   while subdir do
@@ -49697,11 +50025,7 @@ function explorer_list_dir_from_disk(path)
   end
 
   local dirs, files = {}, {}
-  local ok = explorer_list_dir_via_shell(path, dirs, files)
-  if not ok then
-    dirs, files = {}, {}
-    ok = explorer_list_dir_via_enumerate(path, dirs, files)
-  end
+  local ok = explorer_list_dir_via_enumerate(path, dirs, files)
   if not ok then
     return nil, nil
   end
@@ -50697,9 +51021,7 @@ end
 
 function explorer_render_tree()
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then
-    child_flags = r.ImGui_ChildFlags_Border
-  end
+  child_flags = sm_child_border_flag()
   local _, after_toolbar = r.ImGui_GetContentRegionAvail(ctx)
   local tree_h = math.max(80, after_toolbar - 6)
 
@@ -50712,8 +51034,8 @@ function explorer_render_tree()
       explorer_render_clipped_rows(rows)
     end
     r.ImGui_PopStyleVar(ctx)
+    r.ImGui_EndChild(ctx)
   end
-  r.ImGui_EndChild(ctx)
 end
 
 function render_explorer_content()
@@ -50810,9 +51132,7 @@ function render_explorer_docked_panel(height)
     return
   end
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then
-    child_flags = r.ImGui_ChildFlags_Border
-  end
+  child_flags = sm_child_border_flag()
   local w = explorer_dock_width()
   if r.ImGui_BeginChild(ctx, "explorer_dock", w, math.max(0, height or 0), child_flags) then
     r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 6, 4)
@@ -50830,8 +51150,8 @@ function render_explorer_docked_panel(height)
     end
     r.ImGui_PopStyleVar(ctx)
     render_explorer_content()
+    r.ImGui_EndChild(ctx)
   end
-  r.ImGui_EndChild(ctx)
 end
 
 function render_view_tab_switcher()
@@ -52212,9 +52532,7 @@ function render_filter_input()
   local input_width = math.max(min_input_width, filter_width - icon_pad - trailing_width(used_width) - right_pad)
 
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then
-    child_flags = r.ImGui_ChildFlags_Border
-  end
+  child_flags = sm_child_border_flag()
   local child_window_flags = r.ImGui_WindowFlags_NoScrollbar() | r.ImGui_WindowFlags_NoScrollWithMouse()
 
   r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_WindowPadding(), 0, 0)
@@ -52808,7 +53126,7 @@ function settings_render_scan_folders()
     end
 
     local child_flags = 0
-    if r.ImGui_ChildFlags_Border then child_flags = r.ImGui_ChildFlags_Border end
+    child_flags = sm_child_border_flag()
 
     -- Size the list to its contents (capped) so there is no large empty area.
     local row_h = r.ImGui_GetTextLineHeightWithSpacing(ctx)
@@ -53448,7 +53766,7 @@ function render_settings()
     r.ImGui_PopStyleVar(ctx, 2)
   end
 
-  r.ImGui_End(ctx)
+  end_window(visible, true)
 
   -- Update settings_open state based on window open state
   if not open then
@@ -54567,9 +54885,7 @@ function render_scan_complete_dialog()
       r.ImGui_Separator(ctx)
       r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Files that failed scanning")
       local child_flags = 0
-      if r.ImGui_ChildFlags_Border then
-        child_flags = r.ImGui_ChildFlags_Border
-      end
+      child_flags = sm_child_border_flag()
       if r.ImGui_BeginChild(ctx, "scan_done_debug", 0, 260, child_flags) then
         local rows = dlg.samples or {}
         if #rows > 0 then
@@ -54603,8 +54919,8 @@ function render_scan_complete_dialog()
             end
           end
         end
+        r.ImGui_EndChild(ctx)
       end
-      r.ImGui_EndChild(ctx)
       if r.ImGui_BeginPopup and r.ImGui_BeginPopup(ctx, "##scan_done_sample_menu") then
         draw_scan_complete_sample_menu_items(dlg.menu_path, dlg.menu_name, dlg.menu_why)
         r.ImGui_EndPopup(ctx)
@@ -54688,7 +55004,7 @@ function render_scan_complete_dialog()
       state.scan_complete_dialog = nil
     end
   end
-  r.ImGui_End(ctx)
+  end_window(visible, true)
   if open == false then
     state.scan_complete_dialog = nil
   end
@@ -54886,6 +55202,14 @@ function draw_map_scan_progress_overlay(dl, x0, y0, width, height)
   local btn_y = overlay_y + overlay_height - btn_h - 8.0
   local mx, my = r.ImGui_GetMousePos(ctx)
   local over_btn = mx >= btn_x and mx <= (btn_x + btn_w) and my >= btn_y and my <= (btn_y + btn_h)
+  -- Ignore the rect while another window/popup covers the map.
+  if over_btn and r.ImGui_IsWindowHovered then
+    local hover_flags = 0
+    if r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem then
+      hover_flags = r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem()
+    end
+    over_btn = r.ImGui_IsWindowHovered(ctx, hover_flags) and true or false
+  end
   -- The map InvisibleButton sits under this overlay and steals ImGui item clicks.
   -- Hit-test the Stop rect directly so the button always works.
   if over_btn and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0) then
@@ -54929,7 +55253,8 @@ function render_map()
   local hovered = r.ImGui_IsItemHovered(ctx)
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local mx, my = r.ImGui_GetMousePos(ctx)
-  local overlay_h = (state.scan_running and 118) or 0
+  -- Previous frame's drawn overlay height (0 when the overlay is hidden).
+  local overlay_h = (state.scan_running and (state.map_scan_overlay_h or 118)) or 0
   local over_scan_overlay = overlay_h > 0 and my >= y0 and my <= (y0 + overlay_h)
 
   handle_map_view_input(hovered and not over_scan_overlay, mx, my, width, height, x0, y0)
@@ -54968,7 +55293,7 @@ function render_map()
     update_pending_drop_tracking()
   end
 
-  draw_map_scan_progress_overlay(dl, x0, y0, width, height)
+  state.map_scan_overlay_h = tonumber(draw_map_scan_progress_overlay(dl, x0, y0, width, height)) or 0
   draw_map_status_overlay(dl, x0, y0, width, height)
 end
 
@@ -54980,9 +55305,7 @@ function render_library_loading_view()
 
   local _, avail_y = r.ImGui_GetContentRegionAvail(ctx)
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then
-    child_flags = r.ImGui_ChildFlags_Border
-  end
+  child_flags = sm_child_border_flag()
 
   local loading_open = r.ImGui_BeginChild(ctx, "library_loading", 0, avail_y, child_flags)
   if loading_open then
@@ -55022,7 +55345,12 @@ function shutdown_script(reason)
   SampleMapInstance.shutdown_done = true
   running = false
   pcall(function()
-    r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
+    -- Only clear the key while it still holds this instance's token; a newer
+    -- instance may already have claimed it.
+    local cur = r.GetExtState(SampleMapInstance.section, SampleMapInstance.key)
+    if SampleMapInstance.token and cur == SampleMapInstance.token then
+      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
+    end
   end)
 
   pcall(stop_preview)
@@ -55052,63 +55380,129 @@ function shutdown_script(reason)
   pcall(save_config)
 end
 
+-- After a UI error left the ImGui stack unbalanced, ReaImGui may invalidate
+-- the context. Recreate it (at most 3 times per 30 s) instead of quitting.
+function sm_imgui_try_recover_context()
+  if not state.sm_imgui_recover_pending then
+    return false
+  end
+  state.sm_imgui_recover_pending = false
+  local now = r.time_precise()
+  local recent = {}
+  for _, t in ipairs(state.sm_imgui_recreate_times or {}) do
+    if now - t < 30.0 then
+      recent[#recent + 1] = t
+    end
+  end
+  state.sm_imgui_recreate_times = recent
+  if #recent >= 3 then
+    return false
+  end
+  local ok_new, new_ctx = pcall(r.ImGui_CreateContext, SCRIPT_NAME, r.ImGui_ConfigFlags_DockingEnable())
+  if not ok_new or not new_ctx then
+    return false
+  end
+  recent[#recent + 1] = now
+  ctx = new_ctx
+  font = nil
+  local ok_font, new_font = pcall(r.ImGui_CreateFont, "sans-serif", 16)
+  if ok_font and new_font then
+    font = new_font
+    pcall(r.ImGui_Attach, ctx, font)
+  end
+  pcall(ensure_seq_role_icons)
+  pcall(ensure_vfx_icons)
+  log("ImGui context recreated after an error")
+  return true
+end
+
 -- --- Main loop ---------------------------------------------------------------
+-- The whole frame runs under xpcall so one error never kills the defer loop.
 function loop()
   if SampleMapInstance.shutdown_done then
     return
   end
+  local ok, err = xpcall(sm_loop_frame, sm_error_traceback)
+  if not ok then
+    sm_report_error("main loop", err)
+    state.sm_imgui_recover_pending = true
+  end
+  if SampleMapInstance.shutdown_done then
+    return
+  end
+  if running then
+    r.defer(loop)
+  else
+    shutdown_script("stop")
+  end
+end
 
+function sm_loop_frame()
   local stop_requested = (not running)
-    or (r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) ~= "1")
+    or (r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) ~= SampleMapInstance.token)
   if ctx and r.ImGui_ValidatePtr and not r.ImGui_ValidatePtr(ctx, "ImGui_Context*") then
-    log("ImGui context invalid; stopping loop")
-    stop_requested = true
+    if not sm_imgui_try_recover_context() then
+      log("ImGui context invalid; stopping loop")
+      stop_requested = true
+    end
+  else
+    -- Context survived the last error (or there was none): nothing to recover.
+    state.sm_imgui_recover_pending = false
   end
   if stop_requested then
     shutdown_script(running and "shortcut" or "stop")
     return
   end
+
+  -- UI-side calls: an error here may leave the ImGui stack unbalanced.
+  local function ui_call(site, fn)
+    local ok = sm_pcall(site, fn)
+    if not ok then
+      state.sm_imgui_recover_pending = true
+    end
+  end
   
-  stop_preview_if_transport_started()
-  sync_project_state_if_needed()
-  ingest_seq_from_arrange()
-  pcall(seq_stem_import_poll_external_request)
-  pcall(seq_stem_import_tick)
+  sm_pcall("stop_preview_if_transport_started", stop_preview_if_transport_started)
+  sm_pcall("sync_project_state_if_needed", sync_project_state_if_needed)
+  sm_pcall("ingest_seq_from_arrange", ingest_seq_from_arrange)
+  sm_pcall("seq_stem_import_poll_external_request", seq_stem_import_poll_external_request)
+  sm_pcall("seq_stem_import_tick", seq_stem_import_tick)
   if state.seq_random_sync_run and not state.seq_random_knob_drag then
     state.seq_random_sync_run = false
-    seq_flush_pending_random_sync()
+    sm_pcall("seq_flush_pending_random_sync", seq_flush_pending_random_sync)
   end
 
   local loading = is_library_loading()
   if loading then
-    process_library_load_slice(LIBRARY_LOAD_SLICE_MS)
+    sm_pcall("process_library_load_slice", process_library_load_slice, LIBRARY_LOAD_SLICE_MS)
     loading = is_library_loading()
   end
 
   -- Start scan after a miss, but defer cache rewrite until after first interactive frame.
   if state._enqueue_scan_after_load then
     state._enqueue_scan_after_load = false
-    enqueue_scan()
+    sm_pcall("enqueue_scan", enqueue_scan)
   end
 
   if not loading then
     if SampleMapAutoCheckForUpdates then
-      SampleMapAutoCheckForUpdates()
+      sm_pcall("update check", SampleMapAutoCheckForUpdates)
     end
-    process_scan_slice()
-    process_waveform_slice(6.0)
+    sm_pcall("seq_gmd_bg_tick", seq_gmd_bg_tick)
+    sm_pcall("process_scan_slice", process_scan_slice)
+    sm_pcall("process_waveform_slice", process_waveform_slice, 6.0)
 
     -- Poll removable-drive mount state so dots gray/restore without restarting.
     local now = r.time_precise()
     if (now - (state.last_volume_check_time or 0)) >= 1.5 then
-      refresh_scan_folder_availability()
+      sm_pcall("refresh_scan_folder_availability", refresh_scan_folder_availability)
     end
-    seq_midi_poll()
+    sm_pcall("seq_midi_poll", seq_midi_poll)
   end
   
   ui_push_theme()
   local visible, open, began = false, true, false
-  local ui_ok, ui_err = pcall(function()
+  local ui_ok, ui_err = xpcall(function()
   visible, open, began = begin_window()
   if visible then
     if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
@@ -55142,14 +55536,11 @@ function loop()
       render_header()
 
       handle_script_keyboard_shortcuts()
-      stop_preview_if_transport_started()
 
       local _, avail_y = r.ImGui_GetContentRegionAvail(ctx)
 
       local child_flags = 0
-      if r.ImGui_ChildFlags_Border then
-        child_flags = r.ImGui_ChildFlags_Border
-      end
+      child_flags = sm_child_border_flag()
       local child_win_flags = 0
       if r.ImGui_WindowFlags_NoNav then
         child_win_flags = child_win_flags | r.ImGui_WindowFlags_NoNav()
@@ -55214,28 +55605,26 @@ function loop()
 
     end
   end
-  end)
+  end, sm_error_traceback)
   end_window(visible, began)
   if ui_ok and not loading then
-    pcall(render_seq_neighbor_popup)
-    local mini_ok, mini_err = pcall(render_seq_minimap_popup)
-    if not mini_ok then
-      log("Mini map: " .. tostring(mini_err))
-    end
-    pcall(render_preview_history_popup)
-    pcall(render_seq_layering_window)
-    pcall(render_sample_map_float_window)
-    pcall(render_sequencer_float_window)
-    pcall(render_settings)
-    pcall(render_scan_complete_dialog)
-    pcall(seq_stem_import_render_dialog)
-    pcall(render_explorer_window)
+    ui_call("render_seq_neighbor_popup", render_seq_neighbor_popup)
+    ui_call("render_seq_minimap_popup", render_seq_minimap_popup)
+    ui_call("render_preview_history_popup", render_preview_history_popup)
+    ui_call("render_seq_layering_window", render_seq_layering_window)
+    ui_call("render_sample_map_float_window", render_sample_map_float_window)
+    ui_call("render_sequencer_float_window", render_sequencer_float_window)
+    ui_call("render_settings", render_settings)
+    ui_call("render_scan_complete_dialog", render_scan_complete_dialog)
+    ui_call("seq_stem_import_render_dialog", seq_stem_import_render_dialog)
+    ui_call("render_explorer_window", render_explorer_window)
   elseif not ui_ok then
-    log("ImGui frame skipped during window host change: " .. tostring(ui_err))
+    sm_report_error("main window", ui_err)
+    state.sm_imgui_recover_pending = true
   end
   if ui_ok then
-    pcall(draw_sample_drag_ghost)
-    pcall(complete_pending_sample_drop)
+    ui_call("draw_sample_drag_ghost", draw_sample_drag_ghost)
+    sm_pcall("complete_pending_sample_drop", complete_pending_sample_drop)
   end
   pcall(ui_pop_theme)
 
@@ -55247,32 +55636,39 @@ function loop()
   state._text_input_item_active_now = false
 
   if (not loading) and running then
-    pcall(seq_update_arrange_item_follow)
-    pcall(seq_render_arrange_item_overlay)
-    pcall(seq_render_link_parent_overlay)
-    pcall(seq_pump_script_refocus)
+    sm_pcall("seq_update_arrange_item_follow", seq_update_arrange_item_follow)
+    sm_pcall("seq_render_arrange_item_overlay", seq_render_arrange_item_overlay)
+    sm_pcall("seq_render_link_parent_overlay", seq_render_link_parent_overlay)
+    sm_pcall("seq_pump_script_refocus", seq_pump_script_refocus)
   end
 
   -- Migrate/stamp cache after the first ready frame so load UI stays smooth.
   if (not loading) and state._save_library_after_load then
     state._save_library_after_load = false
-    save_samples()
-    state.tag_schema_dirty = false
+    if sm_pcall("save_samples", save_samples) then
+      state.tag_schema_dirty = false
+    end
   end
   
-  if (open ~= false) and running then
-    r.defer(loop)
-  else
+  if not ((open ~= false) and running) then
     shutdown_script(open == false and "window" or "stop")
   end
 end
 
 
 -- --- Main entry point --------------------------------------------------------
+-- Per-instance token stored in the "alive" ExtState. A running instance stops
+-- as soon as the stored value is no longer its own token.
+function SampleMap_NewInstanceToken()
+  local t = (r.time_precise and r.time_precise()) or os.clock()
+  return string.format("%d-%d-%06d", os.time(), math.floor((t % 1000) * 1000), math.random(0, 999999))
+end
+
 function SampleMap_BeginInstance()
   SampleMapInstance.shutdown_done = false
   running = true
-  r.SetExtState(SampleMapInstance.section, SampleMapInstance.key, "1", false)
+  SampleMapInstance.token = SampleMapInstance.token or SampleMap_NewInstanceToken()
+  r.SetExtState(SampleMapInstance.section, SampleMapInstance.key, SampleMapInstance.token, false)
   if r.atexit then
     r.atexit(function()
       shutdown_script("atexit")
@@ -55315,10 +55711,11 @@ function SampleMap_WaitThenBegin(n)
     win = r.JS_Window_Find(SCRIPT_NAME, true)
   end
   local flag = r.GetExtState(SampleMapInstance.section, SampleMapInstance.key)
-  if n < 90 and (win or flag == "1") then
-    if flag == "1" then
-      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
-    end
+  if flag ~= "" and flag ~= SampleMapInstance.token then
+    -- An even newer launch claimed the key while we waited: let it win.
+    return
+  end
+  if n < 90 and win then
     r.defer(function()
       SampleMap_WaitThenBegin(n)
     end)
@@ -55328,14 +55725,16 @@ function SampleMap_WaitThenBegin(n)
 end
 
 function main()
-  if r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) == "1" then
+  SampleMapInstance.token = SampleMap_NewInstanceToken()
+  if r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) ~= "" then
     local existing = true
     if r.JS_Window_Find then
       existing = r.JS_Window_Find(SCRIPT_NAME, true) ~= nil
     end
     if existing then
-      -- Already running: quit the live instance, then start THIS (new) copy.
-      r.DeleteExtState(SampleMapInstance.section, SampleMapInstance.key, false)
+      -- Already running: claim the key with this instance's token (the live
+      -- instance sees a foreign token and quits), then start THIS (new) copy.
+      r.SetExtState(SampleMapInstance.section, SampleMapInstance.key, SampleMapInstance.token, false)
       if r.ShowConsoleMsg then
         r.ShowConsoleMsg("[Sample Map] Reloading from disk…\n")
       end

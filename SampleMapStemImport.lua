@@ -1028,7 +1028,9 @@ function SampleMapStemImport.selected_item_audio()
 end
 
 function SampleMapStemImport.sample_map_is_running()
-  if r.GetExtState("SampleMapBrowser", "alive") ~= "1" then
+  -- The browser stores a per-instance token (formerly "1") while running.
+  local alive = r.GetExtState("SampleMapBrowser", "alive")
+  if not alive or alive == "" then
     return false
   end
   if r.JS_Window_Find then
