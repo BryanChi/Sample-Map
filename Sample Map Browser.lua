@@ -28641,6 +28641,9 @@ function render_seq_midi_assign_popup()
         state.seq_midi_popup_slot_id = nil
         state.seq_midi_key_drag = nil
         state.seq_midi_assign_dirty = nil
+        -- Disarm learn so the next incoming note can't silently reassign a track.
+        state.seq_midi_learn_slot_id = nil
+        state.seq_midi_kb_octave = nil
         return dirty
       end
     end
@@ -28653,6 +28656,8 @@ function render_seq_midi_assign_popup()
     r.ImGui_EndPopup(ctx)
     pop_style()
     state.seq_midi_popup_slot_id = nil
+    state.seq_midi_learn_slot_id = nil
+    state.seq_midi_kb_octave = nil
     return false
   end
   seq_midi_ensure_jsfx()
