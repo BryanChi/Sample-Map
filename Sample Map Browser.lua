@@ -4066,6 +4066,80 @@ local function finish_library_miss(reason)
   end
 end
 
+-- `folders` must already be normalized (see normalize_path).
+function sm_path_in_folders(path, folders)
+  local p = normalize_path(path or "")
+  for _, f in ipairs(folders or {}) do
+    if f ~= "" and (p == f or (p:sub(1, #f) == f and p:sub(#f + 1, #f + 1) == "/")) then
+      return true
+    end
+  end
+  return false
+end
+
+-- The configured folder list differs from the cached one: keep the cache, drop
+-- entries outside the current folders, and scan only folders the cache lacks.
+function sm_library_note_folder_change(job, cached_folders)
+  local cached = {}
+  for _, f in ipairs(cached_folders or {}) do
+    if type(f) == "string" then
+      cached[normalize_path(f)] = true
+    end
+  end
+  job.folder_filter = true
+  job.new_folders = {}
+  for _, f in ipairs(state.folders) do
+    local nf = normalize_path(f)
+    if nf ~= "" and not cached[nf] then
+      job.new_folders[#job.new_folders + 1] = nf
+    end
+  end
+  log(string.format("Folder list changed: keeping cache for current folders, %d new folder(s) to scan", #job.new_folders))
+end
+
+function sm_library_apply_folder_filter(job)
+  local folders = {}
+  for _, f in ipairs(state.folders) do
+    folders[#folders + 1] = normalize_path(f)
+  end
+  local kept = {}
+  local removed = 0
+  for _, sample in ipairs(state.samples) do
+    if not sample.path or sm_path_in_folders(sample.path, folders) then
+      kept[#kept + 1] = sample
+    else
+      removed = removed + 1
+    end
+  end
+  state.samples = kept
+  local function filter_list(list)
+    local out = {}
+    for _, p in ipairs(list or {}) do
+      if sm_path_in_folders(p, folders) then
+        out[#out + 1] = p
+      end
+    end
+    return out
+  end
+  state.scan_queue = filter_list(state.scan_queue)
+  state.analyzer_queue = filter_list(state.analyzer_queue)
+  for path in pairs(state.analyzer_results or {}) do
+    if not sm_path_in_folders(path, folders) then
+      state.analyzer_results[path] = nil
+    end
+  end
+  if #state.scan_queue == 0 then
+    state.scan_total = 0
+  end
+  if removed > 0 then
+    log("Removed " .. removed .. " cached sample(s) outside the current folders")
+  end
+  state._save_library_after_load = true
+  if job.new_folders and #job.new_folders > 0 then
+    state._enqueue_scan_after_load = job.new_folders
+  end
+end
+
 local function finish_library_hit(job)
   state.samples = job.cleaned
 
@@ -4112,6 +4186,10 @@ local function finish_library_hit(job)
         table.insert(state.analyzer_queue, sample.path)
       end
     end
+  end
+
+  if job.folder_filter then
+    sm_library_apply_folder_filter(job)
   end
 
   if job.needs_layout then
@@ -4307,11 +4385,10 @@ local function process_library_load_slice(max_ms)
 
       if not data then
         -- Waiting for fallback read path
-      elseif data.folders and not folders_match(state.folders, data.folders) then
-        log("Cached samples ignored: folder list changed")
-        finish_library_miss("Folder list changed; rescanning")
-        return false
       else
+        if data.folders and not folders_match(state.folders, data.folders) then
+          sm_library_note_folder_change(job, data.folders)
+        end
         local streaming = data._samples_content ~= nil and data._samples_pos ~= nil
         local count = 0
         if streaming then
@@ -4496,6 +4573,7 @@ local function save_samples()
   end
 
   state.last_save_time = r.time_precise()
+  state.scan_unsaved_results = false
   log(string.format("Saved sample cache in %.0fms (%d samples, compact v%d)", (state.last_save_time - save_start) * 1000, sample_count, payload.v or 2))
 end
 
@@ -4823,133 +4901,162 @@ function enqueue_weight_analysis()
   )
 end
 
-local function enqueue_scan(folder_only)
-  state.debug_count = 0  -- Reset debug counter for new scan
-  state.external_disabled = false
-  state.analyzer_warned = false
-  state.analyzer_path_mode = state.analyzer_path_mode or {}
-  rebuild_samples_path_index()
-
-  local already = {}
-  for _, path in ipairs(state.analyzer_queue) do
-    already[path] = true
+-- Folder enumeration for scans is time-sliced (see sm_scan_enum_step) so large
+-- libraries don't freeze the UI. process_scan_slice waits until it has finished.
+function sm_scan_enum_file(enum, dir, file)
+  local ext = file:match("%.([^%.]+)$")
+  if not ext or not AUDIO_EXTS["." .. ext:lower()] then
+    return
   end
-  for _, w in ipairs(state.analyzer_workers or {}) do
-    if w.path then
-      already[w.path] = true
+  local normalized_full_path = normalize_path(dir .. "/" .. file)
+  local existing = samples_by_path[normalized_full_path]
+  if not existing then
+    existing = samples_by_path[path_index_key(normalized_full_path)]
+  end
+  if not existing then
+    if not enum.queued[normalized_full_path] then
+      enum.queued[normalized_full_path] = true
+      enum.paths[#enum.paths + 1] = normalized_full_path
     end
+    return
   end
-
-  local paths = {}
-  local skipped_count = 0
-  local reanalyze_count = 0
-  local incomplete_count = 0
-  local folders_to_scan = state.folders
-  if folder_only and folder_only ~= "" then
-    folders_to_scan = { normalize_path(folder_only) }
+  local function queue_existing(sample, mode)
+    local path = normalize_path(sample.path)
+    if path == "" or enum.already[path] then
+      return false
+    end
+    table.insert(state.analyzer_queue, path)
+    enum.already[path] = true
+    state.analyzer_path_mode[path] = mode
+    return true
   end
-
-  for _, folder in ipairs(folders_to_scan) do
-    folder = normalize_path(folder)
-    local files_found = 0
-
-    local function queue_existing(sample, mode)
-      local path = normalize_path(sample.path)
-      if path == "" or already[path] then
-        return false
+  local size, mtime = file_identity(normalized_full_path)
+  if sample_file_changed(existing, size, mtime) then
+    stamp_sample_file_id(existing, size, mtime)
+    clear_sample_analysis_fields(existing)
+    refresh_sample_file_meta(existing, normalized_full_path)
+    if queue_existing(existing, nil) then
+      enum.reanalyze = enum.reanalyze + 1
+    else
+      enum.skipped = enum.skipped + 1
+    end
+  else
+    stamp_sample_file_id(existing, size, mtime)
+    if sample_analysis_incomplete(existing) then
+      if queue_existing(existing, nil) then
+        enum.incomplete = enum.incomplete + 1
+      else
+        enum.skipped = enum.skipped + 1
       end
-      table.insert(state.analyzer_queue, path)
-      already[path] = true
-      state.analyzer_path_mode[path] = mode
-      return true
+    elseif sample_transient_incomplete(existing) then
+      if queue_existing(existing, "transient") then
+        enum.incomplete = enum.incomplete + 1
+      else
+        enum.skipped = enum.skipped + 1
+      end
+    else
+      enum.skipped = enum.skipped + 1
     end
+  end
+end
 
-    local function scan_dir(dir)
-      dir = normalize_path(dir)
+function sm_scan_enum_error(enum, where, err)
+  enum.errors = (enum.errors or 0) + 1
+  if enum.errors <= 20 then
+    add_scan_log(string.format("Scan error (%s): %s", tostring(where), tostring(err)))
+  end
+end
 
-      local i = 0
-      local file = r.EnumerateFiles(dir, i)
-      while file do
-        local ext = file:match("%.(.+)$")
-        if ext then
-          ext = "." .. ext:lower()
-          if AUDIO_EXTS[ext] then
-            local full_path = dir .. "/" .. file
-            local normalized_full_path = normalize_path(full_path)
-            local existing = samples_by_path[normalized_full_path] or samples_by_path[full_path]
-            if not existing then
-              existing = samples_by_path[path_index_key(normalized_full_path)]
-            end
-            if not existing then
-              table.insert(paths, normalized_full_path)
-              files_found = files_found + 1
-            else
-              local size, mtime = file_identity(normalized_full_path)
-              if sample_file_changed(existing, size, mtime) then
-                stamp_sample_file_id(existing, size, mtime)
-                clear_sample_analysis_fields(existing)
-                refresh_sample_file_meta(existing, normalized_full_path)
-                if queue_existing(existing, nil) then
-                  reanalyze_count = reanalyze_count + 1
-                else
-                  skipped_count = skipped_count + 1
-                end
-              else
-                stamp_sample_file_id(existing, size, mtime)
-                if sample_analysis_incomplete(existing) then
-                  if queue_existing(existing, nil) then
-                    incomplete_count = incomplete_count + 1
-                  else
-                    skipped_count = skipped_count + 1
-                  end
-                elseif sample_transient_incomplete(existing) then
-                  if queue_existing(existing, "transient") then
-                    incomplete_count = incomplete_count + 1
-                  else
-                    skipped_count = skipped_count + 1
-                  end
-                else
-                  skipped_count = skipped_count + 1
-                end
-              end
-            end
-          end
+-- Process queued directories until the time budget runs out.
+-- Returns true when enumeration has finished (or none is running).
+function sm_scan_enum_step(max_ms)
+  local enum = state.scan_enum
+  if not enum then
+    return true
+  end
+  local deadline = r.time_precise() + (max_ms or 12.0) / 1000.0
+  repeat
+    if not enum.cur_dir then
+      local dir = table.remove(enum.stack)
+      if not dir then
+        sm_scan_enum_finish()
+        return true
+      end
+      enum.dirs_done = (enum.dirs_done or 0) + 1
+      -- Index -1 makes REAPER drop its cached listing so new files show up.
+      local ok, err = pcall(function()
+        r.EnumerateFiles(dir, -1)
+        r.EnumerateSubdirectories(dir, -1)
+        local subs = {}
+        local i = 0
+        local sub = r.EnumerateSubdirectories(dir, i)
+        while sub do
+          subs[#subs + 1] = dir .. "/" .. sub
+          i = i + 1
+          sub = r.EnumerateSubdirectories(dir, i)
         end
-        i = i + 1
-        file = r.EnumerateFiles(dir, i)
+        for k = #subs, 1, -1 do
+          enum.stack[#enum.stack + 1] = subs[k]
+        end
+      end)
+      if not ok then
+        sm_scan_enum_error(enum, dir, err)
       end
-
-      i = 0
-      local subdir = r.EnumerateSubdirectories(dir, i)
-      while subdir do
-        scan_dir(dir .. "/" .. subdir)
-        i = i + 1
-        subdir = r.EnumerateSubdirectories(dir, i)
+      enum.cur_dir = dir
+      enum.file_idx = 0
+    else
+      local dir = enum.cur_dir
+      local ok_enum, file = pcall(r.EnumerateFiles, dir, enum.file_idx)
+      if not ok_enum then
+        sm_scan_enum_error(enum, dir, file)
+        file = nil
+      end
+      if not file then
+        enum.cur_dir = nil
+      else
+        enum.file_idx = enum.file_idx + 1
+        local ok, err = pcall(sm_scan_enum_file, enum, dir, file)
+        if not ok then
+          sm_scan_enum_error(enum, dir .. "/" .. tostring(file), err)
+        end
       end
     end
+  until r.time_precise() >= deadline
+  return false
+end
 
-    local success, err = pcall(scan_dir, folder)
-    if not success then
-      -- Error scanning folder - silent during scan, errors visible in scan logs
-    end
+function sm_scan_enum_finish()
+  local enum = state.scan_enum
+  if not enum then
+    return
   end
-
-  if #state.samples == 0 then
-    state.samples = {}
+  state.scan_enum = nil
+  local paths = enum.paths
+  local base_total = 0
+  if #state.scan_queue > 0 then
+    base_total = math.max(tonumber(state.scan_total) or 0, #state.scan_queue)
   end
-
-  state.scan_queue = paths
-  state.scan_total = #paths + skipped_count + reanalyze_count + incomplete_count
-  state.scan_started = r.time_precise()
+  for i = 1, #paths do
+    state.scan_queue[#state.scan_queue + 1] = paths[i]
+  end
+  local skipped_count, reanalyze_count, incomplete_count = enum.skipped, enum.reanalyze, enum.incomplete
+  state.scan_total = base_total + #paths + skipped_count + reanalyze_count + incomplete_count
+  if not (state.scan_started and state.scan_started > 0) then
+    state.scan_started = r.time_precise()
+  end
   state.scan_running = true
   state.last_save_time = r.time_precise()
+  if enum.errors and enum.errors > 0 then
+    add_scan_log(string.format("Folder enumeration hit %d error(s)", enum.errors))
+  end
 
-  if folder_only and folder_only ~= "" then
+  local folder_label = enum.folder_label
+  if folder_label then
     add_scan_log(string.format(
       "Folder rescan: %s (%d new, %d changed, %d incomplete, %d unchanged)",
-      folder_only, #paths, reanalyze_count, incomplete_count, skipped_count
+      folder_label, #paths, reanalyze_count, incomplete_count, skipped_count
     ))
-    log(string.format("Rescanning folder (%d new file(s)): %s", #paths, folder_only))
+    log(string.format("Rescanning folder (%d new file(s)): %s", #paths, folder_label))
   else
     add_scan_log(string.format(
       "Scan started: %d new, %d changed, %d incomplete, %d unchanged",
@@ -4957,14 +5064,93 @@ local function enqueue_scan(folder_only)
     ))
     log(string.format("Scan started: %d new file(s), %d already indexed", #paths, skipped_count))
   end
-  begin_scan_session((folder_only and folder_only ~= "") and "Folder rescan" or "Library scan", {
-    detail = (folder_only and folder_only ~= "") and folder_only or nil,
-    new_files = #paths,
-    changed_files = reanalyze_count,
-    incomplete_files = incomplete_count,
-    unchanged_files = skipped_count,
-    queued = reanalyze_count + incomplete_count,
-  })
+  local session = state.scan_session
+  if enum.appending and type(session) == "table" then
+    session.new_files = (session.new_files or 0) + #paths
+    session.changed_files = (session.changed_files or 0) + reanalyze_count
+    session.incomplete_files = (session.incomplete_files or 0) + incomplete_count
+    session.unchanged_files = (session.unchanged_files or 0) + skipped_count
+    session.queued = (session.queued or 0) + reanalyze_count + incomplete_count
+    if not session.started_at then
+      session.started_at = r.time_precise()
+    end
+  else
+    begin_scan_session(folder_label and "Folder rescan" or "Library scan", {
+      detail = folder_label,
+      new_files = #paths,
+      changed_files = reanalyze_count,
+      incomplete_files = incomplete_count,
+      unchanged_files = skipped_count,
+      queued = reanalyze_count + incomplete_count,
+    })
+  end
+end
+
+-- folder_only: nil (all folders), one folder path, or a list of folder paths.
+-- New files are appended (deduplicated) to any pending scan_queue.
+local function enqueue_scan(folder_only)
+  local folders_to_scan = state.folders
+  local folder_label = nil
+  if type(folder_only) == "table" then
+    folders_to_scan = folder_only
+    if #folder_only == 1 then
+      folder_label = normalize_path(folder_only[1])
+    elseif #folder_only > 1 then
+      folder_label = string.format("%d new folder(s)", #folder_only)
+    end
+  elseif folder_only and folder_only ~= "" then
+    folders_to_scan = { normalize_path(folder_only) }
+    folder_label = folder_only
+  end
+
+  local enum = state.scan_enum
+  if not enum then
+    state.debug_count = 0  -- Reset debug counter for new scan
+    state.external_disabled = false
+    state.analyzer_warned = false
+    state.analyzer_path_mode = state.analyzer_path_mode or {}
+    rebuild_samples_path_index()
+
+    enum = {
+      stack = {},
+      paths = {},
+      queued = {},
+      already = {},
+      skipped = 0,
+      reanalyze = 0,
+      incomplete = 0,
+      errors = 0,
+      folder_label = folder_label,
+      appending = #state.scan_queue > 0
+        or (state.scan_running and (#state.analyzer_queue > 0 or #state.active_processes > 0)),
+    }
+    for _, path in ipairs(state.analyzer_queue) do
+      enum.already[path] = true
+    end
+    for _, w in ipairs(state.analyzer_workers or {}) do
+      if w.path then
+        enum.already[w.path] = true
+      end
+    end
+    for _, path in ipairs(state.scan_queue) do
+      enum.queued[path] = true
+    end
+    state.scan_enum = enum
+    add_scan_log(folder_label and ("Listing files in " .. folder_label .. "…") or "Listing files in library folders…")
+  elseif enum.folder_label ~= folder_label then
+    enum.folder_label = (enum.folder_label and folder_label) and "several folders" or nil
+  end
+
+  for i = #folders_to_scan, 1, -1 do
+    local folder = normalize_path(folders_to_scan[i])
+    if folder and folder ~= "" then
+      enum.stack[#enum.stack + 1] = folder
+    end
+  end
+
+  -- Keep the menu in "scanning" state while files are listed; process_scan_slice
+  -- does no queue work or finalize until sm_scan_enum_finish has run.
+  state.scan_running = true
 end
 
 function scan_is_active()
@@ -4982,6 +5168,9 @@ function scan_is_active()
 end
 
 function start_scan(folder_only)
+  if state.scan_enum and (not folder_only or folder_only == "") then
+    return -- already listing library folders
+  end
   local resume = (not folder_only or folder_only == "")
     and (#state.scan_queue > 0 or #state.analyzer_queue > 0 or #state.active_processes > 0)
   if resume then
@@ -5008,6 +5197,8 @@ function start_scan(folder_only)
 end
 
 function stop_scan()
+  -- Abandon an in-progress folder listing; files already found are not queued.
+  state.scan_enum = nil
   local remaining_files = #state.scan_queue
   local remaining_analyzer = #state.analyzer_queue + #state.active_processes
   if not state.scan_running and remaining_files == 0 and remaining_analyzer == 0 then
@@ -5237,6 +5428,12 @@ end
 local function process_scan_slice(max_ms)
   max_ms = max_ms or 12.0
 
+  -- Folder listing runs first, time-sliced; nothing else proceeds until it is done.
+  if state.scan_enum then
+    sm_scan_enum_step(max_ms)
+    return
+  end
+
   local analyzer_complete = (#state.analyzer_queue == 0 and #state.active_processes == 0)
   local workers_busy = false
   for _, w in ipairs(state.analyzer_workers or {}) do
@@ -5367,6 +5564,7 @@ local function process_scan_slice(max_ms)
   if merged_count > 0 then
     -- Defer full layout until scan/analyzers settle — per-result layout is too expensive
     state._pending_layout = true
+    state.scan_unsaved_results = true
   end
 
   if not state.scan_running then
@@ -5426,6 +5624,13 @@ local function process_scan_slice(max_ms)
     return true
   end
 
+  -- Save progress every few minutes during long scans so a crash loses little.
+  if state.scan_unsaved_results and state.scan_started > 0
+      and (r.time_precise() - (state.last_save_time or 0)) >= 180.0 then
+    save_samples()
+    add_scan_log("Scan progress saved")
+  end
+
   if #state.scan_queue == 0 and not analyzer_complete then
     return
   end
@@ -5438,6 +5643,7 @@ local function process_scan_slice(max_ms)
     local sample = analyze_file(path)
     if sample then
       table.insert(state.samples, sample)
+      state.scan_unsaved_results = true
       if sample.path then
         samples_by_path[sample.path] = sample
       end
@@ -52068,6 +52274,7 @@ function clear_all_folders_and_samples()
   end
   state.folders = {}
   filter_samples_by_folders()  -- This will clear samples and tag data
+  state.scan_enum = nil
   state.scan_queue = {}
   state.scan_running = false
   state.scan_started = 0
@@ -54796,8 +55003,9 @@ function loop()
 
   -- Start scan after a miss, but defer cache rewrite until after first interactive frame.
   if state._enqueue_scan_after_load then
+    local scan_folders = state._enqueue_scan_after_load
     state._enqueue_scan_after_load = false
-    enqueue_scan()
+    enqueue_scan(type(scan_folders) == "table" and scan_folders or nil)
   end
 
   if not loading then
