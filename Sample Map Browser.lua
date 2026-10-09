@@ -3378,13 +3378,132 @@ function analyzer_work_dir()
   if state.analyzer_work_dir and state.analyzer_work_dir ~= "" then
     return state.analyzer_work_dir
   end
-  local tmp = os.getenv("TMPDIR") or "/tmp"
+  local tmp
+  if SM_IS_WINDOWS then
+    tmp = os.getenv("TEMP") or os.getenv("TMP") or "C:/Windows/Temp"
+  else
+    tmp = os.getenv("TMPDIR") or "/tmp"
+  end
+  tmp = tmp:gsub("\\", "/")
   if tmp:sub(-1) == "/" then
     tmp = tmp:sub(1, -2)
   end
   state.analyzer_work_dir = tmp .. "/sma_workers_" .. tostring(os.time())
-  os.execute("mkdir -p " .. shell_escape(state.analyzer_work_dir))
+  if r.RecursiveCreateDirectory then
+    r.RecursiveCreateDirectory(state.analyzer_work_dir, 0)
+  else
+    os.execute("mkdir -p " .. shell_escape(state.analyzer_work_dir))
+  end
   return state.analyzer_work_dir
+end
+
+-- Pid written by the worker (SampleMapAnalyzer.py --worker) into pid_<slot>.
+function sm_analyzer_worker_pid(w)
+  if not w or not w.pid_path then
+    return nil
+  end
+  local f = io.open(w.pid_path, "r")
+  if not f then
+    return nil
+  end
+  local pid = tonumber((f:read("*l") or ""):match("%d+"))
+  f:close()
+  if pid and pid > 1 then
+    w.pid_seen = true
+    return pid
+  end
+  return nil
+end
+
+function sm_kill_pid(pid)
+  pid = tonumber(pid)
+  if not pid or pid <= 1 then
+    return
+  end
+  if SM_IS_WINDOWS then
+    os.execute(string.format("taskkill /F /PID %d >NUL 2>&1", pid))
+  else
+    os.execute(string.format("kill %d >/dev/null 2>&1", pid))
+  end
+end
+
+-- Stop one worker without blocking: ask it to quit, kill it if it is busy
+-- (or force is set) and its pid is known, then close the pipe.
+-- Returns false when the pipe was left open because closing could block.
+function sm_stop_analyzer_worker(w, force)
+  if not w then
+    return true
+  end
+  if w.quit_path then
+    pcall(function()
+      local qf = io.open(w.quit_path, "w")
+      if qf then
+        qf:write("1")
+        qf:close()
+      end
+    end)
+  end
+  local pid = sm_analyzer_worker_pid(w)
+  if pid and (force or w.path) then
+    sm_kill_pid(pid)
+  elseif w.path then
+    -- Busy and no pid: pclose would wait for the job to finish; leave it.
+    return false
+  end
+  if w.pipe then
+    pcall(function()
+      w.pipe:close()
+    end)
+    w.pipe = nil
+  end
+  return true
+end
+
+-- Replace a dead or hung worker with a fresh process in the same slot (in place).
+function sm_restart_analyzer_worker(w)
+  if not w then
+    return false
+  end
+  if not sm_stop_analyzer_worker(w, true) then
+    return false
+  end
+  if w.pid_path then
+    os.remove(w.pid_path)
+  end
+  local nw = start_analyzer_worker(w.slot)
+  if not nw then
+    return false
+  end
+  for k in pairs(w) do
+    w[k] = nil
+  end
+  for k, v in pairs(nw) do
+    w[k] = v
+  end
+  return true
+end
+
+-- False once a worker that has written its pid file removed it again (idle exit / crash).
+function sm_analyzer_worker_alive(w)
+  if not w then
+    return false
+  end
+  if sm_analyzer_worker_pid(w) then
+    return true
+  end
+  if not w.pid_seen then
+    -- Still starting up (or an older analyzer script without pid files).
+    return true
+  end
+  return false
+end
+
+function sm_analyzer_paths_equal(a, b)
+  local function norm(p)
+    p = tostring(p or ""):gsub("\\", "/"):gsub("^%s+", ""):gsub("%s+$", "")
+    return p
+  end
+  return norm(a) == norm(b)
 end
 
 function write_worker_file(path, contents)
@@ -3414,20 +3533,9 @@ function stop_analyzer_workers(requeue)
         state.analyzer_path_mode[w.path] = w.mode
       end
     end
-    if w.quit_path then
-      pcall(function()
-        local qf = io.open(w.quit_path, "w")
-        if qf then
-          qf:write("1")
-          qf:close()
-        end
-      end)
-    end
-    if w.pipe then
-      pcall(function()
-        w.pipe:close()
-      end)
-    end
+    -- Quit file for idle workers; busy ones are killed by pid so closing
+    -- the pipe does not wait for their current job.
+    sm_stop_analyzer_worker(w, false)
   end
   state.analyzer_workers = {}
   state.active_processes = {}
@@ -3453,19 +3561,20 @@ function start_analyzer_worker(slot)
     shell_escape(dir),
   }, " ")
   local log_path = dir .. "/worker_" .. tostring(slot) .. ".log"
-  local pipe = io.popen(cmd .. " 2>> " .. shell_escape(log_path), "r")
+  os.remove(dir .. "/quit_" .. tostring(slot))
+  local pipe = io.popen(sm_shell_cmd(cmd .. " 2>> " .. shell_escape(log_path)), "r")
   if not pipe then
     return nil
   end
-  pcall(function()
-    pipe:read("*line")
-  end)
+  -- Don't wait for the worker's "ready" line: a job written to req_<slot>
+  -- before the worker is up is picked up as soon as it starts polling.
   return {
     slot = slot,
     pipe = pipe,
     req_path = dir .. "/req_" .. tostring(slot),
     res_path = dir .. "/res_" .. tostring(slot),
     quit_path = dir .. "/quit_" .. tostring(slot),
+    pid_path = dir .. "/pid_" .. tostring(slot),
     path = nil,
     mode = nil,
     start_time = 0,
@@ -3513,11 +3622,22 @@ function apply_cpu_analyzer_workers()
   state.max_concurrent_analyzers = recommended_analyzer_workers(cores)
 end
 
-function python_has_numpy(bin)
+-- cmd.exe strips the first and last quote of a command that starts with a
+-- quote; wrapping the whole command in one more pair keeps it intact.
+function sm_shell_cmd(cmd)
+  if SM_IS_WINDOWS then
+    return '"' .. cmd .. '"'
+  end
+  return cmd
+end
+
+-- Run `<python> -c <code>` quietly; true when it exits with status 0.
+function sm_python_check(bin, code)
   if not bin or bin == "" then
     return false
   end
-  local pipe = io.popen(shell_escape(bin) .. ' -c "import numpy" 2>/dev/null')
+  local null_dev = SM_IS_WINDOWS and "NUL" or "/dev/null"
+  local pipe = io.popen(sm_shell_cmd(shell_escape(bin) .. ' -c "' .. code .. '" 2>' .. null_dev))
   if not pipe then
     return false
   end
@@ -3526,45 +3646,114 @@ function python_has_numpy(bin)
   return ok == true
 end
 
+function python_has_numpy(bin)
+  return sm_python_check(bin, "import numpy")
+end
+
+-- On macOS /usr/bin/python3 is a stub that pops up the "install command line
+-- developer tools" dialog when the tools are missing; don't probe it then.
+function sm_macos_clt_missing()
+  if state.macos_clt_missing ~= nil then
+    return state.macos_clt_missing
+  end
+  local os_name = (r.GetOS and r.GetOS()) or ""
+  if SM_IS_WINDOWS or not (os_name:match("^OSX") or os_name:match("^macOS")) then
+    state.macos_clt_missing = false
+    return false
+  end
+  local ok = os.execute("/usr/bin/xcode-select -p >/dev/null 2>&1")
+  state.macos_clt_missing = not ok
+  return state.macos_clt_missing
+end
+
 function resolve_analyzer_python()
   if state.python_resolved then
     return PYTHON_BIN
   end
   state.python_resolved = true
-  local candidates = {
-    PYTHON_BIN,
-    "/usr/bin/python3",
-    "/opt/homebrew/bin/python3",
-    "/usr/local/bin/python3",
-    "python3",
-  }
+  local candidates
+  if SM_IS_WINDOWS then
+    candidates = { "py", "python", "python3" }
+    if PYTHON_BIN ~= "/usr/bin/python3" then
+      table.insert(candidates, 1, PYTHON_BIN)
+    end
+  else
+    candidates = {
+      PYTHON_BIN,
+      "/opt/homebrew/bin/python3",
+      "/usr/local/bin/python3",
+      "/usr/bin/python3",
+      "python3",
+    }
+  end
+  local skip_system = sm_macos_clt_missing()
   local seen = {}
-  local fallback = PYTHON_BIN
+  local fallback = nil
   for i = 1, #candidates do
     local bin = candidates[i]
-    if bin and bin ~= "" and not seen[bin] then
+    local is_bare = bin and not bin:find("[/\\]")
+    local stub = skip_system and (bin == "/usr/bin/python3" or bin == "python3")
+    if bin and bin ~= "" and not seen[bin] and not stub then
       seen[bin] = true
-      if bin == "python3" or r.file_exists(bin) then
-        if r.file_exists(bin) then
-          fallback = bin
-        end
+      if is_bare or r.file_exists(bin) then
         if python_has_numpy(bin) then
           PYTHON_BIN = bin
+          state.analyzer_numpy_missing = false
           add_scan_log("Analyzer Python: " .. bin .. " (numpy)")
           return PYTHON_BIN
+        end
+        if not fallback and (not is_bare or sm_python_check(bin, "import sys")) then
+          fallback = bin
         end
       end
     end
   end
-  add_scan_log("numpy not found — installing in the background (FFT stays built-in until reload)")
-  os.execute(shell_escape(fallback) .. " -m pip install --user numpy >/dev/null 2>&1 &")
+  if not fallback then
+    state.analyzer_no_python = true
+    add_scan_log("Analyzer: no working Python 3 found — install Python 3 to enable audio analysis")
+    return PYTHON_BIN
+  end
   PYTHON_BIN = fallback
-  add_scan_log("Analyzer Python: " .. fallback .. " (no numpy yet)")
+  state.analyzer_numpy_missing = true
+  add_scan_log("Analyzer Python: " .. fallback .. " (numpy not installed — using the slower built-in FFT)")
+  add_scan_log("To speed up analysis, use Library > Re-analyze > Install numpy…, or run: "
+    .. sm_numpy_install_command())
   return PYTHON_BIN
+end
+
+function sm_numpy_install_command()
+  return shell_escape(PYTHON_BIN) .. " -m pip install --user numpy"
+end
+
+-- Only runs when the user picks the menu item (never automatically).
+function sm_install_numpy()
+  local cmd = sm_numpy_install_command()
+  local answer = r.ShowMessageBox(
+    "Install numpy for the analyzer's Python?\n\nThis runs:\n" .. cmd
+      .. "\n\nAnalysis keeps working without it, just slower. New analyzer workers use numpy once the install finishes.",
+    "Install numpy", 4)
+  if answer ~= 6 then
+    return
+  end
+  state.analyzer_numpy_install_started = true
+  if SM_IS_WINDOWS then
+    os.execute(sm_shell_cmd('start "" /B ' .. cmd .. " >NUL 2>&1"))
+  else
+    os.execute(cmd .. " >/dev/null 2>&1 &")
+  end
+  add_scan_log("Installing numpy in the background: " .. cmd)
 end
 
 function ensure_analyzer_workers()
   resolve_analyzer_python()
+  if state.analyzer_no_python then
+    -- Fail queued jobs instead of starting workers that cannot run.
+    for _, path in ipairs(state.analyzer_queue) do
+      state.analyzer_results[path] = {data = nil, err = "no Python 3 found"}
+    end
+    state.analyzer_queue = {}
+    return false
+  end
   if not state.cpu_core_count or state.cpu_core_count < 1 then
     apply_cpu_analyzer_workers()
   end
@@ -3618,6 +3807,10 @@ function collect_worker_result(w)
       note_scan_session_analyzer(false)
       w.path = nil
       w.mode = nil
+      -- Restart the hung worker so its late result can't land on the next job.
+      if sm_analyzer_worker_pid(w) then
+        sm_restart_analyzer_worker(w)
+      end
       return true
     end
     return false
@@ -3627,6 +3820,16 @@ function collect_worker_result(w)
   os.remove(w.res_path)
   local path = w.path
   local mode = w.mode
+  if output and output ~= "" then
+    local ok_peek, peek = pcall(json_decode, output)
+    local result_path = ok_peek and type(peek) == "table" and peek._path or nil
+    if type(result_path) == "string" and result_path ~= ""
+        and not sm_analyzer_paths_equal(result_path, path) then
+      -- Late result for an earlier job (e.g. after a timeout): drop it, keep waiting.
+      add_scan_log(string.format("Dropped stale analyzer result for %s", result_path:match("([^/]+)$") or result_path))
+      return false
+    end
+  end
   w.path = nil
   w.mode = nil
   if output and output ~= "" then
@@ -3674,6 +3877,12 @@ function assign_worker_job(w, path, mode)
   end
   if mode ~= "transient" and mode ~= "weight" then
     mode = "full"
+  end
+  if not sm_analyzer_worker_alive(w) then
+    -- Worker exited (idle timeout or crash): start a fresh one in this slot.
+    if not sm_restart_analyzer_worker(w) then
+      return false
+    end
   end
   os.remove(w.res_path)
   if not write_worker_file(w.req_path, mode .. "\t" .. path .. "\n") then
@@ -52341,6 +52550,13 @@ function render_header()
         enqueue_weight_analysis()
       end
       menu_item_tooltip("Recompute weight only (skips crop, loop/one-shot, and transients).\nUse this after the weight formula changes.")
+      if state.analyzer_numpy_missing and not state.analyzer_numpy_install_started then
+        r.ImGui_Separator(ctx)
+        if r.ImGui_MenuItem(ctx, "Install numpy…") then
+          sm_install_numpy()
+        end
+        menu_item_tooltip("numpy was not found for the analyzer's Python.\nInstalling it makes analysis faster.")
+      end
       r.ImGui_EndMenu(ctx)
     end
 
