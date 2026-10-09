@@ -676,8 +676,75 @@ local function get_scan_logs_text()
 end
 
 
+SM_IS_WINDOWS = (package and package.config and package.config:sub(1, 1) == "\\") or false
+
 local function shell_escape(str)
-  return '"' .. tostring(str):gsub('"', '\\"') .. '"'
+  str = tostring(str)
+  if SM_IS_WINDOWS then
+    -- cmd.exe: double quotes; '"' is not a legal filename character on Windows, so drop it.
+    return '"' .. str:gsub('"', "") .. '"'
+  end
+  -- POSIX sh: single quotes disable $(), backticks and every other expansion.
+  return "'" .. str:gsub("'", "'\\''") .. "'"
+end
+
+-- Write `content` to `path` atomically: write path.tmp, keep the previous file as
+-- path.bak, then rename the temp file into place. Returns true or false, err.
+function sm_atomic_write(path, content)
+  if type(content) ~= "string" then
+    return false, "content is not a string"
+  end
+  local tmp = path .. ".tmp"
+  local f, open_err = io.open(tmp, "wb")
+  if not f then
+    return false, "cannot open " .. tmp .. ": " .. tostring(open_err)
+  end
+  local ok_w, write_err = f:write(content)
+  local ok_c, close_err = f:close()
+  if not ok_w or not ok_c then
+    os.remove(tmp)
+    return false, "write failed: " .. tostring(write_err or close_err)
+  end
+  local bak = path .. ".bak"
+  local cur = io.open(path, "rb")
+  if cur then
+    local size = cur:seek("end") or 0
+    cur:close()
+    if size > 0 then
+      os.remove(bak)
+      os.rename(path, bak)
+    end
+  end
+  local ok_r, rename_err = os.rename(tmp, path)
+  if not ok_r then
+    -- Windows cannot rename over an existing file.
+    os.remove(path)
+    ok_r, rename_err = os.rename(tmp, path)
+  end
+  if not ok_r then
+    local chk = io.open(path, "rb")
+    if chk then
+      chk:close()
+    else
+      os.rename(bak, path)
+    end
+    return false, "rename failed: " .. tostring(rename_err)
+  end
+  return true
+end
+
+-- Read a whole file; nil when missing or empty.
+function sm_read_nonempty_file(path)
+  local f = io.open(path, "rb")
+  if not f then
+    return nil
+  end
+  local content = f:read("*a")
+  f:close()
+  if not content or content == "" then
+    return nil
+  end
+  return content
 end
 
 
@@ -1609,14 +1676,17 @@ end
 
 
 -- --- JSON helpers (improved) ----------------------------------------------------
+SM_JSON_ESCAPE_MAP = { ['"'] = '\\"', ["\\"] = "\\\\", ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t", ["\b"] = "\\b", ["\f"] = "\\f" }
+for code = 0, 31 do
+  local ch = string.char(code)
+  if not SM_JSON_ESCAPE_MAP[ch] then
+    SM_JSON_ESCAPE_MAP[ch] = string.format("\\u%04x", code)
+  end
+end
+
 local function json_encode_string(s)
-  -- Escape special characters in strings
-  s = s:gsub('\\', '\\\\')
-  s = s:gsub('"', '\\"')
-  s = s:gsub('\n', '\\n')
-  s = s:gsub('\r', '\\r')
-  s = s:gsub('\t', '\\t')
-  return '"' .. s .. '"'
+  -- Escape quotes, backslashes and every control character.
+  return '"' .. s:gsub('[%z\1-\31"\\]', SM_JSON_ESCAPE_MAP) .. '"'
 end
 
 local function json_encode(val)
@@ -1646,6 +1716,9 @@ local function json_encode(val)
   elseif type(val) == "string" then
     return json_encode_string(val)
   elseif type(val) == "number" then
+    if val ~= val or val == math.huge or val == -math.huge then
+      return "null"
+    end
     return tostring(val)
   elseif type(val) == "boolean" then
     return val and "true" or "false"
@@ -1656,198 +1729,187 @@ end
 
 
 local function json_decode(str)
-  -- Improved JSON decoder that handles strings with commas and special chars
-  str = str:match("%s*(.*)")
-  if str:sub(1, 1) == "{" then
-    local obj = {}
-    str = str:sub(2, -2) -- remove {}
-    
-    -- Parse key-value pairs, handling quoted strings properly
-    local pos = 1
-    while pos <= #str do
-      -- Skip whitespace
-      while pos <= #str and str:sub(pos, pos):match("%s") do
-        pos = pos + 1
+  -- Single-pass recursive-descent JSON decoder.
+  -- Returns the decoded value, or nil, err on malformed/truncated input.
+  -- `null` decodes to nil; arrays keep the positions of later elements.
+  if type(str) ~= "string" then
+    return nil, "json_decode: expected string, got " .. type(str)
+  end
+  local byte, sub, find = string.byte, string.sub, string.find
+  local len = #str
+  local pos = 1
+  local escapes = { [34] = '"', [92] = "\\", [47] = "/", [98] = "\b", [102] = "\f", [110] = "\n", [114] = "\r", [116] = "\t" }
+
+  local function fail(msg)
+    error({ json_decode_error = string.format("%s at position %d", msg, pos) }, 0)
+  end
+
+  local function skip_ws()
+    pos = find(str, "[^ \t\r\n]", pos) or (len + 1)
+  end
+
+  local function parse_string()
+    -- pos is on the opening quote
+    local i = pos + 1
+    local parts, n = nil, 0
+    while true do
+      local j = find(str, '["\\]', i)
+      if not j then
+        pos = len + 1
+        fail("unterminated string")
       end
-      if pos > #str then break end
-      
-      -- Find key (quoted string)
-      if str:sub(pos, pos) ~= '"' then break end
-      local key_start = pos + 1
-      local key_end = key_start
-      while key_end <= #str do
-        if str:sub(key_end, key_end) == '"' and str:sub(key_end - 1, key_end - 1) ~= '\\' then
-          break
+      if byte(str, j) == 34 then
+        pos = j + 1
+        if parts then
+          n = n + 1
+          parts[n] = sub(str, i, j - 1)
+          return table.concat(parts, "", 1, n)
         end
-        key_end = key_end + 1
+        return sub(str, i, j - 1)
       end
-      local key = str:sub(key_start, key_end - 1):gsub('\\"', '"'):gsub('\\\\', '\\')
-      
-      -- Skip to colon
-      pos = key_end + 1
-      while pos <= #str and str:sub(pos, pos) ~= ':' do pos = pos + 1 end
-      pos = pos + 1
-      
-      -- Skip whitespace
-      while pos <= #str and str:sub(pos, pos):match("%s") do pos = pos + 1 end
-      
-      -- Parse value
-      if str:sub(pos, pos) == '"' then
-        -- String value
-        local val_start = pos + 1
-        local val_end = val_start
-        while val_end <= #str do
-          if str:sub(val_end, val_end) == '"' and str:sub(val_end - 1, val_end - 1) ~= '\\' then
-            break
+      parts = parts or {}
+      n = n + 1
+      parts[n] = sub(str, i, j - 1)
+      local e = byte(str, j + 1)
+      if e == 117 then -- \uXXXX
+        local hex = sub(str, j + 2, j + 5)
+        if not find(hex, "^%x%x%x%x$") then
+          pos = j
+          fail("invalid \\u escape")
+        end
+        local cp = tonumber(hex, 16)
+        local next_i = j + 6
+        if cp >= 0xD800 and cp <= 0xDBFF and sub(str, next_i, next_i + 1) == "\\u" then
+          local hex2 = sub(str, next_i + 2, next_i + 5)
+          local lo = find(hex2, "^%x%x%x%x$") and tonumber(hex2, 16)
+          if lo and lo >= 0xDC00 and lo <= 0xDFFF then
+            cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
+            next_i = next_i + 6
           end
-          val_end = val_end + 1
         end
-        obj[key] = str:sub(val_start, val_end - 1):gsub('\\"', '"'):gsub('\\\\', '\\'):gsub('\\n', '\n'):gsub('\\r', '\r'):gsub('\\t', '\t')
-        pos = val_end + 1
-      elseif str:sub(pos, pos) == '[' then
-        -- Array value - find matching bracket
-        local depth = 1
-        local arr_start = pos
-        pos = pos + 1
-        while pos <= #str and depth > 0 do
-          if str:sub(pos, pos) == '[' then depth = depth + 1
-          elseif str:sub(pos, pos) == ']' then depth = depth - 1 end
-          pos = pos + 1
-        end
-        local arr_str = str:sub(arr_start, pos - 1)
-        obj[key] = json_decode(arr_str)
-      elseif str:sub(pos, pos) == '{' then
-        -- Object value - find matching brace
-        local depth = 1
-        local obj_start = pos
-        pos = pos + 1
-        while pos <= #str and depth > 0 do
-          if str:sub(pos, pos) == '{' then depth = depth + 1
-          elseif str:sub(pos, pos) == '}' then depth = depth - 1 end
-          pos = pos + 1
-        end
-        local obj_str = str:sub(obj_start, pos - 1)
-        obj[key] = json_decode(obj_str)
+        n = n + 1
+        parts[n] = utf8.char(cp)
+        i = next_i
       else
-        -- Number or boolean
-        local val_end = pos
-        while val_end <= #str and str:sub(val_end, val_end) ~= ',' and str:sub(val_end, val_end) ~= '}' do
-          val_end = val_end + 1
+        local rep = e and escapes[e]
+        if not rep then
+          pos = j
+          fail(e and "invalid escape" or "unterminated string")
         end
-        local val_str = str:sub(pos, val_end - 1):match("^%s*(.-)%s*$")
-        if val_str == "true" then
-          obj[key] = true
-        elseif val_str == "false" then
-          obj[key] = false
-        elseif tonumber(val_str) then
-          obj[key] = tonumber(val_str)
-        end
-        pos = val_end
-      end
-      
-      -- Skip comma
-      while pos <= #str and (str:sub(pos, pos) == ',' or str:sub(pos, pos):match("%s")) do
-        pos = pos + 1
+        n = n + 1
+        parts[n] = rep
+        i = j + 2
       end
     end
-    return obj
-  elseif str:sub(1, 1) == "[" then
-    local arr = {}
-    str = str:sub(2, -2) -- remove []
-    
-    -- Handle empty array
-    if str:match("^%s*$") then
+  end
+
+  local parse_value
+
+  local function parse_array()
+    pos = pos + 1
+    local arr, n = {}, 0
+    skip_ws()
+    if byte(str, pos) == 93 then
+      pos = pos + 1
       return arr
     end
-    
-    -- Parse array items, handling strings with commas, nested objects, and nested arrays
-    local pos = 1
-    while pos <= #str do
-      -- Skip whitespace
-      while pos <= #str and str:sub(pos, pos):match("%s") do pos = pos + 1 end
-      if pos > #str then break end
-      
-      if str:sub(pos, pos) == '"' then
-        -- String item
-        local item_start = pos + 1
-        local item_end = item_start
-        while item_end <= #str do
-          if str:sub(item_end, item_end) == '"' and str:sub(item_end - 1, item_end - 1) ~= '\\' then
-            break
-          end
-          item_end = item_end + 1
-        end
-        if item_end <= #str then
-          local item_str = str:sub(item_start, item_end - 1)
-          item_str = item_str:gsub('\\"', '"'):gsub('\\\\', '\\')
-          table.insert(arr, item_str)
-        end
-        pos = item_end + 1
-      elseif str:sub(pos, pos) == '{' then
-        -- Nested object - find matching brace
-        local depth = 1
-        local obj_start = pos
+    while true do
+      n = n + 1
+      arr[n] = parse_value()
+      skip_ws()
+      local b = byte(str, pos)
+      if b == 44 then
         pos = pos + 1
-        while pos <= #str and depth > 0 do
-          if str:sub(pos, pos) == '{' then depth = depth + 1
-          elseif str:sub(pos, pos) == '}' then depth = depth - 1 end
-          pos = pos + 1
-        end
-        local obj_str = str:sub(obj_start, pos - 1)
-        table.insert(arr, json_decode(obj_str))
-      elseif str:sub(pos, pos) == '[' then
-        -- Nested array - find matching bracket
-        local depth = 1
-        local arr_start = pos
+      elseif b == 93 then
         pos = pos + 1
-        while pos <= #str and depth > 0 do
-          if str:sub(pos, pos) == '[' then depth = depth + 1
-          elseif str:sub(pos, pos) == ']' then depth = depth - 1 end
-          pos = pos + 1
-        end
-        local arr_str = str:sub(arr_start, pos - 1)
-        table.insert(arr, json_decode(arr_str))
-      elseif tonumber(str:sub(pos, pos)) or str:sub(pos, pos) == '-' then
-        -- Number item
-        local item_end = pos
-        while item_end <= #str and str:sub(item_end, item_end) ~= ',' and str:sub(item_end, item_end) ~= ']' do
-          item_end = item_end + 1
-        end
-        local num_str = str:sub(pos, item_end - 1):match("^%s*(.-)%s*$")
-        local num = tonumber(num_str)
-        if num then 
-          table.insert(arr, num) 
-        end
-        pos = item_end
-      elseif str:sub(pos, pos) == 't' or str:sub(pos, pos) == 'f' then
-        -- Boolean or null
-        local item_end = pos
-        while item_end <= #str and str:sub(item_end, item_end) ~= ',' and str:sub(item_end, item_end) ~= ']' do
-          item_end = item_end + 1
-        end
-        local val_str = str:sub(pos, item_end - 1):match("^%s*(.-)%s*$")
-        if val_str == "true" then
-          table.insert(arr, true)
-        elseif val_str == "false" then
-          table.insert(arr, false)
-        elseif val_str == "null" then
-          table.insert(arr, nil)
-        end
-        pos = item_end
+        return arr
       else
-        -- Skip unknown character (shouldn't happen in valid JSON)
-        log("Warning: Unexpected character in array at position " .. pos .. ": " .. str:sub(pos, pos))
-        pos = pos + 1
-      end
-      
-      -- Skip comma
-      while pos <= #str and (str:sub(pos, pos) == ',' or str:sub(pos, pos):match("%s")) do
-        pos = pos + 1
+        fail(b and "expected ',' or ']'" or "unexpected end of input in array")
       end
     end
-    return arr
   end
-  return nil
+
+  local function parse_object()
+    pos = pos + 1
+    local obj = {}
+    skip_ws()
+    if byte(str, pos) == 125 then
+      pos = pos + 1
+      return obj
+    end
+    while true do
+      skip_ws()
+      if byte(str, pos) ~= 34 then
+        fail(pos > len and "unexpected end of input in object" or "expected string key")
+      end
+      local key = parse_string()
+      skip_ws()
+      if byte(str, pos) ~= 58 then
+        fail("expected ':'")
+      end
+      pos = pos + 1
+      obj[key] = parse_value()
+      skip_ws()
+      local b = byte(str, pos)
+      if b == 44 then
+        pos = pos + 1
+      elseif b == 125 then
+        pos = pos + 1
+        return obj
+      else
+        fail(b and "expected ',' or '}'" or "unexpected end of input in object")
+      end
+    end
+  end
+
+  parse_value = function()
+    skip_ws()
+    local b = byte(str, pos)
+    if b == 123 then
+      return parse_object()
+    elseif b == 91 then
+      return parse_array()
+    elseif b == 34 then
+      return parse_string()
+    elseif b == 116 then
+      if sub(str, pos, pos + 3) ~= "true" then fail("invalid literal") end
+      pos = pos + 4
+      return true
+    elseif b == 102 then
+      if sub(str, pos, pos + 4) ~= "false" then fail("invalid literal") end
+      pos = pos + 5
+      return false
+    elseif b == 110 then
+      if sub(str, pos, pos + 3) ~= "null" then fail("invalid literal") end
+      pos = pos + 4
+      return nil
+    elseif b == 45 or (b and b >= 48 and b <= 57) then
+      local s, e = find(str, "^-?%d+%.?%d*[eE]?[-+]?%d*", pos)
+      local num = s and tonumber(sub(str, s, e))
+      if not num then fail("invalid number") end
+      pos = e + 1
+      return num
+    elseif not b then
+      fail("unexpected end of input")
+    end
+    fail("unexpected character '" .. string.char(b) .. "'")
+  end
+
+  local ok, result = pcall(function()
+    local value = parse_value()
+    skip_ws()
+    if pos <= len then
+      fail("trailing characters")
+    end
+    return value
+  end)
+  if ok then
+    return result
+  end
+  if type(result) == "table" and result.json_decode_error then
+    return nil, result.json_decode_error
+  end
+  return nil, tostring(result)
 end
 
 
