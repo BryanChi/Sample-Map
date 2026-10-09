@@ -18101,12 +18101,36 @@ function apply_seq_undo_snapshot(snap, label)
   if type(snap) ~= "table" then
     return
   end
-  local remove_ids, sync_ids, mix, full = seq_undo_plan_resync(state, snap)
+  -- Run the body under xpcall so the REAPER undo block, PreventUIRefresh and
+  -- seq_undo_applying are always released, even if a resync step errors.
+  local guard = { block = false, refresh = false }
   seq_undo_applying = true
+  local ok, err = xpcall(seq_apply_undo_snapshot_body, function(e)
+    return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e)
+  end, snap, label, guard)
+  if guard.refresh and r.PreventUIRefresh then
+    r.PreventUIRefresh(-1)
+  end
+  if guard.block then
+    seq_undo_end_reaper(label or "Sample Map undo")
+  end
+  seq_undo_applying = false
+  if not ok then
+    if r.ShowConsoleMsg then
+      r.ShowConsoleMsg("Sample Map: error while applying sequencer undo:\n" .. tostring(err) .. "\n")
+    end
+    error(err, 0)
+  end
+end
+
+function seq_apply_undo_snapshot_body(snap, label, guard)
+  local remove_ids, sync_ids, mix, full = seq_undo_plan_resync(state, snap)
   restore_seq_document_snapshot(snap)
   seq_undo_begin_reaper()
+  guard.block = true
   if r.PreventUIRefresh then
     r.PreventUIRefresh(1)
+    guard.refresh = true
   end
   if seq_ensure_slot_reaper_tracks then
     seq_ensure_slot_reaper_tracks()
@@ -18145,10 +18169,12 @@ function apply_seq_undo_snapshot(snap, label)
   if seq_apply_seq_order_to_arrange then
     seq_apply_seq_order_to_arrange()
   end
-  if r.PreventUIRefresh then
+  if guard.refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(-1)
   end
+  guard.refresh = false
   r.UpdateArrange()
+  guard.block = false
   seq_undo_end_reaper(label or "Sample Map undo")
   if save_seq_project_state then
     save_seq_project_state()
@@ -18159,7 +18185,6 @@ function apply_seq_undo_snapshot(snap, label)
   if r.GetProjectStateChangeCount then
     state.seq_last_proj_change = r.GetProjectStateChangeCount(0)
   end
-  seq_undo_applying = false
 end
 
 function seq_undo_own_begin(label)
@@ -18178,12 +18203,50 @@ function begin_seq_undo(label)
   if seq_undo_session then
     return seq_undo_session.label or label
   end
+  -- Capture under xpcall: a failure must not leave a half-open session.
+  local ok, before = xpcall(seq_undo_capture_before_snapshot, function(e)
+    return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e)
+  end)
+  if not ok then
+    seq_undo_session = nil
+    if r.ShowConsoleMsg then
+      r.ShowConsoleMsg("Sample Map: error while starting sequencer undo:\n" .. tostring(before) .. "\n")
+    end
+    error(before, 0)
+  end
   seq_undo_session = {
     label = label,
-    before = capture_seq_document_snapshot(),
+    before = before,
   }
   seq_undo_begin_reaper()
   return label
+end
+
+-- Snapshots are never mutated after capture (restore clones field-by-field),
+-- so when nothing changed since the last committed edit, reuse its `after`
+-- as this session's `before` instead of storing another deep clone.
+function seq_undo_capture_before_snapshot()
+  local last = seq_undo_stack[#seq_undo_stack]
+  if last and type(last.after) == "table" then
+    local live = {
+      seq_tracks = state.seq_tracks,
+      selected_seq_track = state.selected_seq_track,
+      seq_track_next_id = state.seq_track_next_id,
+      seq_regions = state.seq_regions,
+      seq_patterns = state.seq_patterns,
+      seq_region_next_id = state.seq_region_next_id,
+      seq_pattern_next_id = state.seq_pattern_next_id,
+      seq_pool_next_id = state.seq_pool_next_id,
+      selected_seq_region_id = state.selected_seq_region_id,
+      seq_kit_history = state.seq_kit_history,
+      seq_kit_history_next_id = state.seq_kit_history_next_id,
+      seq_razors = state.seq_razors or {},
+    }
+    if seq_undo_values_equal(last.after, live) then
+      return last.after
+    end
+  end
+  return capture_seq_document_snapshot()
 end
 
 function end_seq_undo(label)
@@ -28245,6 +28308,15 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     end
   end
 
+  -- Open the undo session before mutating slot fields so the "before"
+  -- snapshot holds the old value (callers' begin_seq_undo is then a no-op).
+  local function begin_mix_undo()
+    if not seq_undo_is_open() then
+      begin_seq_undo("Adjust sequencer mix")
+    end
+    seq_undo_commit_on_release = true
+  end
+
   local gear = layout.gear
   if gear and gear.w > 0 then
     local layering_open = state.seq_layering_slot_id == slot.id
@@ -28281,6 +28353,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     )
     if vol_hot then hovered = true end
     if vol_changed then
+      begin_mix_undo()
       slot.volume = vol_val
       changed_mix = true
     end
@@ -28301,6 +28374,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     )
     if pan_hot then hovered = true end
     if pan_changed then
+      begin_mix_undo()
       slot.pan = pan_val
       changed_mix = true
     end
@@ -28349,6 +28423,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   local mute = layout.mute
   if mute and mute.w > 0 then
     if seq_ms_button("##seq_mute_" .. slot.id, dl, mute.x, mute.y, mute.w, "M", slot.mute, 0xE05050FF) then
+      begin_mix_undo()
       slot.mute = not slot.mute
       changed_mix = true
     end
@@ -28357,6 +28432,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   local solo = layout.solo
   if solo and solo.w > 0 then
     if seq_ms_button("##seq_solo_" .. slot.id, dl, solo.x, solo.y, solo.w, "S", slot.solo, 0xE8A020FF) then
+      begin_mix_undo()
       slot.solo = not slot.solo
       changed_mix = true
     end
@@ -28365,6 +28441,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   local overlap = layout.overlap
   if overlap and overlap.w > 0 then
     if seq_ms_button("##seq_overlap_" .. slot.id, dl, overlap.x, overlap.y, overlap.w, "O", slot.overlap, 0x40C8C8FF) then
+      begin_mix_undo()
       slot.overlap = not slot.overlap
       changed_mix = true
       overlap_changed = true
@@ -29348,9 +29425,6 @@ function seq_layering_set_output(slot, kind)
   state.seq_layering_ab = kind
   seq_layering_sync_arrange(slot, { force_rebuild = true })
   save_config()
-  if save_seq_project_state then
-    save_seq_project_state()
-  end
   return true
 end
 
@@ -29392,9 +29466,6 @@ function apply_dragged_sample_to_seq_track(slot, sample, persist)
     seq_layering_sync_arrange(slot)
     if persist ~= false then
       save_config()
-      if save_seq_project_state then
-        save_seq_project_state()
-      end
     end
     return true
   end
@@ -30400,7 +30471,6 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
   if draw_ui_button("seq_layer_global_" .. slot.id .. "_" .. side_key, nil, dice_sz, dice_sz, { icon = "dice5", style = "accent" }) then
     if seq_layering_randomize_side(slot, side_key) then
       save_config()
-      if save_seq_project_state then save_seq_project_state() end
       seq_layering_sync_arrange(slot)
     end
   end
@@ -30570,12 +30640,44 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
 
   if changed then
     save_config()
-    if save_seq_project_state then save_seq_project_state() end
     seq_layering_sync_arrange(slot)
   end
 end
 
+-- Drum-layering edits (blend drag, dice, lock, volume knobs, bias, link,
+-- A/B output) mutate slot.layers directly. Open one undo session when a click
+-- lands in the layering window (before any widget mutates) and close it once
+-- all mouse buttons are released; unchanged sessions are dropped by end_seq_undo.
+function seq_layering_undo_maybe_begin()
+  if state.seq_layering_undo_owned or not state.seq_layering_hovered then
+    return
+  end
+  if not r.ImGui_IsMouseClicked then
+    return
+  end
+  if r.ImGui_IsMouseClicked(ctx, 0) or r.ImGui_IsMouseClicked(ctx, 1) then
+    if seq_undo_own_begin("Edit drum layering") then
+      state.seq_layering_undo_owned = true
+    end
+  end
+end
+
+function seq_layering_undo_maybe_end(force)
+  if not state.seq_layering_undo_owned then
+    return
+  end
+  if not force and r.ImGui_IsMouseDown
+      and (r.ImGui_IsMouseDown(ctx, 0) or r.ImGui_IsMouseDown(ctx, 1)) then
+    return
+  end
+  state.seq_layering_undo_owned = nil
+  if seq_undo_is_open() then
+    end_seq_undo()
+  end
+end
+
 function render_seq_layering_window()
+  seq_layering_undo_maybe_end()
   if not state.seq_layering_slot_id then
     state.seq_layering_hover_side = nil
     state.seq_layering_hovered = false
@@ -30647,10 +30749,12 @@ function render_seq_layering_window()
     state.seq_layering_hovered = r.ImGui_IsWindowHovered
         and r.ImGui_IsWindowHovered(ctx, hover_flags)
         or false
+    seq_layering_undo_maybe_begin()
     local body_ok, body_err = pcall(seq_layering_render_body, slot)
     if not body_ok and log then
       log("Drum layering draw error: " .. tostring(body_err))
     end
+    seq_layering_undo_maybe_end()
     pcall(r.ImGui_End, ctx)
   else
     state.seq_layering_hovered = false
@@ -30672,7 +30776,6 @@ function seq_layering_draw_bias(dl, slot, x, y, w, h, linked)
       slot.layers.bias = 0.0
       state.seq_layering_bias_drag = nil
       save_config()
-      if save_seq_project_state then save_seq_project_state() end
       seq_layering_sync_arrange(slot, { force_rebuild = true })
     elseif active then
       local dx = select(1, r.ImGui_GetMouseDelta(ctx))
@@ -30686,7 +30789,6 @@ function seq_layering_draw_bias(dl, slot, x, y, w, h, linked)
     elseif state.seq_layering_bias_drag and not (r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0)) then
       state.seq_layering_bias_drag = nil
       save_config()
-      if save_seq_project_state then save_seq_project_state() end
       seq_layering_sync_arrange(slot, { force_rebuild = true })
     end
   elseif state.seq_layering_bias_drag then
@@ -30797,7 +30899,6 @@ function seq_layering_render_body(slot)
   }) then
     seq_layering_set_linked(slot, not linked)
     save_config()
-    if save_seq_project_state then save_seq_project_state() end
     seq_layering_sync_arrange(slot)
   end
   if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
