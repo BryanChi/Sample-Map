@@ -33535,7 +33535,12 @@ function seq_sync_linked_arrange_from(region)
     if seq_prune_stale_region_items(others[i]) > 0 then
       pruned = true
     end
-    local item_n = seq_count_owned_primary_items(others[i])
+  end
+  -- Pruning only touches each region's own items, so count all regions in
+  -- one scan afterwards instead of rescanning every track per region.
+  local owned_counts = seq_count_owned_primary_items_by_region()
+  for i = 1, #others do
+    local item_n = owned_counts[others[i].id] or 0
     local note_n = seq_region_expected_primary_notes(others[i])
     if item_n ~= note_n then
       rebuild[#rebuild + 1] = others[i]
@@ -34378,6 +34383,27 @@ function seq_count_owned_primary_items(region)
   return n
 end
 
+-- Same counting as seq_count_owned_primary_items, for every region in one pass:
+-- region_id -> number of owned non-aux items on the slots' target tracks.
+function seq_count_owned_primary_items_by_region()
+  local counts = {}
+  for _, slot in ipairs(state.seq_tracks or {}) do
+    local tr = get_seq_slot_target_track(slot)
+    if tr then
+      for i = 0, r.CountTrackMediaItems(tr) - 1 do
+        local item = r.GetTrackMediaItem(tr, i)
+        if item and not seq_item_is_aux_piece(item) and seq_item_is_owned(item) then
+          local rid = tonumber(get_item_ext(item, SEQ_EXT_REGION) or "")
+          if rid then
+            counts[rid] = (counts[rid] or 0) + 1
+          end
+        end
+      end
+    end
+  end
+  return counts
+end
+
 function seq_region_expected_primary_notes(region)
   local n = 0
   if not region then
@@ -34418,6 +34444,7 @@ function seq_regions_for_ingest()
     out[selected.id] = selected
   end
   local sel_count = r.CountSelectedMediaItems and r.CountSelectedMediaItems(0) or 0
+  local sel_linked = nil
   for i = 0, sel_count - 1 do
     local item = r.GetSelectedMediaItem(0, i)
     if item and seq_item_is_parent_marker(item) then
@@ -34430,13 +34457,8 @@ function seq_regions_for_ingest()
       local tr = r.GetMediaItemTrack and r.GetMediaItemTrack(item)
       local on_seq = false
       if tr then
-        local guid = r.GetTrackGUID(tr)
-        for _, slot in ipairs(state.seq_tracks or {}) do
-          if slot.reaper_track_guid and slot.reaper_track_guid == guid then
-            on_seq = true
-            break
-          end
-        end
+        sel_linked = sel_linked or seq_linked_track_guid_set()
+        on_seq = sel_linked[r.GetTrackGUID(tr)] == true
       end
       if on_seq then
         if seq_item_is_owned(item) then
@@ -34524,8 +34546,9 @@ function seq_regions_for_ingest()
     out[id] = region
   end
   local mismatch = {}
+  local owned_counts = seq_count_owned_primary_items_by_region()
   for _, region in pairs(out) do
-    mismatch[region.id] = seq_count_owned_primary_items(region) ~= seq_region_expected_primary_notes(region)
+    mismatch[region.id] = (owned_counts[region.id] or 0) ~= seq_region_expected_primary_notes(region)
   end
   local best = {}
   for _, region in pairs(out) do
