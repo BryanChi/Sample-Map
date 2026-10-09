@@ -850,6 +850,7 @@ local function refresh_scan_folder_availability()
 
   if new_sig ~= prev_sig then
     seq_path_exists_cache = {}
+    seq_sample_len_sec_cache = {}
     state.map_availability_epoch = (state.map_availability_epoch or 0) + 1
     local missing_names = {}
     for folder in pairs(missing_folders) do
@@ -23275,13 +23276,15 @@ function seq_set_parent_item_image_chunk(item, path, flags)
   flags = flags or SEQ_PARENT_IMAGE_FLAGS
   local line = string.format('RESOURCEFN "%s"', path)
   local flag_line = string.format("IMGRESOURCEFLAGS %d", flags)
+  -- gsub replacement strings treat % specially; escape it for paths like "100%".
+  local line_repl = line:gsub("%%", "%%%%")
   if chunk:find("RESOURCEFN%s+", 1) then
-    chunk = chunk:gsub('RESOURCEFN%s+"[^"]*"', line, 1)
+    chunk = chunk:gsub('RESOURCEFN%s+"[^"]*"', line_repl, 1)
     if chunk:find("RESOURCEFN%s+[^\"\r\n]+", 1) and not chunk:find(line, 1, true) then
-      chunk = chunk:gsub("RESOURCEFN%s+[^\r\n]+", line, 1)
+      chunk = chunk:gsub("RESOURCEFN%s+[^\r\n]+", line_repl, 1)
     end
   elseif chunk:find("\n>%s*$") then
-    chunk = chunk:gsub("\n>%s*$", "\n" .. line .. "\n" .. flag_line .. "\n>\n")
+    chunk = chunk:gsub("\n>%s*$", "\n" .. line_repl .. "\n" .. flag_line .. "\n>\n")
   else
     chunk = chunk .. line .. "\n" .. flag_line .. "\n"
   end
@@ -26378,8 +26381,27 @@ function seq_ensure_take_volume_envelope(take)
     local src_at = chunk:find("<SOURCE", 1, true)
     local insert_at = nil
     if src_at then
-      local close_at = chunk:find("\n>", src_at, true)
-      if close_at then insert_at = close_at + 2 end
+      -- Walk lines counting nested "<..." / ">" so a <SOURCE SECTION> that
+      -- wraps an inner <SOURCE WAVE> closes at its own matching ">".
+      local depth = 0
+      local pos = src_at
+      local len = #chunk
+      while pos <= len do
+        local nl = chunk:find("\n", pos, true)
+        local line_end = nl and (nl - 1) or len
+        local trimmed = chunk:sub(pos, line_end):match("^%s*(.-)%s*$") or ""
+        if trimmed:sub(1, 1) == "<" then
+          depth = depth + 1
+        elseif trimmed == ">" then
+          depth = depth - 1
+          if depth <= 0 then
+            if nl then insert_at = nl end
+            break
+          end
+        end
+        if not nl then break end
+        pos = nl + 1
+      end
     end
     if not insert_at then
       local last = nil
@@ -27378,6 +27400,7 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
   max_v = max_v or 1.0
   if max_v <= min_v then max_v = min_v + 1.0 end
   value = math.max(min_v, math.min(max_v, value or min_v))
+  local entry_value = value
 
   r.ImGui_SetCursorScreenPos(ctx, x, y)
   r.ImGui_InvisibleButton(ctx, id, w, h)
@@ -27436,7 +27459,8 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
       value = (drag.start_value or value) - drag_y * sensitivity
       value = math.max(min_v, math.min(max_v, value))
     end
-    changed = true
+    -- Only report a change when the value actually moved this frame.
+    changed = math.abs(value - entry_value) > (max_v - min_v) * 1e-7
   elseif state.seq_rect_drag and state.seq_rect_drag.id == id then
     state.seq_rect_drag = nil
   end
@@ -29530,6 +29554,7 @@ function seq_layering_insert_mix_at_position(sample, time_pos, target_track)
     local piece = pieces[i]
     if piece.path and r.file_exists(piece.path) then
       local item = r.AddMediaItemToTrack(track)
+      local item_ok = false
       if item then
         local src_sample = piece.sample or find_sample_by_path(piece.path)
         local pdur = (seq_sample_source_length_sec and seq_sample_source_length_sec(piece.path, src_sample))
@@ -29558,7 +29583,12 @@ function seq_layering_insert_mix_at_position(sample, time_pos, target_track)
             seq_item_apply_layer_fades(item, piece.fade_in, piece.fade_out)
             rebuild_peaks_for_item(item)
             any = true
+            item_ok = true
           end
+        end
+        if not item_ok and r.DeleteTrackMediaItem then
+          -- Source failed to load: don't leave an empty item behind.
+          r.DeleteTrackMediaItem(track, item)
         end
       end
     end
@@ -31320,34 +31350,45 @@ function seq_sample_source_length_sec(path, sample)
   if not path or path == "" then
     return nil
   end
+  -- Only successful lookups are cached; failures (offline/unreadable files)
+  -- are retried, and the cache is cleared when folder availability changes.
   local cached = seq_sample_len_sec_cache[path]
-  if cached ~= nil then
-    return cached > 0 and cached or nil
+  if cached ~= nil and cached > 0 then
+    return cached
   end
   if not seq_path_exists(path) then
-    seq_sample_len_sec_cache[path] = 0
     return nil
   end
   local src = r.PCM_Source_CreateFromFile(path)
   if not src then
-    seq_sample_len_sec_cache[path] = 0
     return nil
   end
   local length_sec = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
   if r.PCM_Source_Destroy then
     r.PCM_Source_Destroy(src)
   end
-  seq_sample_len_sec_cache[path] = length_sec or 0
-  if length_sec > 0 then
+  if length_sec and length_sec > 0 then
+    seq_sample_len_sec_cache[path] = length_sec
     return length_sec
   end
   return nil
 end
 
-function seq_sample_length_qn(path, sample)
+-- at_qn (optional): project QN where the sample starts; converts through the
+-- tempo map at that position instead of assuming the tempo at QN 0.
+function seq_sample_length_qn(path, sample, at_qn)
   local length_sec = seq_sample_source_length_sec(path, sample)
   if not length_sec or length_sec <= 0 then
     return nil
+  end
+  if type(at_qn) == "number" and r.TimeMap2_timeToQN then
+    local t0 = qn_to_time(at_qn)
+    if t0 then
+      local end_qn = r.TimeMap2_timeToQN(0, t0 + length_sec)
+      if end_qn and end_qn > at_qn then
+        return end_qn - at_qn
+      end
+    end
   end
   local sec_per = seq_sec_per_qn
   if not sec_per or sec_per <= 0 then
@@ -31471,8 +31512,8 @@ end
 
 -- Remaining source after Start, then Stretch can shrink it but not grow past
 -- the unstretched remaining length (so a longer stretch never pushes the end).
-function seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx)
-  local src_qn = seq_sample_length_qn(path, sample)
+function seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx, at_qn)
+  local src_qn = seq_sample_length_qn(path, sample, at_qn)
   if not src_qn or src_qn <= 0 then
     return length_qn
   end
@@ -31485,11 +31526,11 @@ function seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx)
   return math.min(length_qn, math.max(0.001, cap))
 end
 
-function seq_cap_length_to_sample_qn(length_qn, path, sample, note, hit_idx)
+function seq_cap_length_to_sample_qn(length_qn, path, sample, note, hit_idx, at_qn)
   if note then
-    return seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx)
+    return seq_source_play_cap_qn(length_qn, path, sample, note, hit_idx, at_qn)
   end
-  local cap_qn = seq_sample_length_qn(path, sample)
+  local cap_qn = seq_sample_length_qn(path, sample, at_qn)
   if cap_qn and cap_qn > 0 then
     return math.min(length_qn, cap_qn)
   end
@@ -31582,7 +31623,8 @@ function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx,
     return seq_cap_length_to_sample_qn(slice_qn * 0.98, resolved_path, resolved_sample, note)
   end
 
-  local sample_qn = seq_sample_length_qn(resolved_path, resolved_sample)
+  local at_qn = region and step_idx ~= nil and seq_note_trigger_qn(region, step_idx, note, grid_qn) or nil
+  local sample_qn = seq_sample_length_qn(resolved_path, resolved_sample, at_qn)
   if not sample_qn or sample_qn <= 0 then
     sample_qn = grid_qn
   end
@@ -31590,7 +31632,7 @@ function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx,
   -- length_qn (one grid cell) which is only a stutter-span placeholder.
   local decay_qn = tonumber(note and note.decay_qn)
   if type(decay_qn) == "number" and decay_qn > 1e-9 then
-    return seq_cap_length_to_sample_qn(math.max(grid_qn * 0.05, decay_qn), resolved_path, resolved_sample, note)
+    return seq_cap_length_to_sample_qn(math.max(grid_qn * 0.05, decay_qn), resolved_path, resolved_sample, note, nil, at_qn)
   end
   -- Default: full effective length, cropped so it does not overlap the next hit.
   -- Per-track overlap lets the sample ring out over later notes, unless a
@@ -31603,7 +31645,7 @@ function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx,
   end
   -- Auto sustain stays inside the region. Explicit decay_qn may cross it.
   sample_qn = seq_cap_length_to_region_end_qn(sample_qn, region, step_idx, note, grid_qn)
-  return seq_cap_length_to_sample_qn(sample_qn, resolved_path, resolved_sample, note)
+  return seq_cap_length_to_sample_qn(sample_qn, resolved_path, resolved_sample, note, nil, at_qn)
 end
 
 SEQ_FADE_SHAPE_COUNT = 7
@@ -42017,6 +42059,7 @@ function seq_delete_notes_in_razors()
                 if toggle_seq_note(region, slot, rec.key, rec.qn, "erase", {
                   defer_save = true,
                   defer_arrange = true,
+                  defer_sync = true,
                 }) then
                   changed = true
                   synced[region.pattern_id] = true
@@ -42028,11 +42071,14 @@ function seq_delete_notes_in_razors()
       end
     end
   end
-  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+  -- One full resync per touched pattern, inside the PreventUIRefresh block.
   if changed then
     for pattern_id in pairs(synced) do
       sync_seq_pattern_regions(pattern_id)
     end
+  end
+  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+  if changed then
     r.UpdateArrange()
     save_config()
   end
