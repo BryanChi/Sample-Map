@@ -2808,7 +2808,10 @@ function save_seq_project_state(proj)
   end
   local ok, serialized = pcall(json_encode, build_seq_project_state_payload())
   if ok and type(serialized) == "string" then
-    pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER, serialized)
+    local set_ok = pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER, serialized)
+    if set_ok then
+      state.seq_last_ext_state = serialized
+    end
   end
 end
 
@@ -2826,6 +2829,7 @@ function load_seq_project_state(proj)
       if parse_ok and type(cfg) == "table" then
         apply_seq_project_state(cfg)
         loaded = true
+        state.seq_last_ext_state = serialized
       end
     end
   end
@@ -2847,9 +2851,32 @@ function sync_project_state_if_needed()
     -- Project is closing or none is active; keep in-memory state.
     return
   end
-  local token = tostring(proj)
+  -- REAPER can reuse a ReaProject pointer when another project is opened in the
+  -- same tab, so the project file path is part of the identity.
+  local proj_fn = ""
+  if r.EnumProjects then
+    local cur, fn = r.EnumProjects(-1, "")
+    if cur == proj and type(fn) == "string" then
+      proj_fn = fn
+    end
+  end
+  local token = tostring(proj) .. "|" .. proj_fn
   if loaded_project_token ~= token then
-    if is_valid_project(loaded_project) then
+    local same_pointer = loaded_project ~= nil and tostring(loaded_project) == tostring(proj)
+    if same_pointer and r.GetProjExtState then
+      -- Same pointer, new path: either "Save As" of this project, or another
+      -- project opened into this tab. If the project still holds exactly what we
+      -- last wrote/read, it is the same project: keep the in-memory state.
+      local _, ext = r.GetProjExtState(proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER)
+      if type(ext) == "string" and ext ~= "" and ext == state.seq_last_ext_state then
+        save_seq_project_state(proj)
+        loaded_project = proj
+        loaded_project_token = token
+        return
+      end
+    end
+    -- Never write the old state into a pointer that may now be another project.
+    if is_valid_project(loaded_project) and not same_pointer then
       save_seq_project_state(loaded_project)
     end
     load_seq_project_state(proj)
