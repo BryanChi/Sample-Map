@@ -17866,6 +17866,7 @@ function seq_undo_is_open()
 end
 
 function seq_undo_clear_history()
+  state.seq_pattern_confirm = nil
   seq_undo_stack = {}
   seq_redo_stack = {}
   seq_undo_session = nil
@@ -17949,6 +17950,7 @@ function restore_seq_document_snapshot(snap)
   state.seq_env_graph_drag = nil
   state.seq_razor_drag = nil
   state.seq_track_reorder_drag = nil
+  state.seq_pattern_confirm = nil
   seq_undo_commit_on_release = false
   if seq_normalize_slot_mix then
     for _, slot in ipairs(state.seq_tracks) do
@@ -18203,6 +18205,11 @@ function begin_seq_undo(label)
   if seq_undo_session then
     return seq_undo_session.label or label
   end
+  if state.seq_pattern_confirm and seq_undo_label_is_manual_note_edit(label) then
+    -- A manual note edit keeps the auditioned pattern; reverting afterwards
+    -- would silently discard the user's edit.
+    state.seq_pattern_confirm = nil
+  end
   -- Capture under xpcall: a failure must not leave a half-open session.
   local ok, before = xpcall(seq_undo_capture_before_snapshot, function(e)
     return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e)
@@ -18220,6 +18227,14 @@ function begin_seq_undo(label)
   }
   seq_undo_begin_reaper()
   return label
+end
+
+function seq_undo_label_is_manual_note_edit(label)
+  local l = string.lower(tostring(label or ""))
+  return l:find("note", 1, true) ~= nil
+    or l:find("stutter", 1, true) ~= nil
+    or l:find("decay", 1, true) ~= nil
+    or l:find("cells", 1, true) ~= nil
 end
 
 -- Snapshots are never mutated after capture (restore clones field-by-field),
@@ -35119,6 +35134,11 @@ function delete_selected_seq_region()
   if not pattern_still_used then
     state.seq_patterns[tostring(region.pattern_id)] = nil
   end
+  local pending_confirm = state.seq_pattern_confirm
+  if pending_confirm and (pending_confirm.region_id == region.id
+      or tostring(pending_confirm.pattern_id) == tostring(region.pattern_id)) then
+    state.seq_pattern_confirm = nil
+  end
 
   if #state.seq_regions == 0 then
     state.selected_seq_region_id = nil
@@ -38527,16 +38547,29 @@ end
 -- state that exmizisted before the user started auditioning patterns.
 function seq_pattern_confirm_capture(region)
   if not region then return end
-  if state.seq_pattern_confirm and state.seq_pattern_confirm.active then
+  local c = state.seq_pattern_confirm
+  if c and c.active and tostring(c.pattern_id) == tostring(region.pattern_id)
+      and c.proj == seq_pattern_confirm_current_proj() then
     return
   end
+  -- A different pattern (or project) starts a new confirmation session;
+  -- the previous audition is implicitly kept.
   local key = tostring(region.pattern_id)
   state.seq_pattern_confirm = {
     active = true,
     region_id = region.id,
     pattern_id = region.pattern_id,
+    proj = seq_pattern_confirm_current_proj(),
     snapshot = clone_table_deep(state.seq_patterns[key]),
   }
+end
+
+function seq_pattern_confirm_current_proj()
+  if r.EnumProjects then
+    local proj = r.EnumProjects(-1)
+    return proj
+  end
+  return nil
 end
 
 function seq_pattern_confirm_commit()
@@ -38546,6 +38579,10 @@ end
 function seq_pattern_confirm_restore()
   local c = state.seq_pattern_confirm
   if not c then return end
+  if c.proj ~= seq_pattern_confirm_current_proj() then
+    state.seq_pattern_confirm = nil
+    return
+  end
   local key = tostring(c.pattern_id)
   local label = begin_seq_undo("Revert pattern changes")
   if c.snapshot == nil then
