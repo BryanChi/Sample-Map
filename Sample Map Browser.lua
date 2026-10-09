@@ -23865,19 +23865,51 @@ function seq_region_native_color(region)
   return 0
 end
 
-function seq_find_item_by_guid(guid)
-  if not guid or guid == "" then
-    return nil, nil
-  end
+-- GUID -> item map built lazily by one project scan. Hits are validated
+-- (pointer still valid and GUID unchanged); a miss or stale hit rebuilds the
+-- map, so a lookup never costs more than one scan. Validation makes hits safe
+-- across edits, so the map is not dropped on every project change (pool sync
+-- edits items between lookups); it is dropped when the active project changes.
+seq_item_guid_lookup_cache = nil
+
+function seq_item_guid_lookup_rebuild()
+  local map = {}
   local n = r.CountTracks(0)
   for tr_idx = 0, n - 1 do
     local tr = r.GetTrack(0, tr_idx)
     for item_idx = 0, r.CountTrackMediaItems(tr) - 1 do
       local item = r.GetTrackMediaItem(tr, item_idx)
-      if item and seq_item_guid(item) == guid then
-        return item, tr
+      local g = item and seq_item_guid(item)
+      if g and map[g] == nil then
+        map[g] = item
       end
     end
+  end
+  seq_item_guid_lookup_cache = {
+    map = map,
+    proj = r.EnumProjects and r.EnumProjects(-1) or nil,
+  }
+  return map
+end
+
+function seq_find_item_by_guid(guid)
+  if not guid or guid == "" then
+    return nil, nil
+  end
+  local cache = seq_item_guid_lookup_cache
+  if cache and r.EnumProjects and cache.proj ~= r.EnumProjects(-1) then
+    cache = nil
+  end
+  if cache then
+    local item = cache.map[guid]
+    if item and (not r.ValidatePtr2 or r.ValidatePtr2(0, item, "MediaItem*"))
+        and seq_item_guid(item) == guid then
+      return item, r.GetMediaItem_Track(item)
+    end
+  end
+  local item = seq_item_guid_lookup_rebuild()[guid]
+  if item then
+    return item, r.GetMediaItem_Track(item)
   end
   return nil, nil
 end
