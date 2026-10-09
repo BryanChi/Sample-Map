@@ -397,6 +397,58 @@ local FILES_TO_UPDATE = {
   { url = "Effects/SampleMapPlayer.jsfx", dest = "Effects/SampleMapPlayer.jsfx", resource = true },
   { url = "Effects/SampleMapPreview.jsfx", dest = "Effects/SampleMapPreview.jsfx", resource = true },
 }
+-- The browser's modules (browser/*.lua), as listed by the running "Sample Map Browser.lua".
+-- A release that adds modules is completed by SampleMapFetchFilesSync on its first start.
+for _, name in ipairs(SAMPLE_MAP_BROWSER_MODULES or {}) do
+  FILES_TO_UPDATE[#FILES_TO_UPDATE + 1] = { url = "browser/" .. name }
+end
+
+-- Synchronously download files (paths relative to the repo root) into the script
+-- folder from the installed version's revision. Used by the loader when a module
+-- is missing, e.g. after updating with an older updater that didn't know about them.
+-- Returns true, or false and an error message.
+function SampleMapFetchFilesSync(rel_paths)
+  local tag, sha = read_version_file()
+  local ref = SAMPLE_MAP_UPDATE_REPO.branch
+  if type(sha) == "string" and sha:match("^%x+$") and #sha >= 7 then
+    ref = sha
+  elseif tag and tag ~= "" then
+    ref = tag
+  end
+  local base = string.format("https://raw.githubusercontent.com/%s/%s/%s",
+    SAMPLE_MAP_UPDATE_REPO.user, SAMPLE_MAP_UPDATE_REPO.repo, ref)
+  local dir = script_dir()
+  if dir == "" then
+    return false, "unknown script folder"
+  end
+  for _, rel in ipairs(rel_paths) do
+    local dest = normalize_path(dir .. "/" .. rel)
+    local tmp = dest .. ".new"
+    ensure_dir(dir_of(dest))
+    os.remove(tmp)
+    -- ExecProcess runs the command directly on Windows (no batch % expansion).
+    local q = is_windows() and function(v) return '"' .. tostring(v):gsub('"', "") .. '"' end or bg_quote
+    local cmd = string.format('%s -L -f -s -S --connect-timeout 10 --max-time 60 -o %s %s',
+      curl_bin(), q(tmp), q(base .. "/" .. url_encode(rel)))
+    local out = r.ExecProcess(cmd, 70000) or ""
+    local rc = tonumber(out:match("^(%-?%d+)"))
+    local data = rc == 0 and read_file(tmp) or nil
+    if not data or data == "" then
+      os.remove(tmp)
+      return false, rel .. ": download failed (" .. (out:gsub("%s+$", "")) .. ")"
+    end
+    if rel:match("%.lua$") and not load(data, "@" .. rel, "t") then
+      os.remove(tmp)
+      return false, rel .. ": downloaded file is not valid Lua"
+    end
+    os.remove(dest)
+    local ok, err = os.rename(tmp, dest)
+    if not ok then
+      return false, rel .. ": " .. tostring(err)
+    end
+  end
+  return true
+end
 
 -- --- Update check (asynchronous) ---------------------------------------------
 
