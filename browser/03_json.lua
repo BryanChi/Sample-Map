@@ -189,9 +189,27 @@ function json_decode(str)
     end
   end
 
+  -- Non-finite numbers written by older versions (tostring: nan, -nan(ind), inf)
+  -- or by Python (NaN, Infinity) decode as nil, like a null.
+  local NONFINITE = { "-Infinity", "Infinity", "NaN", "-nan", "nan", "-inf", "inf" }
+  local function parse_nonfinite()
+    for _, lit in ipairs(NONFINITE) do
+      if sub(str, pos, pos + #lit - 1) == lit then
+        pos = pos + #lit
+        local _, e = find(str, "^%(%a*%)", pos)
+        if e then pos = e + 1 end
+        return true
+      end
+    end
+    return false
+  end
+
   parse_value = function()
     skip_ws()
     local b = byte(str, pos)
+    if (b == 45 or b == 73 or b == 78 or b == 105 or b == 110) and parse_nonfinite() then
+      return nil
+    end
     if b == 123 then
       return parse_object()
     elseif b == 91 then

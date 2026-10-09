@@ -237,7 +237,8 @@ function seq_env_build_wave_peaks(path, width)
       return nil, nil
     end
     if r.PCM_Source_BuildPeaks and r.PCM_Source_BuildPeaks(src, 0) ~= 0 then
-      local deadline = r.time_precise() + 0.5
+      -- Bounded busy-wait on the UI thread; a slow build is retried later.
+      local deadline = r.time_precise() + 0.15
       while r.PCM_Source_BuildPeaks(src, 1) ~= 0 do
         if r.time_precise() > deadline then break end
       end
@@ -308,13 +309,15 @@ function seq_env_get_wave_peaks(sample, width)
   local build_w = 256
   local peaks, duration = nil, nil
   local now = r.time_precise()
+  -- After three failed builds the file is not retried this session.
   local recently_failed = cached and cached.failed
-      and (now - (cached.at or 0)) >= 0 and (now - (cached.at or 0)) < 30.0
+      and ((cached.fails or 1) >= 3 or ((now - (cached.at or 0)) >= 0 and (now - (cached.at or 0)) < 30.0))
   if not recently_failed then
     peaks, duration = seq_env_build_wave_peaks(sample.path, build_w)
     if not peaks or not duration or duration <= 0 then
       peaks, duration = nil, nil
-      seq_env_wave_cache[sample.path] = { failed = true, at = now }
+      local fails = ((cached and cached.failed and cached.fails) or 0) + 1
+      seq_env_wave_cache[sample.path] = { failed = true, at = now, fails = fails }
     end
   end
   if not peaks

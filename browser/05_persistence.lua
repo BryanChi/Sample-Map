@@ -284,6 +284,7 @@ end
 function load_seq_project_state(proj)
   proj = proj or get_current_project()
   reset_seq_project_state()
+  state.seq_last_ext_state = nil
   if not is_valid_project(proj) then
     return
   end
@@ -334,7 +335,10 @@ function sync_project_state_if_needed()
       -- project opened into this tab. If the project still holds exactly what we
       -- last wrote/read, it is the same project: keep the in-memory state.
       local _, ext = r.GetProjExtState(proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER)
-      if type(ext) == "string" and ext ~= "" and ext == state.seq_last_ext_state then
+      -- An untitled project saved for the first time may not hold any state yet.
+      local was_untitled = type(loaded_project_token) == "string" and loaded_project_token:match("|$") ~= nil
+      if type(ext) == "string" and ((ext ~= "" and ext == state.seq_last_ext_state)
+          or (ext == "" and was_untitled)) then
         save_seq_project_state(proj)
         loaded_project = proj
         loaded_project_token = token
@@ -830,7 +834,10 @@ function run_external_analyzer(path)
   end
 
   local t3 = r.time_precise()
-  local success, data = pcall(json_decode, output)
+  -- stderr is merged in; decode only the JSON object so warnings don't spoil it.
+  local json_s, json_e = output:find("{", 1, true), output:match(".*()}")
+  local json_text = (json_s and json_e and json_e > json_s) and output:sub(json_s, json_e) or output
+  local success, data = pcall(json_decode, json_text)
   local parse_time = (r.time_precise() - t3) * 1000
   
   local total_analyzer_time = (r.time_precise() - analyzer_start) * 1000
@@ -1067,6 +1074,8 @@ function start_analyzer_worker(slot)
   }, " ")
   local log_path = dir .. "/worker_" .. tostring(slot) .. ".log"
   os.remove(dir .. "/quit_" .. tostring(slot))
+  -- A killed worker never removes its pid file; a stale one would read as alive.
+  os.remove(dir .. "/pid_" .. tostring(slot))
   local pipe = io.popen(sm_shell_cmd(cmd .. " 2>> " .. shell_escape(log_path)), "r")
   if not pipe then
     return nil

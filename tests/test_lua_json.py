@@ -45,3 +45,10 @@ def test_round_trip():
       return t.name == src.name and t.n == 1.5 and t.flag == true and t.list[2] == "y"
     end''')
     assert rt()
+
+
+def test_decode_non_finite_numbers_as_nil():
+    L = _runtime()
+    check = L.eval('function(s) local t = json_decode(s) return t ~= nil, t and t.a, t and t.b, t and t.list[3] end')
+    ok, a, b, third = check('{"a": nan, "b": 2, "c": -nan(ind), "d": inf, "e": NaN, "f": -Infinity, "list": [1, -inf, 3]}')
+    assert ok and a is None and b == 2 and third == 3
