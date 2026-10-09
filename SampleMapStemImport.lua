@@ -212,24 +212,6 @@ function SampleMapStemImport.load_tempo_lib()
       loaded_ok = true
     end
   end
-  -- #region agent log
-  do
-    local f = io.open("/Users/b/Library/Application Support/REAPER/Scripts/Sample Map/.cursor/debug-6cdc3e.log", "a")
-    if f then
-      local ts = math.floor(((r.time_precise and r.time_precise()) or 0) * 1000)
-      f:write(string.format(
-        '{"sessionId":"6cdc3e","hypothesisId":"D","location":"SampleMapStemImport.load_tempo_lib","message":"%s","timestamp":%d,"data":{"cached":%s,"ok":%s,"path":"%s","err":"%s","ver":3}}\n',
-        loaded_ok and "loaded" or "failed",
-        ts,
-        already and "true" or "false",
-        loaded_ok and "true" or "false",
-        tempo_path:gsub("\\", "\\\\"):gsub('"', '\\"'),
-        tostring(err_s):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n")
-      ))
-      f:close()
-    end
-  end
-  -- #endregion
   if loaded_ok then
     return true
   end
@@ -680,35 +662,6 @@ function SampleMapStemImport.merge_close_hits(onsets, key)
       end
     end
   end
-  -- #region agent log
-  if seq_debug_ndjson then
-    seq_debug_ndjson("H1", "seq_stem_merge_close_hits", "merge", {
-      key = tostring(key or ""),
-      raw_n = #sorted,
-      out_n = #out,
-      merged = merged,
-      close_n = close_n,
-      gap = gap,
-      min_dt = min_dt,
-      out_min = out_min,
-    })
-    if key == "kick" and seq_debug_pack_close_hits then
-      local pre_n, pre_s = seq_debug_pack_close_hits(sorted, 0.18, 12)
-      local post_n, post_s = seq_debug_pack_close_hits(out, 0.18, 12)
-      seq_debug_ndjson("A", "seq_stem_merge_close_hits", "kick_pairs", {
-        pre_n = pre_n,
-        post_n = post_n,
-        raw_n = #sorted,
-        out_n = #out,
-        gap = gap,
-        weak_gap = weak_gap,
-        weak_frac = weak_frac,
-        pre = pre_s,
-        post = post_s,
-      })
-    end
-  end
-  -- #endregion
   return out, merged, min_dt
 end
 
@@ -1001,20 +954,6 @@ function SampleMapStemImport.selected_item_audio()
   local _, take_name = r.GetSetMediaItemTakeInfo_String(take, "P_NAME", "", false)
   local name = (take_name and take_name ~= "" and take_name)
     or basename_no_ext(path)
-  -- #region agent log
-  do
-    local f = io.open("/Users/b/Library/Application Support/REAPER/Scripts/Sample Map/.cursor/debug-6cdc3e.log", "a")
-    if f then
-      f:write(string.format(
-        '{"sessionId":"6cdc3e","hypothesisId":"E","location":"SampleMapStemImport.selected_item_audio","message":"selected item","timestamp":%d,"data":{"start":%.6f,"item_len":%.6f,"playrate":%.6f,"duration":%.6f,"place_time":%.6f,"path":"%s"}}\n',
-        math.floor((r.time_precise() or 0) * 1000),
-        start_off or 0, item_len or 0, playrate or 1, duration or 0, place_time or 0,
-        tostring(path or ""):gsub("\\", "/"):match("([^/]+)$") or ""
-      ))
-      f:close()
-    end
-  end
-  -- #endregion
   return {
     path = path,
     start = math.max(0.0, start_off),

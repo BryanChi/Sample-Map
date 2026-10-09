@@ -391,6 +391,7 @@ local FILES_TO_UPDATE = {
   { url = "SampleMapAnalyzer.py" },
   { url = "SampleMapDrumAI.py" },
   { url = "SampleMapGrooveMIDI.py" },
+  { url = "tag_presets.default.lua" },
   { url = "SampleMapUpdate.lua", required = true },
   { url = "Effects/SampleMapMIDI.jsfx", dest = "Effects/SampleMapMIDI.jsfx", resource = true },
   { url = "Effects/SampleMapPlayer.jsfx", dest = "Effects/SampleMapPlayer.jsfx", resource = true },
