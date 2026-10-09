@@ -9120,8 +9120,22 @@ function imgui_window_right_x()
   return win_x + win_w - (pad_x or 8)
 end
 
--- ReaImGui auto-calls EndChild when BeginChild returns false (clipped/collapsed).
--- Only EndChild when the matching BeginChild returned true.
+-- Child border flag: ReaImGui 0.9.2+ names it ChildFlags_Borders, older
+-- builds ChildFlags_Border. Both are functions and must be called.
+function sm_child_border_flag()
+  local getter = r.ImGui_ChildFlags_Borders or r.ImGui_ChildFlags_Border
+  if type(getter) == "function" then
+    local ok, v = pcall(getter)
+    if ok and type(v) == "number" then
+      return v
+    end
+  end
+  return 0
+end
+
+-- ReaImGui convention (0.9+), used for every window/child in this script:
+-- End()/EndChild() only when the matching Begin()/BeginChild() returned true
+-- (see also end_window()).
 function imgui_end_child(opened)
   if opened then
     -- Trailing SetCursorScreenPos() without an item asserts on EndChild.
@@ -14760,9 +14774,6 @@ function render_seq_neighbor_popup()
     if r.ImGui_PopStyleVar then
       pcall(r.ImGui_PopStyleVar, ctx, 1)
     end
-    if began_ok then
-      pcall(r.ImGui_End, ctx)
-    end
     return
   end
 
@@ -15591,7 +15602,6 @@ function render_seq_minimap_popup()
     return
   end
   if not visible then
-    r.ImGui_End(ctx)
     pop_minimap_alpha()
     return
   end
@@ -15950,7 +15960,6 @@ function render_preview_history_popup()
     return
   end
   if not visible then
-    r.ImGui_End(ctx)
     pop_hist_style()
     return
   end
@@ -19335,8 +19344,8 @@ function render_seq_region_name_suggest_popup(edit_x, edit_y, edit_w)
     if chosen then
       seq_commit_region_rename(chosen)
     end
+    r.ImGui_End(ctx)
   end
-  r.ImGui_End(ctx)
   if style_cols > 0 then
     r.ImGui_PopStyleColor(ctx, style_cols)
   end
@@ -22447,8 +22456,8 @@ function seq_render_random_flyout(dl, pattern, host)
         f.force_below = true
       end
       changed, active = seq_render_random_flyout_body(fdl, f.kind, settings, body_id, x0, y0, w)
+      r.ImGui_End(ctx)
     end
-    r.ImGui_End(ctx)
     if style_vars > 0 then
       r.ImGui_PopStyleVar(ctx, style_vars)
     end
@@ -28874,7 +28883,7 @@ function render_seq_env_editor_popup()
     end
   end
 
-  r.ImGui_End(ctx)
+  end_window(visible, true)
   if style_vars > 0 then r.ImGui_PopStyleVar(ctx, style_vars) end
   if style_colors > 0 then r.ImGui_PopStyleColor(ctx, style_colors) end
   return changed and true or false
@@ -39954,7 +39963,7 @@ function render_seq_pattern_popup(region)
     render_seq_pattern_variations_popup(region)
   end
 
-  r.ImGui_End(ctx)
+  end_window(visible, true)
 end
 
 function render_seq_pattern_variation_row(region, style_key, entry)
@@ -46021,7 +46030,7 @@ function seq_stem_import_render_dialog()
       seq_stem_import_commit_dialog()
     end
   end
-  r.ImGui_End(ctx)
+  end_window(visible, true)
   if open == false then
     seq_stem_import_close_dialog()
   end
@@ -46410,7 +46419,7 @@ function render_sequencer_map()
   local map_body_h = rows_h + add_track_row_h
 
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then child_flags = r.ImGui_ChildFlags_Border end
+  child_flags = sm_child_border_flag()
   local no_scroll_flags = r.ImGui_WindowFlags_NoScrollbar() | r.ImGui_WindowFlags_NoScrollWithMouse()
   if not r.ImGui_BeginChild(ctx, "sequencer_map_area", 0, math.max(0, avail_y), child_flags, no_scroll_flags) then
     state.seq_link_hover_region_id = nil
@@ -47200,7 +47209,7 @@ function render_sequencer_map()
   end
 
   if not r.ImGui_BeginChild(ctx, "sequencer_map_tracks", 0, math.max(0, tracks_avail_y), child_flags) then
-    r.ImGui_EndChild(ctx)
+    -- Tracks child did not open (no EndChild for it); close sequencer_map_area.
     r.ImGui_Dummy(ctx, 0, 0)
     r.ImGui_EndChild(ctx)
     return
@@ -50351,9 +50360,7 @@ end
 
 function explorer_render_tree()
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then
-    child_flags = r.ImGui_ChildFlags_Border
-  end
+  child_flags = sm_child_border_flag()
   local _, after_toolbar = r.ImGui_GetContentRegionAvail(ctx)
   local tree_h = math.max(80, after_toolbar - 6)
 
@@ -50366,8 +50373,8 @@ function explorer_render_tree()
       explorer_render_clipped_rows(rows)
     end
     r.ImGui_PopStyleVar(ctx)
+    r.ImGui_EndChild(ctx)
   end
-  r.ImGui_EndChild(ctx)
 end
 
 function render_explorer_content()
@@ -50464,9 +50471,7 @@ function render_explorer_docked_panel(height)
     return
   end
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then
-    child_flags = r.ImGui_ChildFlags_Border
-  end
+  child_flags = sm_child_border_flag()
   local w = explorer_dock_width()
   if r.ImGui_BeginChild(ctx, "explorer_dock", w, math.max(0, height or 0), child_flags) then
     r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 6, 4)
@@ -50484,8 +50489,8 @@ function render_explorer_docked_panel(height)
     end
     r.ImGui_PopStyleVar(ctx)
     render_explorer_content()
+    r.ImGui_EndChild(ctx)
   end
-  r.ImGui_EndChild(ctx)
 end
 
 function render_view_tab_switcher()
@@ -51866,9 +51871,7 @@ function render_filter_input()
   local input_width = math.max(min_input_width, filter_width - icon_pad - trailing_width(used_width) - right_pad)
 
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then
-    child_flags = r.ImGui_ChildFlags_Border
-  end
+  child_flags = sm_child_border_flag()
   local child_window_flags = r.ImGui_WindowFlags_NoScrollbar() | r.ImGui_WindowFlags_NoScrollWithMouse()
 
   r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_WindowPadding(), 0, 0)
@@ -52462,7 +52465,7 @@ function settings_render_scan_folders()
     end
 
     local child_flags = 0
-    if r.ImGui_ChildFlags_Border then child_flags = r.ImGui_ChildFlags_Border end
+    child_flags = sm_child_border_flag()
 
     -- Size the list to its contents (capped) so there is no large empty area.
     local row_h = r.ImGui_GetTextLineHeightWithSpacing(ctx)
@@ -53102,7 +53105,7 @@ function render_settings()
     r.ImGui_PopStyleVar(ctx, 2)
   end
 
-  r.ImGui_End(ctx)
+  end_window(visible, true)
 
   -- Update settings_open state based on window open state
   if not open then
@@ -54221,9 +54224,7 @@ function render_scan_complete_dialog()
       r.ImGui_Separator(ctx)
       r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Files that failed scanning")
       local child_flags = 0
-      if r.ImGui_ChildFlags_Border then
-        child_flags = r.ImGui_ChildFlags_Border
-      end
+      child_flags = sm_child_border_flag()
       if r.ImGui_BeginChild(ctx, "scan_done_debug", 0, 260, child_flags) then
         local rows = dlg.samples or {}
         if #rows > 0 then
@@ -54257,8 +54258,8 @@ function render_scan_complete_dialog()
             end
           end
         end
+        r.ImGui_EndChild(ctx)
       end
-      r.ImGui_EndChild(ctx)
       if r.ImGui_BeginPopup and r.ImGui_BeginPopup(ctx, "##scan_done_sample_menu") then
         draw_scan_complete_sample_menu_items(dlg.menu_path, dlg.menu_name, dlg.menu_why)
         r.ImGui_EndPopup(ctx)
@@ -54342,7 +54343,7 @@ function render_scan_complete_dialog()
       state.scan_complete_dialog = nil
     end
   end
-  r.ImGui_End(ctx)
+  end_window(visible, true)
   if open == false then
     state.scan_complete_dialog = nil
   end
@@ -54540,6 +54541,14 @@ function draw_map_scan_progress_overlay(dl, x0, y0, width, height)
   local btn_y = overlay_y + overlay_height - btn_h - 8.0
   local mx, my = r.ImGui_GetMousePos(ctx)
   local over_btn = mx >= btn_x and mx <= (btn_x + btn_w) and my >= btn_y and my <= (btn_y + btn_h)
+  -- Ignore the rect while another window/popup covers the map.
+  if over_btn and r.ImGui_IsWindowHovered then
+    local hover_flags = 0
+    if r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem then
+      hover_flags = r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem()
+    end
+    over_btn = r.ImGui_IsWindowHovered(ctx, hover_flags) and true or false
+  end
   -- The map InvisibleButton sits under this overlay and steals ImGui item clicks.
   -- Hit-test the Stop rect directly so the button always works.
   if over_btn and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0) then
@@ -54583,7 +54592,8 @@ function render_map()
   local hovered = r.ImGui_IsItemHovered(ctx)
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local mx, my = r.ImGui_GetMousePos(ctx)
-  local overlay_h = (state.scan_running and 118) or 0
+  -- Previous frame's drawn overlay height (0 when the overlay is hidden).
+  local overlay_h = (state.scan_running and (state.map_scan_overlay_h or 118)) or 0
   local over_scan_overlay = overlay_h > 0 and my >= y0 and my <= (y0 + overlay_h)
 
   handle_map_view_input(hovered and not over_scan_overlay, mx, my, width, height, x0, y0)
@@ -54622,7 +54632,7 @@ function render_map()
     update_pending_drop_tracking()
   end
 
-  draw_map_scan_progress_overlay(dl, x0, y0, width, height)
+  state.map_scan_overlay_h = tonumber(draw_map_scan_progress_overlay(dl, x0, y0, width, height)) or 0
   draw_map_status_overlay(dl, x0, y0, width, height)
 end
 
@@ -54634,9 +54644,7 @@ function render_library_loading_view()
 
   local _, avail_y = r.ImGui_GetContentRegionAvail(ctx)
   local child_flags = 0
-  if r.ImGui_ChildFlags_Border then
-    child_flags = r.ImGui_ChildFlags_Border
-  end
+  child_flags = sm_child_border_flag()
 
   local loading_open = r.ImGui_BeginChild(ctx, "library_loading", 0, avail_y, child_flags)
   if loading_open then
@@ -54871,9 +54879,7 @@ function sm_loop_frame()
       local _, avail_y = r.ImGui_GetContentRegionAvail(ctx)
 
       local child_flags = 0
-      if r.ImGui_ChildFlags_Border then
-        child_flags = r.ImGui_ChildFlags_Border
-      end
+      child_flags = sm_child_border_flag()
       local child_win_flags = 0
       if r.ImGui_WindowFlags_NoNav then
         child_win_flags = child_win_flags | r.ImGui_WindowFlags_NoNav()
