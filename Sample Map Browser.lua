@@ -25451,7 +25451,7 @@ end
 function seq_env_sync_to_length(env, length)
   env = seq_normalize_track_env(env)
   length = math.max(0.001, length or 1.0)
-  if not seq_env_shape_active(env) then
+  if not seq_env_shape_active_norm(env) then
     env.points = {
       { t = 0.0, amp = 1.0 },
       { t = length, amp = 1.0 },
@@ -25818,6 +25818,13 @@ function seq_midi_ensure_jsfx()
   end
   local fx = seq_midi_find_jsfx(tr)
   if fx < 0 then
+    -- Retry a failed add (e.g. JSFX not installed) at most every 2 s, not every call.
+    local now = r.time_precise()
+    local failed_at = state.seq_midi_jsfx_fail_at
+    if failed_at and (now - failed_at) >= 0 and (now - failed_at) < 2.0 then
+      state.seq_midi_jsfx_ready = false
+      return false
+    end
     for _, name in ipairs(SEQ_MIDI_JSFX_NAMES) do
       fx = r.TrackFX_AddByName(tr, name, false, 1)
       if fx and fx >= 0 then
@@ -25827,6 +25834,7 @@ function seq_midi_ensure_jsfx()
         break
       end
     end
+    state.seq_midi_jsfx_fail_at = (not fx or fx < 0) and now or nil
   end
   if fx and fx >= 0 then
     state.seq_midi_jsfx_ready = true
@@ -25865,14 +25873,88 @@ function seq_player_set_param(tr, fx, param, value)
   end
 end
 
+-- Slot ids are unique within a project; the JSFX instance slider goes to 999999.
 function seq_player_instance_id(slot)
   local id = math.floor(tonumber(slot and slot.id) or 0)
   if id < 1 then
     id = 1
-  elseif id > 4095 then
-    id = (id % 4095) + 1
+  elseif id > 999999 then
+    id = ((id - 1) % 999999) + 1
   end
   return id
+end
+
+-- Random per-project key (1..999999) kept in ProjExtState. The JSFX reads
+-- SampleMapPlayerData/<key>_<instance>.txt, so projects don't share config files.
+function seq_player_project_key()
+  local proj = get_current_project and get_current_project() or nil
+  local now = r.time_precise()
+  local cache = state.seq_player_proj_key_cache
+  -- Re-read every 2 s (a project tab can be reused); without a project, keep the cached key.
+  if cache and cache.proj == proj
+      and (proj == nil or ((now - cache.at) >= 0 and (now - cache.at) < 2.0)) then
+    return cache.key
+  end
+  local key = nil
+  if proj and r.GetProjExtState then
+    local ok, val = r.GetProjExtState(proj, PROJ_EXT_SECTION, "player_proj_key")
+    if ok and ok ~= 0 then
+      key = math.floor(tonumber(val) or 0)
+    end
+  end
+  if not key or key < 1 or key > 999999 then
+    -- Hash clock + addresses instead of math.random: the script reseeds the RNG
+    -- with fixed seeds elsewhere, and this must not disturb that sequence.
+    local seed = string.format("%s|%.6f|%d|%s", tostring(proj), now, os.time(), tostring({}))
+    local h = 5381
+    for i = 1, #seed do
+      h = (h * 33 + seed:byte(i)) % 2147483647
+    end
+    key = (h % 999999) + 1
+    if proj and r.SetProjExtState then
+      pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, "player_proj_key", tostring(key))
+    end
+  end
+  state.seq_player_proj_key_cache = { proj = proj, key = key, at = now }
+  return key
+end
+
+-- True when the player JSFX on (tr, fx) has the proj_key slider (param 11).
+-- Older copies of the JSFX don't; they only read the legacy <instance>.txt file.
+function seq_player_fx_has_key(tr, fx)
+  if not tr or not fx or fx < 0 or not r.TrackFX_GetParamName then
+    return false
+  end
+  local ok, name = r.TrackFX_GetParamName(tr, fx, 11, "")
+  if type(ok) == "string" then
+    name = ok
+  end
+  return type(name) == "string" and name:find("Project key", 1, true) ~= nil
+end
+
+-- Write via a temp file and rename, so the JSFX never reads a half-written file.
+function seq_player_write_file_atomic(path, body)
+  local tmp = path .. ".tmp"
+  local f = io.open(tmp, "wb")
+  if not f then
+    return false
+  end
+  local wrote = f:write(body)
+  f:close()
+  if not wrote then
+    os.remove(tmp)
+    return false
+  end
+  if os.rename(tmp, path) then
+    return true
+  end
+  -- Windows can't rename over an existing file.
+  os.remove(path)
+  if os.rename(tmp, path) then
+    return true
+  end
+  os.remove(tmp)
+  return false
 end
 
 function seq_player_collect_layers(slot)
@@ -25937,9 +26019,14 @@ function seq_player_config_sig(slot)
   return table.concat(parts, "\n")
 end
 
-function seq_player_cfg_paths(instance_id)
+-- The JSFX opens "SampleMapPlayerData/<name>" relative to a base folder that
+-- may be the resource, Data or Effects folder, so write each candidate.
+function seq_player_cfg_paths(instance_id, proj_key)
   local res = (r.GetResourcePath and r.GetResourcePath()) or ""
   local name = string.format("%d.txt", instance_id)
+  if proj_key then
+    name = string.format("%d_%d.txt", proj_key, instance_id)
+  end
   return {
     res .. "/Effects/SampleMapPlayerData/" .. name,
     res .. "/SampleMapPlayerData/" .. name,
@@ -25947,8 +26034,12 @@ function seq_player_cfg_paths(instance_id)
   }
 end
 
-function seq_player_write_cfg(slot)
+function seq_player_write_cfg(slot, proj_key)
   local id = seq_player_instance_id(slot)
+  if not proj_key and id > 4095 then
+    -- Legacy JSFX: instance slider stops at 4095.
+    id = (id % 4095) + 1
+  end
   seq_normalize_slot_midi(slot)
   local layers = seq_player_collect_layers(slot)
   local env = seq_normalize_track_env(slot.env)
@@ -25991,18 +26082,14 @@ function seq_player_write_cfg(slot)
     lines[#lines + 1] = tostring(layer.path or ""):gsub("[\r\n]", "")
   end
   local body = table.concat(lines, "\n") .. "\n"
-  local paths = seq_player_cfg_paths(id)
+  local paths = seq_player_cfg_paths(id, proj_key)
   for i = 1, #paths do
     local path = paths[i]
     local dir = path:match("^(.*)/[^/]+$")
     if dir and r.RecursiveCreateDirectory then
       r.RecursiveCreateDirectory(dir, 0)
     end
-    local f = io.open(path, "wb")
-    if f then
-      f:write(body)
-      f:close()
-    end
+    seq_player_write_file_atomic(path, body)
   end
   return id
 end
@@ -26017,6 +26104,15 @@ function seq_player_ensure_fx(slot)
   end
   local fx = seq_player_find_jsfx(tr)
   if fx < 0 then
+    -- Retry a failed add on this track at most every 2 s, not every frame.
+    local fails = state.seq_player_fx_fail_at or {}
+    state.seq_player_fx_fail_at = fails
+    local guid = slot.reaper_track_guid
+    local now = r.time_precise()
+    local failed_at = fails[guid]
+    if failed_at and (now - failed_at) >= 0 and (now - failed_at) < 2.0 then
+      return tr, -1
+    end
     for _, name in ipairs(SEQ_PLAYER_JSFX_NAMES) do
       fx = r.TrackFX_AddByName(tr, name, false, 1)
       if fx and fx >= 0 then
@@ -26026,6 +26122,7 @@ function seq_player_ensure_fx(slot)
         break
       end
     end
+    fails[guid] = (not fx or fx < 0) and now or nil
   end
   if not fx or fx < 0 then
     return tr, -1
@@ -26038,7 +26135,8 @@ function seq_player_sync_slot(slot, force)
     return false
   end
   local id = slot.id
-  local sig = seq_player_config_sig(slot)
+  local proj_key = seq_player_project_key()
+  local sig = tostring(proj_key) .. "\n" .. seq_player_config_sig(slot)
   local rt = seq_player_runtime[id]
   if not force and rt and rt.sig == sig then
     return true
@@ -26047,8 +26145,12 @@ function seq_player_sync_slot(slot, force)
   if not tr or fx < 0 then
     return false
   end
-  local instance_id = seq_player_write_cfg(slot)
+  local has_key = seq_player_fx_has_key(tr, fx)
+  local instance_id = seq_player_write_cfg(slot, has_key and proj_key or nil)
   local P = SEQ_PLAYER_PARAM
+  if has_key then
+    seq_player_set_param(tr, fx, 11, proj_key)
+  end
   seq_player_set_param(tr, fx, P.instance_id, instance_id)
   seq_player_set_param(tr, fx, P.midi_lo, slot.midi_lo or 36)
   seq_player_set_param(tr, fx, P.midi_hi, slot.midi_hi or slot.midi_lo or 36)
@@ -26056,16 +26158,34 @@ function seq_player_sync_slot(slot, force)
   seq_player_set_param(tr, fx, P.gain, 1)
   seq_player_set_param(tr, fx, P.pitch, 0)
   seq_player_set_param(tr, fx, P.overlap, slot.overlap and 1 or 0)
-  local cur = select(1, r.TrackFX_GetParam(tr, fx, P.reload)) or 0
-  seq_player_set_param(tr, fx, P.reload, cur + 1)
+  -- The JSFX only checks for a change, so wrap below the slider max (1000000).
+  local cur = math.floor(tonumber((r.TrackFX_GetParam(tr, fx, P.reload))) or 0)
+  seq_player_set_param(tr, fx, P.reload, (cur + 1) % 1000000)
   seq_player_runtime[id] = { sig = sig }
   return true
 end
 
+-- Runs every frame: rebuild signatures only when state.seq_player_rev moved,
+-- the track list or project changed, or every 0.5 s as a safety net for edits
+-- that don't bump the revision.
 function seq_player_sync_all()
-  for _, slot in ipairs(state.seq_tracks or {}) do
+  local tracks = state.seq_tracks or {}
+  local now = r.time_precise()
+  local rev = state.seq_player_rev or 0
+  local proj = get_current_project and get_current_project() or nil
+  local last = state.seq_player_sync_mark
+  if last
+      and last.rev == rev
+      and last.tracks == tracks
+      and last.n == #tracks
+      and last.proj == proj
+      and (now - last.at) >= 0 and (now - last.at) < 0.5 then
+    return
+  end
+  for _, slot in ipairs(tracks) do
     seq_player_sync_slot(slot)
   end
+  state.seq_player_sync_mark = { rev = rev, tracks = tracks, n = #tracks, proj = proj, at = now }
 end
 
 function seq_player_trigger(slot, vel)
@@ -26080,8 +26200,8 @@ function seq_player_trigger(slot, vel)
   vel = math.max(1, math.min(127, math.floor(tonumber(vel) or 100)))
   local P = SEQ_PLAYER_PARAM
   seq_player_set_param(tr, fx, P.vel, vel)
-  local cur = select(1, r.TrackFX_GetParam(tr, fx, P.trigger)) or 0
-  seq_player_set_param(tr, fx, P.trigger, cur + 1)
+  local cur = math.floor(tonumber((r.TrackFX_GetParam(tr, fx, P.trigger))) or 0)
+  seq_player_set_param(tr, fx, P.trigger, (cur + 1) % 1000000)
   return true
 end
 
@@ -26231,8 +26351,12 @@ end
 
 
 function seq_env_shape_active(env)
-  env = seq_normalize_track_env(env)
-  local pts = env.points
+  return seq_env_shape_active_norm(seq_normalize_track_env(env))
+end
+
+-- Same as seq_env_shape_active for an env already passed through seq_normalize_track_env.
+function seq_env_shape_active_norm(env)
+  local pts = env and env.points
   if not pts or #pts == 0 then
     return false
   end
@@ -26349,8 +26473,12 @@ function seq_ensure_take_volume_envelope(take)
 end
 
 function seq_env_levels_at(env, t, length)
-  env = seq_normalize_track_env(env)
-  local pts = env.points
+  return seq_env_levels_at_norm(seq_normalize_track_env(env), t)
+end
+
+-- Same as seq_env_levels_at for an env already passed through seq_normalize_track_env.
+function seq_env_levels_at_norm(env, t)
+  local pts = env and env.points
   if not pts or #pts == 0 then
     return 1.0
   end
@@ -26389,7 +26517,7 @@ function seq_build_env_amp_points(item_len, env, env_offset)
     pts[#pts + 1] = { t = t, amp = amp }
   end
 
-  add(0.0, seq_env_levels_at(env, env_offset, item_len))
+  add(0.0, seq_env_levels_at_norm(env, env_offset))
   local src = env.points
   for i, p in ipairs(src) do
     local local_t = (p.t or 0.0) - env_offset
@@ -26413,7 +26541,7 @@ function seq_build_env_amp_points(item_len, env, env_offset)
       end
     end
   end
-  add(item_len, seq_env_levels_at(env, env_offset + item_len, item_len))
+  add(item_len, seq_env_levels_at_norm(env, env_offset + item_len))
   return pts
 end
 
@@ -26428,7 +26556,7 @@ function seq_apply_envelope_fades_fallback(item, take, item_len, env, env_offset
   if not take then
     return
   end
-  local amp = seq_env_levels_at(env, env_offset, item_len)
+  local amp = seq_env_levels_at_norm(env, env_offset)
   local max_amp = amp
   local win_end = env_offset + (item_len or 0.0)
   for _, p in ipairs(env.points) do
@@ -26462,7 +26590,7 @@ function seq_apply_take_volume_envelope(take, item_len, env, env_offset)
   env = seq_normalize_track_env(env)
   env_offset = math.max(0.0, env_offset or 0.0)
   local item = r.GetMediaItemTake_Item(take)
-  if not seq_env_is_active(env) then
+  if not seq_env_shape_active_norm(env) then
     if item then
       r.SetMediaItemInfo_Value(item, "D_FADEINLEN", 0)
       r.SetMediaItemInfo_Value(item, "D_FADEOUTLEN", 0)
@@ -26522,6 +26650,7 @@ end
 
 function seq_on_slot_mix_changed(slot, opts)
   opts = opts or {}
+  state.seq_player_rev = (state.seq_player_rev or 0) + 1
   seq_normalize_slot_mix(slot)
   seq_apply_slot_mix_to_reaper_track(slot)
   if seq_player_sync_slot then
@@ -26562,66 +26691,77 @@ function seq_env_downsample_peaks(src_peaks, width)
 end
 
 function seq_env_build_wave_peaks(path, width)
-  if not path or path == "" or not r.GetAudioAccessorSamples then return nil, nil end
+  -- Reads peaks straight from a PCM source, so nothing is added to the project.
+  if not path or path == "" or not r.PCM_Source_CreateFromFile
+      or not r.PCM_Source_GetPeaks or not r.new_array then
+    return nil, nil
+  end
   width = math.max(48, math.min(320, math.floor(width or 200)))
   local src = r.PCM_Source_CreateFromFile(path)
   if not src then return nil, nil end
-  local duration = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
-  local sr = pick_number({ r.GetMediaSourceSampleRate(src) }, 44100.0)
-  local channels = math.max(1, math.floor(pick_number({ r.GetMediaSourceNumChannels(src) }, 1)))
-  if duration <= 0.0001 or sr <= 0 then
-    r.PCM_Source_Destroy(src)
+  local ok, peaks, duration = pcall(function()
+    local dur = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
+    local channels = math.floor(pick_number({ r.GetMediaSourceNumChannels(src) }, 1))
+    channels = math.max(1, math.min(8, channels))
+    if dur <= 0.0001 then
+      return nil, nil
+    end
+    if r.PCM_Source_BuildPeaks and r.PCM_Source_BuildPeaks(src, 0) ~= 0 then
+      local deadline = r.time_precise() + 0.5
+      while r.PCM_Source_BuildPeaks(src, 1) ~= 0 do
+        if r.time_precise() > deadline then break end
+      end
+      r.PCM_Source_BuildPeaks(src, 2)
+    end
+    -- One peak per bin: peakrate = bins per second, so every frame of the bin is covered.
+    local buf = r.new_array(channels * width * 2)
+    buf.clear()
+    local ret = r.PCM_Source_GetPeaks(src, width / dur, 0.0, channels, width, 0, buf)
+    local got = math.floor(tonumber(ret) or 0) % 1048576
+    if got <= 0 then
+      return nil, nil
+    end
+    if got > width then got = width end
+    -- buf holds a block of maxima (frame-major, channel-interleaved), then a block of minima.
+    local min_off = channels * width
+    local out = {}
+    local max_v = 0.0
+    for i = 0, width - 1 do
+      local peak = 0.0
+      if i < got then
+        for c = 0, channels - 1 do
+          local hi = math.abs(buf[i * channels + c + 1] or 0.0)
+          local lo = math.abs(buf[min_off + i * channels + c + 1] or 0.0)
+          if hi > peak then peak = hi end
+          if lo > peak then peak = lo end
+        end
+      end
+      out[i + 1] = peak
+      if peak > max_v then max_v = peak end
+    end
+    if max_v > 0.0001 then
+      for i = 1, #out do out[i] = out[i] / max_v end
+    end
+    return out, dur
+  end)
+  r.PCM_Source_Destroy(src)
+  if not ok then
     return nil, nil
   end
-
-  r.PreventUIRefresh(1)
-  local track = r.GetTrack(0, 0)
-  local item = track and r.AddMediaItemToTrack(track) or nil
-  local peaks = nil
-  if item then
-    r.SetMediaItemPosition(item, 0, false)
-    r.SetMediaItemLength(item, duration, false)
-    local take = r.AddTakeToMediaItem(item)
-    if take then
-      r.SetMediaItemTake_Source(take, src)
-      src = nil
-      local accessor = r.CreateTakeAudioAccessor(take)
-      if accessor then
-        peaks = {}
-        local max_v = 0.0
-        for i = 0, width - 1 do
-          local t0 = (i / width) * duration
-          local read_n = math.min(128, math.max(32, math.floor((duration / width) * sr)))
-          local buf = r.new_array(read_n * channels)
-          local got = r.GetAudioAccessorSamples(accessor, sr, channels, t0, read_n, buf)
-          local peak = 0.0
-          if got and got > 0 and buf then
-            local frames = got
-            for j = 0, frames - 1 do
-              for c = 0, channels - 1 do
-                local v = buf[j * channels + c + 1]
-                if v then
-                  local a = math.abs(v)
-                  if a > peak then peak = a end
-                end
-              end
-            end
-          end
-          peaks[i + 1] = peak
-          if peak > max_v then max_v = peak end
-          if buf and buf.clear then buf.clear(buf) end
-        end
-        if max_v > 0.0001 then
-          for i = 1, #peaks do peaks[i] = peaks[i] / max_v end
-        end
-        r.DestroyAudioAccessor(accessor)
-      end
-    end
-    r.DeleteTrackMediaItem(track, item)
-  end
-  r.PreventUIRefresh(-1)
-  if src then r.PCM_Source_Destroy(src) end
   return peaks, duration
+end
+
+function seq_env_wave_peaks_for_width(cached, width)
+  if cached.width == width then
+    return cached.peaks
+  end
+  cached.resized = cached.resized or {}
+  local resized = cached.resized[width]
+  if not resized then
+    resized = seq_env_downsample_peaks(cached.peaks, width) or cached.peaks
+    cached.resized[width] = resized
+  end
+  return resized
 end
 
 function seq_env_get_wave_peaks(sample, width)
@@ -26629,18 +26769,25 @@ function seq_env_get_wave_peaks(sample, width)
   width = math.max(48, math.min(320, math.floor(width or 200)))
   local cached = seq_env_wave_cache[sample.path]
   if cached and cached.peaks and #cached.peaks > 0 and cached.duration and cached.duration > 0 then
-    if cached.width == width then
-      return cached.peaks, cached.duration
-    end
-    local resized = seq_env_downsample_peaks(cached.peaks, width)
-    return resized or cached.peaks, cached.duration
+    return seq_env_wave_peaks_for_width(cached, width), cached.duration
   end
 
   -- Prefer PCM-built peaks so duration and waveform share one timeline.
   -- Fall back to downsampling the preview waveform only when PCM build fails.
+  -- A failed build (e.g. offline file) is not retried for 30 s.
   local build_w = 256
-  local peaks, duration = seq_env_build_wave_peaks(sample.path, build_w)
-  if (not peaks or not duration or duration <= 0)
+  local peaks, duration = nil, nil
+  local now = r.time_precise()
+  local recently_failed = cached and cached.failed
+      and (now - (cached.at or 0)) >= 0 and (now - (cached.at or 0)) < 30.0
+  if not recently_failed then
+    peaks, duration = seq_env_build_wave_peaks(sample.path, build_w)
+    if not peaks or not duration or duration <= 0 then
+      peaks, duration = nil, nil
+      seq_env_wave_cache[sample.path] = { failed = true, at = now }
+    end
+  end
+  if not peaks
       and waveform_data
       and waveform_data.sample_path == sample.path
       and waveform_data.data
@@ -26649,12 +26796,9 @@ function seq_env_get_wave_peaks(sample, width)
     duration = tonumber(waveform_data.duration) or tonumber(sample.duration)
   end
   if peaks and duration and duration > 0 then
-    seq_env_wave_cache[sample.path] = { peaks = peaks, duration = duration, width = build_w }
-    if build_w ~= width then
-      local resized = seq_env_downsample_peaks(peaks, width)
-      return resized or peaks, duration
-    end
-    return peaks, duration
+    local entry = { peaks = peaks, duration = duration, width = build_w }
+    seq_env_wave_cache[sample.path] = entry
+    return seq_env_wave_peaks_for_width(entry, width), duration
   end
   return peaks, duration or tonumber(sample.duration)
 end
@@ -26714,9 +26858,10 @@ function seq_draw_env_sparkline(dl, x, y, w, h, env, active, hovered)
     edge = active and UI_THEME.accent_hvr or UI_THEME.border_hvr
     edge_w = 1.4
   end
-  local line = seq_env_is_active(env) and 0x9FE3B5FF or 0x6A849EFF
+  local shaped = seq_env_shape_active_norm(env)
+  local line = shaped and 0x9FE3B5FF or 0x6A849EFF
   if hovered then
-    line = seq_env_is_active(env) and 0xC8FFD8FF or 0x9EC0E0FF
+    line = shaped and 0xC8FFD8FF or 0x9EC0E0FF
   end
   r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, bg, 3.0)
   if hovered then
@@ -26740,7 +26885,7 @@ function seq_draw_env_sparkline(dl, x, y, w, h, env, active, hovered)
   local steps = math.max(12, math.floor(w / 2))
   for i = 0, steps do
     local t = (i / steps) * t1
-    local amp = seq_env_levels_at(env, t, t1)
+    local amp = seq_env_levels_at_norm(env, t)
     local px = x + 2 + (i / steps) * (w - 4)
     local py = y + h - 2 - (amp / max_y) * (h - 4)
     if prev_x then
