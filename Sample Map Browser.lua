@@ -1662,6 +1662,9 @@ local function rebuild_tag_index()
   state.samples_by_tag = by_tag
   state.tag_counts = counts
   state.tag_index_epoch = (state.tag_index_epoch or 0) + 1
+  state.tag_index_samples_ref = state.samples
+  state.tag_index_sample_count = #state.samples
+  state.tag_category_rev = (state.tag_category_rev or 0) + 1
   state.tag_list = {}
   for tag, count in pairs(counts) do
     table.insert(state.tag_list, {tag = tag, count = count})
@@ -1672,6 +1675,16 @@ local function rebuild_tag_index()
     end
     return a.count > b.count
   end)
+end
+
+-- Rebuild the tag index only when the library changed since the last rebuild
+-- (an untagged library would otherwise be re-indexed every frame).
+function sm_tag_index_rebuild_if_stale()
+  if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0
+      and (state.tag_index_samples_ref ~= state.samples
+        or state.tag_index_sample_count ~= #state.samples) then
+    rebuild_tag_index()
+  end
 end
 
 
@@ -8587,6 +8600,7 @@ function confirm_delete_tag(tag)
   if state.discovered_library_tag_set then
     state.discovered_library_tag_set[needle] = nil
   end
+  state.tag_category_rev = (state.tag_category_rev or 0) + 1
   if state.tag_colors then
     for key, _ in pairs(state.tag_colors) do
       if string.lower(tostring(key)) == needle then
@@ -9261,8 +9275,41 @@ function sm_flush_tag_color_save()
   save_config()
 end
 
--- Helper function to categorize tags
-function categorize_tags(tag)
+-- Built-in tag categories (case-insensitive keys).
+SM_TAG_CATEGORY_DRUM = {
+  kick = true, snare = true, clap = true, snap = true, rim = true, hat = true,
+  tom = true, ride = true, crash = true, perc = true, fx = true,
+  bass = true, ["808"] = true, ["808s"] = true, drum = true
+}
+SM_TAG_CATEGORY_MELODIC = {
+  vocal = true, pluck = true, lead = true, pad = true,
+  keys = true, guitar = true, swell = true  -- Swell is melodic
+}
+-- Loop/oneshot category tags (handle both "One shot" and "oneshot")
+SM_TAG_CATEGORY_LOOP = {
+  loop = true, ["one shot"] = true, oneshot = true
+}
+
+-- Per-tag category memo. Dropped when tag_parent_map / the discovered library
+-- tags are replaced, or when state.tag_category_rev is bumped (in-place edits,
+-- rebuild_tag_index).
+function sm_tag_category_cache()
+  local c = state.tag_category_cache
+  if not c or c.parent_map ~= state.tag_parent_map
+      or c.discovered ~= state.discovered_library_tag_set
+      or c.rev ~= (state.tag_category_rev or 0) then
+    c = {
+      parent_map = state.tag_parent_map,
+      discovered = state.discovered_library_tag_set,
+      rev = state.tag_category_rev or 0,
+      map = {},
+    }
+    state.tag_category_cache = c
+  end
+  return c.map
+end
+
+function sm_compute_tag_category(tag)
   -- Normalize tag to lowercase for comparison (but preserve original for display)
   local tag_lower = string.lower(tostring(tag or ""))
   if tag_lower == "" then
@@ -9271,36 +9318,52 @@ function categorize_tags(tag)
   if state.tag_parent_map and state.tag_parent_map[tag_lower] then
     return state.tag_parent_map[tag_lower]
   end
-  
-  -- Drum category tags (case-insensitive)
-  local drum_tags = {
-    kick = true, snare = true, clap = true, snap = true, rim = true, hat = true,
-    tom = true, ride = true, crash = true, perc = true, fx = true,
-    bass = true, ["808"] = true, ["808s"] = true, drum = true
-  }
-  
-  -- Melodic category tags (case-insensitive)
-  local melodic_tags = {
-    vocal = true, pluck = true, lead = true, pad = true,
-    keys = true, guitar = true, swell = true  -- Swell is melodic
-  }
-  
-  -- Loop/oneshot category tags (case-insensitive, handle both "One shot" and "oneshot")
-  local loop_tags = {
-    loop = true, ["one shot"] = true, oneshot = true
-  }
-  
-  if drum_tags[tag_lower] then
+  if SM_TAG_CATEGORY_DRUM[tag_lower] then
     return "drum"
-  elseif melodic_tags[tag_lower] then
+  elseif SM_TAG_CATEGORY_MELODIC[tag_lower] then
     return "melodic"
   elseif GENRE_TAG_SET[tag_lower] or (state.discovered_library_tag_set and state.discovered_library_tag_set[tag_lower]) then
     return "genre"
-  elseif loop_tags[tag_lower] then
+  elseif SM_TAG_CATEGORY_LOOP[tag_lower] then
     return "loop"
   end
-  
   return nil
+end
+
+-- Helper function to categorize tags
+function categorize_tags(tag)
+  if tag == nil then
+    return nil
+  end
+  local map = sm_tag_category_cache()
+  local cat = map[tag]
+  if cat == nil then
+    cat = sm_compute_tag_category(tag) or false
+    map[tag] = cat
+  end
+  return cat or nil
+end
+
+-- Tags of the current tag_list grouped by category (rebuilt with the tag index).
+function sm_tag_category_lists()
+  local map = sm_tag_category_cache()
+  local c = state.tag_category_lists
+  if not c or c.map ~= map or c.list ~= state.tag_list or c.epoch ~= state.tag_index_epoch then
+    c = { map = map, list = state.tag_list, epoch = state.tag_index_epoch, by_cat = {} }
+    for _, entry in ipairs(state.tag_list or {}) do
+      local cat = categorize_tags(entry.tag)
+      if cat then
+        local list = c.by_cat[cat]
+        if not list then
+          list = {}
+          c.by_cat[cat] = list
+        end
+        list[#list + 1] = entry.tag
+      end
+    end
+    state.tag_category_lists = c
+  end
+  return c.by_cat
 end
 
 function builtin_tag_parents()
@@ -9357,6 +9420,7 @@ function assign_tag_parent(tag, parent_id)
   end
   state.tag_parent_map = state.tag_parent_map or {}
   state.tag_parent_map[string.lower(tag)] = parent_id
+  state.tag_category_rev = (state.tag_category_rev or 0) + 1
   return true
 end
 
@@ -9813,16 +9877,16 @@ function parent_category_fully_active(cat)
   if cat ~= "drum" and cat ~= "melodic" and cat ~= "genre" then
     return false
   end
-  local found = false
-  for _, entry in ipairs(state.tag_list or {}) do
-    if categorize_tags(entry.tag) == cat then
-      found = true
-      if not state.active_tags[entry.tag] then
-        return false
-      end
+  local tags = sm_tag_category_lists()[cat]
+  if not tags or #tags == 0 then
+    return false
+  end
+  for i = 1, #tags do
+    if not state.active_tags[tags[i]] then
+      return false
     end
   end
-  return found
+  return true
 end
 
 function should_hide_active_tag_in_search_bar(tag)
@@ -38218,9 +38282,7 @@ end
 
 -- Genres present in the scanned library (for Randomize Kit popup).
 function collect_library_genre_tags()
-  if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0 then
-    rebuild_tag_index()
-  end
+  sm_tag_index_rebuild_if_stale()
   local out = {}
   for _, entry in ipairs(state.tag_list or {}) do
     local tag = tostring(entry.tag or "")
@@ -38856,9 +38918,7 @@ end
 
 function open_seq_kit_random_popup()
   state.seq_kit_random_query = state.seq_kit_random_query or ""
-  if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0 then
-    rebuild_tag_index()
-  end
+  sm_tag_index_rebuild_if_stale()
   if r.ImGui_SetNextWindowSize then
     local cond = r.ImGui_Cond_Appearing and r.ImGui_Cond_Appearing() or 0
     r.ImGui_SetNextWindowSize(ctx, 440, 620, cond)
@@ -40945,9 +41005,7 @@ function render_seq_kit_random_popup()
     return
   end
 
-  if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0 then
-    rebuild_tag_index()
-  end
+  sm_tag_index_rebuild_if_stale()
 
   r.ImGui_TextColored(ctx, UI_THEME.text, "Randomize Kit")
   r.ImGui_Separator(ctx)
