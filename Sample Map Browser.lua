@@ -25818,6 +25818,13 @@ function seq_midi_ensure_jsfx()
   end
   local fx = seq_midi_find_jsfx(tr)
   if fx < 0 then
+    -- Retry a failed add (e.g. JSFX not installed) at most every 2 s, not every call.
+    local now = r.time_precise()
+    local failed_at = state.seq_midi_jsfx_fail_at
+    if failed_at and (now - failed_at) >= 0 and (now - failed_at) < 2.0 then
+      state.seq_midi_jsfx_ready = false
+      return false
+    end
     for _, name in ipairs(SEQ_MIDI_JSFX_NAMES) do
       fx = r.TrackFX_AddByName(tr, name, false, 1)
       if fx and fx >= 0 then
@@ -25827,6 +25834,7 @@ function seq_midi_ensure_jsfx()
         break
       end
     end
+    state.seq_midi_jsfx_fail_at = (not fx or fx < 0) and now or nil
   end
   if fx and fx >= 0 then
     state.seq_midi_jsfx_ready = true
@@ -25865,14 +25873,88 @@ function seq_player_set_param(tr, fx, param, value)
   end
 end
 
+-- Slot ids are unique within a project; the JSFX instance slider goes to 999999.
 function seq_player_instance_id(slot)
   local id = math.floor(tonumber(slot and slot.id) or 0)
   if id < 1 then
     id = 1
-  elseif id > 4095 then
-    id = (id % 4095) + 1
+  elseif id > 999999 then
+    id = ((id - 1) % 999999) + 1
   end
   return id
+end
+
+-- Random per-project key (1..999999) kept in ProjExtState. The JSFX reads
+-- SampleMapPlayerData/<key>_<instance>.txt, so projects don't share config files.
+function seq_player_project_key()
+  local proj = get_current_project and get_current_project() or nil
+  local now = r.time_precise()
+  local cache = state.seq_player_proj_key_cache
+  -- Re-read every 2 s (a project tab can be reused); without a project, keep the cached key.
+  if cache and cache.proj == proj
+      and (proj == nil or ((now - cache.at) >= 0 and (now - cache.at) < 2.0)) then
+    return cache.key
+  end
+  local key = nil
+  if proj and r.GetProjExtState then
+    local ok, val = r.GetProjExtState(proj, PROJ_EXT_SECTION, "player_proj_key")
+    if ok and ok ~= 0 then
+      key = math.floor(tonumber(val) or 0)
+    end
+  end
+  if not key or key < 1 or key > 999999 then
+    -- Hash clock + addresses instead of math.random: the script reseeds the RNG
+    -- with fixed seeds elsewhere, and this must not disturb that sequence.
+    local seed = string.format("%s|%.6f|%d|%s", tostring(proj), now, os.time(), tostring({}))
+    local h = 5381
+    for i = 1, #seed do
+      h = (h * 33 + seed:byte(i)) % 2147483647
+    end
+    key = (h % 999999) + 1
+    if proj and r.SetProjExtState then
+      pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, "player_proj_key", tostring(key))
+    end
+  end
+  state.seq_player_proj_key_cache = { proj = proj, key = key, at = now }
+  return key
+end
+
+-- True when the player JSFX on (tr, fx) has the proj_key slider (param 11).
+-- Older copies of the JSFX don't; they only read the legacy <instance>.txt file.
+function seq_player_fx_has_key(tr, fx)
+  if not tr or not fx or fx < 0 or not r.TrackFX_GetParamName then
+    return false
+  end
+  local ok, name = r.TrackFX_GetParamName(tr, fx, 11, "")
+  if type(ok) == "string" then
+    name = ok
+  end
+  return type(name) == "string" and name:find("Project key", 1, true) ~= nil
+end
+
+-- Write via a temp file and rename, so the JSFX never reads a half-written file.
+function seq_player_write_file_atomic(path, body)
+  local tmp = path .. ".tmp"
+  local f = io.open(tmp, "wb")
+  if not f then
+    return false
+  end
+  local wrote = f:write(body)
+  f:close()
+  if not wrote then
+    os.remove(tmp)
+    return false
+  end
+  if os.rename(tmp, path) then
+    return true
+  end
+  -- Windows can't rename over an existing file.
+  os.remove(path)
+  if os.rename(tmp, path) then
+    return true
+  end
+  os.remove(tmp)
+  return false
 end
 
 function seq_player_collect_layers(slot)
@@ -25937,9 +26019,14 @@ function seq_player_config_sig(slot)
   return table.concat(parts, "\n")
 end
 
-function seq_player_cfg_paths(instance_id)
+-- The JSFX opens "SampleMapPlayerData/<name>" relative to a base folder that
+-- may be the resource, Data or Effects folder, so write each candidate.
+function seq_player_cfg_paths(instance_id, proj_key)
   local res = (r.GetResourcePath and r.GetResourcePath()) or ""
   local name = string.format("%d.txt", instance_id)
+  if proj_key then
+    name = string.format("%d_%d.txt", proj_key, instance_id)
+  end
   return {
     res .. "/Effects/SampleMapPlayerData/" .. name,
     res .. "/SampleMapPlayerData/" .. name,
@@ -25947,8 +26034,12 @@ function seq_player_cfg_paths(instance_id)
   }
 end
 
-function seq_player_write_cfg(slot)
+function seq_player_write_cfg(slot, proj_key)
   local id = seq_player_instance_id(slot)
+  if not proj_key and id > 4095 then
+    -- Legacy JSFX: instance slider stops at 4095.
+    id = (id % 4095) + 1
+  end
   seq_normalize_slot_midi(slot)
   local layers = seq_player_collect_layers(slot)
   local env = seq_normalize_track_env(slot.env)
@@ -25991,18 +26082,14 @@ function seq_player_write_cfg(slot)
     lines[#lines + 1] = tostring(layer.path or ""):gsub("[\r\n]", "")
   end
   local body = table.concat(lines, "\n") .. "\n"
-  local paths = seq_player_cfg_paths(id)
+  local paths = seq_player_cfg_paths(id, proj_key)
   for i = 1, #paths do
     local path = paths[i]
     local dir = path:match("^(.*)/[^/]+$")
     if dir and r.RecursiveCreateDirectory then
       r.RecursiveCreateDirectory(dir, 0)
     end
-    local f = io.open(path, "wb")
-    if f then
-      f:write(body)
-      f:close()
-    end
+    seq_player_write_file_atomic(path, body)
   end
   return id
 end
@@ -26017,6 +26104,15 @@ function seq_player_ensure_fx(slot)
   end
   local fx = seq_player_find_jsfx(tr)
   if fx < 0 then
+    -- Retry a failed add on this track at most every 2 s, not every frame.
+    local fails = state.seq_player_fx_fail_at or {}
+    state.seq_player_fx_fail_at = fails
+    local guid = slot.reaper_track_guid
+    local now = r.time_precise()
+    local failed_at = fails[guid]
+    if failed_at and (now - failed_at) >= 0 and (now - failed_at) < 2.0 then
+      return tr, -1
+    end
     for _, name in ipairs(SEQ_PLAYER_JSFX_NAMES) do
       fx = r.TrackFX_AddByName(tr, name, false, 1)
       if fx and fx >= 0 then
@@ -26026,6 +26122,7 @@ function seq_player_ensure_fx(slot)
         break
       end
     end
+    fails[guid] = (not fx or fx < 0) and now or nil
   end
   if not fx or fx < 0 then
     return tr, -1
@@ -26038,7 +26135,8 @@ function seq_player_sync_slot(slot, force)
     return false
   end
   local id = slot.id
-  local sig = seq_player_config_sig(slot)
+  local proj_key = seq_player_project_key()
+  local sig = tostring(proj_key) .. "\n" .. seq_player_config_sig(slot)
   local rt = seq_player_runtime[id]
   if not force and rt and rt.sig == sig then
     return true
@@ -26047,8 +26145,12 @@ function seq_player_sync_slot(slot, force)
   if not tr or fx < 0 then
     return false
   end
-  local instance_id = seq_player_write_cfg(slot)
+  local has_key = seq_player_fx_has_key(tr, fx)
+  local instance_id = seq_player_write_cfg(slot, has_key and proj_key or nil)
   local P = SEQ_PLAYER_PARAM
+  if has_key then
+    seq_player_set_param(tr, fx, 11, proj_key)
+  end
   seq_player_set_param(tr, fx, P.instance_id, instance_id)
   seq_player_set_param(tr, fx, P.midi_lo, slot.midi_lo or 36)
   seq_player_set_param(tr, fx, P.midi_hi, slot.midi_hi or slot.midi_lo or 36)
@@ -26056,16 +26158,34 @@ function seq_player_sync_slot(slot, force)
   seq_player_set_param(tr, fx, P.gain, 1)
   seq_player_set_param(tr, fx, P.pitch, 0)
   seq_player_set_param(tr, fx, P.overlap, slot.overlap and 1 or 0)
-  local cur = select(1, r.TrackFX_GetParam(tr, fx, P.reload)) or 0
-  seq_player_set_param(tr, fx, P.reload, cur + 1)
+  -- The JSFX only checks for a change, so wrap below the slider max (1000000).
+  local cur = math.floor(tonumber((r.TrackFX_GetParam(tr, fx, P.reload))) or 0)
+  seq_player_set_param(tr, fx, P.reload, (cur + 1) % 1000000)
   seq_player_runtime[id] = { sig = sig }
   return true
 end
 
+-- Runs every frame: rebuild signatures only when state.seq_player_rev moved,
+-- the track list or project changed, or every 0.5 s as a safety net for edits
+-- that don't bump the revision.
 function seq_player_sync_all()
-  for _, slot in ipairs(state.seq_tracks or {}) do
+  local tracks = state.seq_tracks or {}
+  local now = r.time_precise()
+  local rev = state.seq_player_rev or 0
+  local proj = get_current_project and get_current_project() or nil
+  local last = state.seq_player_sync_mark
+  if last
+      and last.rev == rev
+      and last.tracks == tracks
+      and last.n == #tracks
+      and last.proj == proj
+      and (now - last.at) >= 0 and (now - last.at) < 0.5 then
+    return
+  end
+  for _, slot in ipairs(tracks) do
     seq_player_sync_slot(slot)
   end
+  state.seq_player_sync_mark = { rev = rev, tracks = tracks, n = #tracks, proj = proj, at = now }
 end
 
 function seq_player_trigger(slot, vel)
@@ -26080,8 +26200,8 @@ function seq_player_trigger(slot, vel)
   vel = math.max(1, math.min(127, math.floor(tonumber(vel) or 100)))
   local P = SEQ_PLAYER_PARAM
   seq_player_set_param(tr, fx, P.vel, vel)
-  local cur = select(1, r.TrackFX_GetParam(tr, fx, P.trigger)) or 0
-  seq_player_set_param(tr, fx, P.trigger, cur + 1)
+  local cur = math.floor(tonumber((r.TrackFX_GetParam(tr, fx, P.trigger))) or 0)
+  seq_player_set_param(tr, fx, P.trigger, (cur + 1) % 1000000)
   return true
 end
 
@@ -26522,6 +26642,7 @@ end
 
 function seq_on_slot_mix_changed(slot, opts)
   opts = opts or {}
+  state.seq_player_rev = (state.seq_player_rev or 0) + 1
   seq_normalize_slot_mix(slot)
   seq_apply_slot_mix_to_reaper_track(slot)
   if seq_player_sync_slot then
