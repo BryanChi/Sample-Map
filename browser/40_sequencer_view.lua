@@ -421,12 +421,21 @@ function render_sequencer_map()
         local swap = drag.swap_region_id and get_seq_region_by_id(drag.swap_region_id)
         local orig_start = drag.orig_start_qn or (reg.start_qn or 0.0)
         if swap then
-          local swap_start = swap.start_qn or 0.0
-          local swap_len = get_seq_region_length_qn(swap)
-          local drag_len = get_seq_region_length_qn({ start_qn = swap_start, length_bars = reg.length_bars })
-          seq_draw_region_ghost(dl, swap_start, swap_start + drag_len, y0, region_lane_h, timeline_x0, timeline_w, qn_to_x,
+          -- Same layout the swap applies on release (regions in between
+          -- shift when the lengths differ).
+          local starts = seq_region_swap_layout(reg, swap) or {}
+          for _, other in ipairs(state.seq_regions or {}) do
+            local new_start = starts[other.id]
+            if new_start and other.id ~= reg.id and other.id ~= swap.id then
+              seq_draw_region_ghost(dl, new_start, new_start + get_seq_region_length_qn(other), y0, region_lane_h,
+                timeline_x0, timeline_w, qn_to_x, seq_region_pool_color(other.pool_id, 50), seq_region_pool_color(other.pool_id, 160), nil)
+            end
+          end
+          local reg_new = starts[reg.id] or (swap.start_qn or 0.0)
+          local swap_new = starts[swap.id] or orig_start
+          seq_draw_region_ghost(dl, reg_new, reg_new + get_seq_region_length_qn(reg), y0, region_lane_h, timeline_x0, timeline_w, qn_to_x,
             seq_region_pool_color(reg.pool_id, 110), 0xFFE599FF, (reg.name or "Region") .. "  ·  swap")
-          seq_draw_region_ghost(dl, orig_start, orig_start + swap_len, y0, region_lane_h, timeline_x0, timeline_w, qn_to_x,
+          seq_draw_region_ghost(dl, swap_new, swap_new + get_seq_region_length_qn(swap), y0, region_lane_h, timeline_x0, timeline_w, qn_to_x,
             seq_region_pool_color(swap.pool_id, 80), seq_region_pool_color(swap.pool_id, 210), (swap.name or "Region") .. "  ·  swap")
         elseif drag.preview_start_qn then
           local ghost_start = drag.preview_start_qn
