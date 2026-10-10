@@ -905,8 +905,21 @@ function seq_create_region_from_parent_item(rec, src, pooled)
     end
     pool_id = rec.pool_id or alloc_seq_pool()
   end
+  -- REAPER undo of a region delete brings back its parent item and its hits,
+  -- still tagged with the old region id. Reuse that id so the region claims
+  -- them back instead of rendering a second copy of every hit beside them.
+  local region_id = state.seq_region_next_id
+  local old_id = math.tointeger(tonumber(rec.region_id) or 0)
+  if old_id and old_id > 0 and not get_seq_region_by_id(old_id) then
+    region_id = old_id
+    if old_id >= state.seq_region_next_id then
+      state.seq_region_next_id = old_id + 1
+    end
+  else
+    state.seq_region_next_id = state.seq_region_next_id + 1
+  end
   local region = {
-    id = state.seq_region_next_id,
+    id = region_id,
     name = (rec.name and rec.name ~= "" and rec.name) or seq_auto_name_new_region(rec.start_qn),
     start_qn = rec.start_qn,
     length_bars = length_bars,
@@ -919,7 +932,6 @@ function seq_create_region_from_parent_item(rec, src, pooled)
     parent_item_guid = rec.guid,
     track_samples = src and seq_clone_region_track_samples(src) or nil,
   }
-  state.seq_region_next_id = state.seq_region_next_id + 1
   table.insert(state.seq_regions, region)
   sort_seq_regions()
   state.selected_seq_region_id = region.id

@@ -1201,10 +1201,24 @@ function seq_apply_slot_mix_to_reaper_track(slot)
   if not slot.reaper_track_guid then return end
   local tr = get_track_by_guid(slot.reaper_track_guid)
   if not tr then return end
-  r.SetMediaTrackInfo_Value(tr, "D_VOL", slot.volume or 1.0)
-  r.SetMediaTrackInfo_Value(tr, "D_PAN", slot.pan or 0.0)
-  r.SetMediaTrackInfo_Value(tr, "B_MUTE", slot.mute and 1 or 0)
-  r.SetMediaTrackInfo_Value(tr, "I_SOLO", slot.solo and 1 or 0)
+  -- Write only what differs: rewriting equal values still dirties the
+  -- project, and forcing I_SOLO to 1 would turn solo-in-place into plain solo.
+  local function differs(key, value)
+    local cur = r.GetMediaTrackInfo_Value(tr, key)
+    return type(cur) ~= "number" or math.abs(cur - value) > 0.0000001
+  end
+  if differs("D_VOL", slot.volume or 1.0) then
+    r.SetMediaTrackInfo_Value(tr, "D_VOL", slot.volume or 1.0)
+  end
+  if differs("D_PAN", slot.pan or 0.0) then
+    r.SetMediaTrackInfo_Value(tr, "D_PAN", slot.pan or 0.0)
+  end
+  if ((tonumber(r.GetMediaTrackInfo_Value(tr, "B_MUTE")) or 0) ~= 0) ~= (slot.mute == true) then
+    r.SetMediaTrackInfo_Value(tr, "B_MUTE", slot.mute and 1 or 0)
+  end
+  if ((tonumber(r.GetMediaTrackInfo_Value(tr, "I_SOLO")) or 0) ~= 0) ~= (slot.solo == true) then
+    r.SetMediaTrackInfo_Value(tr, "I_SOLO", slot.solo and 1 or 0)
+  end
 end
 
 function seq_apply_all_slot_mix_to_reaper()

@@ -507,7 +507,9 @@ function remove_seq_rendered_items_for_track(region, slot, track_id)
       end
     end
   end
-  local tr = slot and get_seq_slot_target_track(slot)
+  -- An unlinked slot renders on whichever track was selected at the time,
+  -- so find its items by tag on every track.
+  local tr = slot and seq_ingest_slot_track(slot)
   if tr then
     scan_track(tr)
   else
@@ -544,7 +546,9 @@ function remove_seq_rendered_items_for_step(region, slot, track_id, step_key)
       end
     end
   end
-  local tr = slot and get_seq_slot_target_track(slot)
+  -- An unlinked slot renders on whichever track was selected at the time,
+  -- so find its items by tag on every track.
+  local tr = slot and seq_ingest_slot_track(slot)
   if tr then
     scan_track(tr)
   else
@@ -938,7 +942,7 @@ function sync_seq_pattern_regions(pattern_id)
   end
 end
 
-function seq_sync_linked_arrange_from(region)
+function seq_sync_linked_arrange_from(region, changed_slots)
   if not region or not region.pattern_id then
     return
   end
@@ -958,30 +962,44 @@ function seq_sync_linked_arrange_from(region)
   if r.PreventUIRefresh then
     r.PreventUIRefresh(1)
   end
-  local rebuild = {}
-  local pruned = false
-  for i = 1, #others do
-    if seq_prune_stale_region_items(others[i]) > 0 then
-      pruned = true
+  local touched = false
+  if type(changed_slots) == "table" then
+    -- Rebuild the tracks whose notes changed. Counting items missed edits
+    -- that keep the count (volume, pitch, a nudge inside the cell).
+    for _, slot in ipairs(state.seq_tracks or {}) do
+      if changed_slots[slot.id] then
+        for i = 1, #others do
+          sync_seq_region_track(others[i], slot, { skip_arrange = true, force_rebuild = true })
+        end
+        touched = true
+      end
     end
-  end
-  -- Pruning only touches each region's own items, so count all regions in
-  -- one scan afterwards instead of rescanning every track per region.
-  local owned_counts = seq_count_owned_primary_items_by_region()
-  for i = 1, #others do
-    local item_n = owned_counts[others[i].id] or 0
-    local note_n = seq_region_expected_primary_notes(others[i])
-    if item_n ~= note_n then
-      rebuild[#rebuild + 1] = others[i]
+  else
+    local rebuild = {}
+    for i = 1, #others do
+      if seq_prune_stale_region_items(others[i]) > 0 then
+        touched = true
+      end
     end
-  end
-  for i = 1, #rebuild do
-    sync_seq_region(rebuild[i], { skip_cache_clear = true, skip_arrange = true })
+    -- Pruning only touches each region's own items, so count all regions in
+    -- one scan afterwards instead of rescanning every track per region.
+    local owned_counts = seq_count_owned_primary_items_by_region()
+    for i = 1, #others do
+      local item_n = owned_counts[others[i].id] or 0
+      local note_n = seq_region_expected_primary_notes(others[i])
+      if item_n ~= note_n then
+        rebuild[#rebuild + 1] = others[i]
+      end
+    end
+    for i = 1, #rebuild do
+      sync_seq_region(rebuild[i], { skip_cache_clear = true, skip_arrange = true })
+      touched = true
+    end
   end
   if r.PreventUIRefresh then
     r.PreventUIRefresh(-1)
   end
-  if pruned or #rebuild > 0 then
+  if touched then
     r.UpdateArrange()
   end
 end
