@@ -2368,7 +2368,8 @@ function filter_samples_by_folders()
     state.active_tags = {}
     state.tag_list = {}
     state.tag_counts = {}
-    return
+    rebuild_samples_path_index()
+    return 0
   end
 
   local filtered_samples = {}
@@ -2376,13 +2377,12 @@ function filter_samples_by_folders()
 
   for _, sample in ipairs(state.samples) do
     if sample.path then
-      local normalized_sample_path = normalize_path(sample.path)
       local keep_sample = false
 
-      -- Check if sample belongs to any of the current folders
+      -- Check if sample belongs to any of the current folders (whole path
+      -- components, so ".../Drums" does not also keep ".../Drums2").
       for _, folder in ipairs(state.folders) do
-        local normalized_folder = normalize_path(folder)
-        if normalized_sample_path:sub(1, #normalized_folder) == normalized_folder then
+        if sample_under_scan_folder(sample.path, folder) then
           keep_sample = true
           break
         end
@@ -2402,12 +2402,11 @@ function filter_samples_by_folders()
   state.samples = filtered_samples
   rebuild_samples_path_index()
 
-  -- Rebuild tag data since samples changed
-  state.active_tags = {}
-  state.tag_list = {}
-  state.tag_counts = {}
+  -- Rebuild tag data since samples changed; the user's tag filters stay.
+  rebuild_tag_index()
 
   if removed_count > 0 then
     log("Removed " .. removed_count .. " samples from removed folder(s)")
   end
+  return removed_count
 end
