@@ -121,7 +121,7 @@ def test_equals_inside_a_sentence_does_not_split_it():
     assert rows[1] == (False, ["mouse:L"], "Drag the last grid to set note length ( [Shift] = unsnap)")
 
 
-def test_set_tooltip_draws_pinned_card_clear_of_the_control():
+def test_set_tooltip_draws_card_above_the_control():
     L = _runtime()
     L.execute('''
       MOUSE = {40, 760}; ITEM = {20, 750, 80, 772}
@@ -136,12 +136,29 @@ def test_set_tooltip_draws_pinned_card_clear_of_the_control():
     pos = [c for c in calls if c[0] == "ImGui_SetNextWindowPos"]
     assert len(pos) == 1
     x, y = pos[0][2], pos[0][3]
-    # The control sits in the bottom-left corner, so the card moves elsewhere.
-    assert not (x < 80 and y + 20 > 750)
+    # The card sits just above the control, centred on it but kept on screen.
+    rects = [c for c in calls if c[0] == "ImGui_DrawList_AddRectFilled"]
+    card_bottom = max(c[4] for c in rects if c[2] == y)
+    assert card_bottom <= 750 - 6 and card_bottom >= 750 - 20
+    assert x >= 6
     assert "ImGui_EndTooltip" in names
-    assert any(n == "ImGui_DrawList_AddBezierCubic" for n in names)
+    assert "ImGui_DrawList_AddTriangleFilled" in names
     texts = [c[-1] for c in calls if c[0] == "ImGui_DrawList_AddText"]
     assert "Grid" in texts and "Alt" in texts and "stutter" in texts
+
+
+def test_card_flips_below_when_no_room_above():
+    L = _runtime()
+    L.execute('''
+      MOUSE = {600, 15}; ITEM = {580, 5, 640, 27}
+      reaper.ImGui_SetTooltip(ctx, "Sync to Arrange: off")
+      NOW = 0.0; hint_card_flush()
+      reaper.ImGui_SetTooltip(ctx, "Sync to Arrange: off")
+      NOW = 0.3; hint_card_flush()
+    ''')
+    calls = [list(c.values()) for c in L.globals().CALLS.values()]
+    pos = [c for c in calls if c[0] == "ImGui_SetNextWindowPos"]
+    assert pos and pos[-1][3] >= 27
 
 
 def test_flush_without_request_draws_nothing():

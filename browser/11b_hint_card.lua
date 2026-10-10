@@ -3,10 +3,10 @@
 local r = reaper
 
 -- --- Hint card -----------------------------------------------------------------
--- Hover hints show as one card pinned to a corner of the window you are working
--- in, instead of a tooltip that follows the mouse. Mouse buttons and modifier
--- keys in the hint text become icons and key chips, and a leader line ties the
--- card to the hovered control. Every ImGui_SetTooltip call in the browser comes
+-- Hover hints show as a card just above the hovered control (below it when
+-- there's no room), instead of a tooltip that follows the mouse. Mouse buttons
+-- and modifier keys in the hint text become icons and key chips, and a caret
+-- plus an outline tie the card to the control. Every ImGui_SetTooltip call in the browser comes
 -- through here (see the override at the end of this file), so hint text keeps
 -- its plain-string form: "Alt+LMB drag = stutter", "Click: preview · …".
 
@@ -17,13 +17,13 @@ HINT_CARD = {
   row_gap = 5,
   key_gap = 10,        -- between the key column and the description
   rounding = 8,
-  margin = 10,         -- distance from the window edge
+  margin = 6,          -- distance from the window edge
+  gap = 8,             -- between the card and the hovered control
+  caret = 6,           -- size of the pointer under the card
   shadow = 6,
   show_delay = 0.16,   -- seconds of hover before a cold card appears
   warm_time = 0.5,     -- moving to another control within this keeps it up
   fade_time = 0.12,
-  -- Corners tried in order; the first that keeps the hovered control clear wins.
-  corners = { "bottom_left", "bottom_right", "top_right", "top_left" },
 }
 
 HINT_COLORS = {
@@ -550,89 +550,55 @@ local function hint_rects_overlap(ax0, ay0, ax1, ay1, bx0, by0, bx1, by1)
   return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
 end
 
--- Pick the card position: the first corner of the hovered window's area that
--- keeps the hovered control (and the mouse) uncovered.
+-- Place the card just above the hovered control, centred on it and kept inside
+-- the window; below it when there's no room above. Returns x, y and which side.
 function hint_place(req, w, h)
   local cfg = HINT_CARD
   local vp = req.vp
   local m = cfg.margin
-  if not vp or vp.w < w + m * 2 or vp.h < h + m * 2 then
+  if not vp or vp.w < w + m * 2 then
     return nil
   end
   local a = req.anchor
-  local pad = 10
-  local spots = {
-    bottom_left = { vp.x + m, vp.y + vp.h - m - h },
-    bottom_right = { vp.x + vp.w - m - w, vp.y + vp.h - m - h },
-    top_right = { vp.x + vp.w - m - w, vp.y + m },
-    top_left = { vp.x + m, vp.y + m },
-  }
-  -- Stay in the corner it already sits in while it is still clear, so moving
-  -- between controls doesn't make the card jump around.
-  local order = {}
-  if hint_state.corner then
-    order[1] = hint_state.corner
+  local gap = cfg.gap
+  local x = (a.x0 + a.x1) * 0.5 - w * 0.5
+  x = math.max(vp.x + m, math.min(vp.x + vp.w - m - w, x))
+  local above_y = a.y0 - gap - h
+  if above_y >= vp.y + m then
+    return x, above_y, "above"
   end
-  for _, name in ipairs(cfg.corners) do
-    order[#order + 1] = name
+  local below_y = a.y1 + gap
+  if below_y + h <= vp.y + vp.h - m then
+    return x, below_y, "below"
   end
-  for _, name in ipairs(order) do
-    local p = spots[name]
-    if p and not hint_rects_overlap(p[1], p[2], p[1] + w, p[2] + h, a.x0 - pad, a.y0 - pad, a.x1 + pad, a.y1 + pad) then
-      hint_state.corner = name
-      return p[1], p[2]
-    end
-  end
-  return nil
+  return x, math.max(vp.y + m, above_y), "above"
 end
 
--- Leader: outline the hovered control and run a soft curve to the card.
-local function hint_draw_leader(fg, req, cx, cy, w, h, f)
+-- Guidance: outline the hovered control and point a small caret at it.
+local function hint_draw_pointer(dl, fg, req, cx, cy, w, h, side, f)
   local a = req.anchor
   local accent = hint_accent()
-  if req.item then
+  if req.item and fg then
     r.ImGui_DrawList_AddRect(fg, a.x0 - 2, a.y0 - 2, a.x1 + 2, a.y1 + 2, hint_fade(hint_with_alpha(accent, 0xB0), f), 5.0, 0, 1.5)
   end
-  local acx, acy = (a.x0 + a.x1) * 0.5, (a.y0 + a.y1) * 0.5
-  -- Card end: the nearest point on the card's edge, kept off the rounded corners.
-  local r0 = HINT_CARD.rounding + 4
-  local px = math.max(cx + r0, math.min(cx + w - r0, acx))
-  local py = math.max(cy + r0, math.min(cy + h - r0, acy))
-  local vertical = acy < cy or acy > cy + h
-  if vertical then
-    py = (acy < cy) and cy or (cy + h)
-  else
-    px = (acx < cx) and cx or (cx + w)
-  end
-  -- Control end: its edge facing the card.
-  local sx, sy = acx, acy
-  local g = req.item and 3 or 0
-  if vertical then
-    sy = (py < acy) and (a.y0 - g) or (a.y1 + g)
-  else
-    sx = (px < acx) and (a.x0 - g) or (a.x1 + g)
-  end
-  local dist = math.abs(px - sx) + math.abs(py - sy)
-  if dist < 24 then
-    return
-  end
-  local line = hint_fade(hint_with_alpha(accent, 0x60), f)
-  local dot = hint_fade(hint_with_alpha(accent, 0xD0), f)
-  if r.ImGui_DrawList_AddBezierCubic then
-    local c1x, c1y, c2x, c2y
-    if vertical then
-      local my = (sy + py) * 0.5
-      c1x, c1y, c2x, c2y = sx, my, px, my
+  local r0 = HINT_CARD.rounding + 6
+  local px = math.max(cx + r0, math.min(cx + w - r0, (a.x0 + a.x1) * 0.5))
+  local cs = HINT_CARD.caret
+  local bg = hint_fade(HINT_COLORS.bg, f)
+  local edge = hint_fade(HINT_COLORS.border, f)
+  if r.ImGui_DrawList_AddTriangleFilled then
+    if side == "above" then
+      local by = cy + h - 1
+      r.ImGui_DrawList_AddTriangleFilled(dl, px - cs, by, px + cs, by, px, by + cs, bg)
+      r.ImGui_DrawList_AddLine(dl, px - cs, by + 0.5, px, by + cs + 0.5, edge, 1.0)
+      r.ImGui_DrawList_AddLine(dl, px, by + cs + 0.5, px + cs, by + 0.5, edge, 1.0)
     else
-      local mx = (sx + px) * 0.5
-      c1x, c1y, c2x, c2y = mx, sy, mx, py
+      local ty = cy + 1
+      r.ImGui_DrawList_AddTriangleFilled(dl, px - cs, ty, px, ty - cs, px + cs, ty, bg)
+      r.ImGui_DrawList_AddLine(dl, px - cs, ty - 0.5, px, ty - cs - 0.5, edge, 1.0)
+      r.ImGui_DrawList_AddLine(dl, px, ty - cs - 0.5, px + cs, ty - 0.5, edge, 1.0)
     end
-    r.ImGui_DrawList_AddBezierCubic(fg, sx, sy, c1x, c1y, c2x, c2y, px, py, line, 1.5, 0)
-  else
-    r.ImGui_DrawList_AddLine(fg, sx, sy, px, py, line, 1.5)
   end
-  r.ImGui_DrawList_AddCircleFilled(fg, sx, sy, 2.5, dot)
-  r.ImGui_DrawList_AddCircleFilled(fg, px, py, 3.0, dot)
 end
 
 -- --- Request / flush ---------------------------------------------------------------
@@ -740,7 +706,6 @@ function hint_card_flush()
       return
     end
     hint_state.visible_since = now
-    hint_state.corner = nil
   end
   hint_state.last_shown = now
   local f = 1.0
@@ -750,29 +715,25 @@ function hint_card_flush()
   end
 
   local layout = hint_layout(c, req.text)
-  local sh = HINT_CARD.shadow
-  local x, y = hint_place(req, layout.w + 2, layout.h + sh)
-  local pinned = x ~= nil
-  if not pinned then
-    -- The window is too small to pin the card in (e.g. a small popup): show it
-    -- under the control like a regular tooltip.
-    x = req.anchor.x0
-    y = req.anchor.y1 + 8
+  local cs = HINT_CARD.caret
+  local x, y, side = hint_place(req, layout.w + 2, layout.h)
+  if not x then
+    x, y, side = req.anchor.x0, req.anchor.y1 + HINT_CARD.gap, "below"
   end
+  -- The window also holds the caret: below the card when it sits above the
+  -- control, above it when below.
+  local top_pad = (side == "below") and cs or 0
+  local bot_pad = (side == "above") and cs or HINT_CARD.shadow
 
-  local open, pushed_vars, pushed_cols = hint_begin_card_window(c, x, y)
+  local open, pushed_vars, pushed_cols = hint_begin_card_window(c, x, y - top_pad)
   if open then
     local dl = r.ImGui_GetWindowDrawList(c)
     local wx, wy = r.ImGui_GetCursorScreenPos(c)
-    wx, wy = tonumber(wx) or x, tonumber(wy) or y
+    wx, wy = tonumber(wx) or x, (tonumber(wy) or (y - top_pad)) + top_pad
     hint_draw_card(dl, layout, wx + 1, wy, f)
-    r.ImGui_Dummy(c, layout.w + 2, layout.h + sh)
-    if pinned and r.ImGui_GetForegroundDrawList then
-      local fg = r.ImGui_GetForegroundDrawList(c)
-      if fg then
-        hint_draw_leader(fg, req, wx + 1, wy, layout.w, layout.h, f)
-      end
-    end
+    local fg = r.ImGui_GetForegroundDrawList and r.ImGui_GetForegroundDrawList(c) or nil
+    hint_draw_pointer(dl, fg, req, wx + 1, wy, layout.w, layout.h, side, f)
+    r.ImGui_Dummy(c, layout.w + 2, layout.h + top_pad + bot_pad)
     r.ImGui_EndTooltip(c)
   end
   if pushed_cols > 0 then
