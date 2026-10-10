@@ -28,6 +28,7 @@ function seq_open_minimap_popup(slot, recenter, opts)
   pop.slot_id = slot.id
   pop.mode = mode
   pop.targets = opts.targets
+  pop.layer = opts.layer
   pop.origin_path = opts.origin_path
   pop.place_at_mouse = opts.place_at_mouse and true or nil
   pop.pin_anchor = opts.pin_anchor and true or nil
@@ -53,6 +54,11 @@ function seq_open_minimap_popup(slot, recenter, opts)
   end
   if mode ~= "notes" then
     pop.targets = nil
+  end
+  if mode ~= "layer" then
+    pop.layer = nil
+  end
+  if mode ~= "notes" and mode ~= "layer" then
     pop.origin_path = nil
     pop.place_at_mouse = nil
     pop.pin_anchor = nil
@@ -80,6 +86,8 @@ function render_seq_minimap_popup()
 
   if r.ImGui_IsKeyPressed and r.ImGui_Key_Escape
       and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
+    -- The drum layering window, drawn after this, must not also close on it.
+    state.seq_minimap_esc_frame = pop.mode == "layer" and (r.ImGui_GetFrameCount and r.ImGui_GetFrameCount(ctx) or true) or nil
     state.seq_minimap_popup = nil
     return
   end
@@ -95,10 +103,22 @@ function render_seq_minimap_popup()
     pop.anchor = anchor
   end
 
-  pcall(seq_minimap_ensure_samples, pop, slot)
+  -- Layer mode is the drum layering corner picker: its samples are the
+  -- corner's pool, it stays until closed and sits beside the layering window.
+  local layer_mode = pop.mode == "layer" and seq_layering_picker_samples ~= nil
+  if layer_mode then
+    pop.samples = seq_layering_picker_samples(pop, slot)
+    local v = pop.layer and slot.layers and slot.layers[pop.layer.side]
+      and slot.layers[pop.layer.side].verts[pop.layer.idx]
+    if v and v.path then
+      pop.origin_path = v.path
+    end
+  else
+    pcall(seq_minimap_ensure_samples, pop, slot)
+  end
 
   local now = r.time_precise()
-  local keep = pop.hovered or pop.pan_drag or pop.dragging or pop.press_x
+  local keep = layer_mode or pop.hovered or pop.pan_drag or pop.dragging or pop.press_x
   if keep then
     pop.idle_since = now
   end
@@ -116,11 +136,24 @@ function render_seq_minimap_popup()
 
   local map_w, map_h = SEQ_MINIMAP_SIZE, SEQ_MINIMAP_SIZE
   local pad = 6.0
+  local header_h, foot_h = 0, 0
+  if layer_mode then
+    map_w, map_h = SEQ_LAYER_PICKER_MAP, SEQ_LAYER_PICKER_MAP
+    pad = 8.0
+    header_h = seq_layering_picker_header_h(pop, slot, map_w)
+    foot_h = SEQ_LAYER_PICKER_FOOT_H
+  end
   local win_w = map_w + pad * 2
-  local win_h = map_h + pad * 2
+  local win_h = map_h + pad * 2 + header_h + foot_h
   local wr = state.main_window_rect
   local wx, wy
-  if pop.fixed_wx and pop.fixed_wy then
+  local px, py = nil, nil
+  if layer_mode then
+    px, py = seq_layering_picker_pos(pop, win_w, win_h)
+  end
+  if px then
+    wx, wy = px, py
+  elseif pop.fixed_wx and pop.fixed_wy then
     -- Stay put after the first place_at_mouse / pinned open.
     wx, wy = pop.fixed_wx, pop.fixed_wy
   else
@@ -144,7 +177,7 @@ function render_seq_minimap_popup()
       end
       pop.place_at_mouse = nil
     end
-    if pop.pin_anchor or pop.mode == "notes" then
+    if pop.pin_anchor or pop.mode == "notes" or pop.mode == "layer" then
       pop.fixed_wx, pop.fixed_wy = wx, wy
     end
   end
@@ -223,7 +256,7 @@ function render_seq_minimap_popup()
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local wx0, wy0 = r.ImGui_GetWindowPos(ctx)
   local mx0 = wx0 + pad
-  local my0 = wy0 + pad
+  local my0 = wy0 + pad + header_h
   if r.ImGui_SetCursorScreenPos then
     r.ImGui_SetCursorScreenPos(ctx, mx0, my0)
   end
@@ -236,12 +269,16 @@ function render_seq_minimap_popup()
   r.ImGui_DrawList_AddRectFilled(dl, wx0, wy0, wx0 + win_w, wy0 + win_h, frame_bg, 8.0)
   r.ImGui_DrawList_AddRect(dl, wx0 + 0.5, wy0 + 0.5, wx0 + win_w - 0.5, wy0 + win_h - 0.5, frame_border, 8.0, 0, 1.0)
   r.ImGui_DrawList_AddRectFilled(dl, mx0, my0, mx0 + map_w, my0 + map_h, seq_minimap_fade_col(UI_THEME.bg or 0x0A0E0CFF, alpha), 5.0)
+  if layer_mode then
+    pop.hint = nil
+    seq_layering_draw_picker_header(pop, slot, dl, mx0, wy0 + pad, map_w)
+  end
 
   local zoom = pop.zoom or SEQ_MINIMAP_ZOOM
   local pan_x = pop.pan_x or 0
   local pan_y = pop.pan_y or 0
   local samples = pop.samples or {}
-  local current_path = (pop.mode == "notes" and pop.origin_path)
+  local current_path = ((pop.mode == "notes" or pop.mode == "layer") and pop.origin_path)
     or (seq_effective_slot_sample_path and select(1, seq_effective_slot_sample_path(slot, seq_sample_assign_region and seq_sample_assign_region())))
     or slot.sample_path
   local playing_path = preview_sample_obj and preview_sample_obj.path or nil
@@ -294,7 +331,7 @@ function render_seq_minimap_popup()
 
   if closest then
     r.ImGui_DrawList_AddCircle(dl, closest.px, closest.py, dot_r + 2.0, closest.color, 12, 1.6)
-    if r.ImGui_SetTooltip then
+    if r.ImGui_SetTooltip and not layer_mode then
       r.ImGui_SetTooltip(ctx, closest.sample.name or closest.sample.path or "")
     end
   end
@@ -306,6 +343,17 @@ function render_seq_minimap_popup()
   end
   r.ImGui_DrawList_AddRect(dl, mx0 + 0.5, my0 + 0.5, mx0 + map_w - 0.5, my0 + map_h - 0.5,
     seq_minimap_fade_col(UI_THEME.border or 0x2A3830FF, alpha), 5.0, 0, 1.0)
+  if layer_mode then
+    if #samples == 0 then
+      local msg = "No samples match"
+      r.ImGui_DrawList_AddText(dl, mx0 + 10.0, my0 + map_h * 0.5 - 7.0, UI_THEME.text_mute, msg)
+    end
+    local hint = seq_layering_picker_hint(pop, closest)
+    if seq_truncate_text_to_width then
+      hint = seq_truncate_text_to_width(hint, map_w)
+    end
+    r.ImGui_DrawList_AddText(dl, mx0, my0 + map_h + 4.0, pop.hint and UI_THEME.text or UI_THEME.text_mute, hint)
+  end
 
   -- Right-drag pan
   if hovered and r.ImGui_IsMouseClicked(ctx, 1) then

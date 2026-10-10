@@ -897,6 +897,13 @@ function seq_minimap_assign(slot, sample)
     pop.origin_path = sample.path
     return
   end
+  if pop and pop.mode == "layer" then
+    if slot and pop.layer and seq_layering_pick_vert_sample then
+      seq_layering_pick_vert_sample(slot, pop.layer.side, pop.layer.idx, sample)
+      pop.origin_path = sample.path
+    end
+    return
+  end
   if not slot then
     return
   end

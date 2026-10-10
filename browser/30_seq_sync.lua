@@ -409,6 +409,8 @@ function insert_seq_note_item(region, slot, track_id, step_key, note)
   local first_start_qn, first_len_qn, last_start_qn, last_len_qn
   local pieces = (seq_layering_is_active and seq_layering_is_active(slot))
     and seq_layering_build_pieces(slot) or {}
+  -- A layered hit lasts until its longest piece ends, not the track sample.
+  local layer_mix_dur = (#pieces > 0 and seq_layering_mix_duration) and seq_layering_mix_duration(slot) or nil
   for i = 0, stutter_count - 1 do
     local hit_idx = i + 1
     local hit_note = seq_note_for_stutter_hit(note, hit_idx)
@@ -417,8 +419,12 @@ function insert_seq_note_item(region, slot, track_id, step_key, note)
     if not hit_path then
       hit_path, hit_sample = resolved_path, resolved_sample
     end
+    local len_sample = hit_sample
+    if layer_mix_dur then
+      len_sample = { path = (hit_sample and hit_sample.path) or hit_path, effective_duration = layer_mix_dur }
+    end
     local hit_len_qn = seq_effective_note_length_qn(
-      region, pattern, slot, track_id, step_idx, span_note, hit_sample, grid_qn, hit_idx
+      region, pattern, slot, track_id, step_idx, span_note, len_sample, grid_qn, hit_idx
     )
     local hit_offset = hit_note.offset_qn or 0.0
     local off0 = seq_stutter_hit_span(span_note, hit_idx, grid_qn)

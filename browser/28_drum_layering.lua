@@ -49,6 +49,34 @@ function seq_layer_default_side()
   }
 end
 
+SEQ_LAYER_GAIN_MIN_DB = -24.0
+SEQ_LAYER_GAIN_MAX_DB = 12.0
+
+-- Side gain (linear) over everything in the transient or sustain.
+function seq_layer_clamp_gain(g)
+  g = tonumber(g)
+  if g == nil or g ~= g then return 1.0 end
+  local lo = 10 ^ (SEQ_LAYER_GAIN_MIN_DB / 20.0)
+  local hi = 10 ^ (SEQ_LAYER_GAIN_MAX_DB / 20.0)
+  if g < lo then return lo end
+  if g > hi then return hi end
+  return g
+end
+
+-- Corner play length (seconds from the hit, nil = to its natural end) and
+-- fade-out length (nil = none).
+function seq_layer_clamp_len(len)
+  len = tonumber(len)
+  if len == nil or len ~= len or len <= 0 then return nil end
+  return math.max(0.005, math.min(30.0, len))
+end
+
+function seq_layer_clamp_fade(f)
+  f = tonumber(f)
+  if f == nil or f ~= f or f <= 0.0005 then return nil end
+  return math.min(30.0, f)
+end
+
 -- Normalizes in place (no new tables once a side is well formed): this runs
 -- many times per frame while the layering window is open.
 function seq_layer_normalize_side(side)
@@ -66,15 +94,53 @@ function seq_layer_normalize_side(side)
       v.locked = v.locked == true
       v.vol = seq_layer_vert_vol(v)
       if v.path == "" then v.path = nil end
+      v.len = seq_layer_clamp_len(v.len)
+      v.fade = seq_layer_clamp_fade(v.fade)
     end
   end
+  side.gain = seq_layer_clamp_gain(side.gain)
   local b = side.blend
   if type(b) ~= "table" then
     side.blend = { 1.0, 0.0, 0.0 }
   else
     b[1], b[2], b[3] = seq_layer_clamp_bary(tonumber(b[1]) or 0, tonumber(b[2]) or 0, tonumber(b[3]) or 0)
   end
+  -- A side-wide source (older layouts) moves onto corners that have none.
+  if type(side.rand) == "table" then
+    for i = 2, 3 do
+      local v = side.verts[i]
+      if v.rand == nil then
+        local tags = {}
+        for k, t in ipairs(side.rand.tags or {}) do tags[k] = t end
+        v.rand = { role = side.rand.role, tags = tags }
+      end
+    end
+  end
+  side.rand = nil
+  for i = 1, 3 do
+    seq_layer_normalize_rand(side.verts[i])
+  end
   return side
+end
+
+-- Where a corner looks for samples: vert.rand = { role = drum type or nil
+-- (the track's own), tags = { tag, ... } (a sample must carry all of them) }.
+-- The dice, the map picker and its tag chips all read and write this.
+function seq_layer_normalize_rand(vert)
+  local rd = vert.rand
+  if type(rd) ~= "table" then
+    vert.rand = nil
+    return
+  end
+  if type(rd.role) ~= "string" or rd.role == "" then
+    rd.role = nil
+  end
+  if type(rd.tags) ~= "table" then
+    rd.tags = {}
+  end
+  if not rd.role and #rd.tags == 0 then
+    vert.rand = nil
+  end
 end
 
 function seq_normalize_slot_layers(slot)
@@ -95,6 +161,19 @@ function seq_normalize_slot_layers(slot)
     if bias < -1.0 then bias = -1.0 elseif bias > 1.0 then bias = 1.0 end
     slot.layers.bias = bias
   end
+  slot.layers.xfade = seq_layering_clamp_xfade(slot.layers.xfade)
+  -- Whole-hit tail: end point and fade-out (seconds from the hit).
+  slot.layers.tail_end = seq_layer_clamp_len(slot.layers.tail_end)
+  slot.layers.tail_fade = seq_layer_clamp_fade(slot.layers.tail_fade)
+  if not slot.layers.tail_end and not slot.layers.tail_fade then
+    slot.layers.tail_fade = nil
+  end
+  -- The sustain as it was when the sides were linked, restored on unlink.
+  if type(slot.layers.unlinked_sustain) == "table" then
+    slot.layers.unlinked_sustain = seq_layer_normalize_side(slot.layers.unlinked_sustain)
+  else
+    slot.layers.unlinked_sustain = nil
+  end
   if slot.layers.top_locked_inited ~= true then
     slot.layers.transient.verts[1].locked = true
     slot.layers.sustain.verts[1].locked = true
@@ -109,6 +188,8 @@ function seq_layering_copy_side(dst, src)
   end
   local sb = src.blend or { 1.0, 0.0, 0.0 }
   dst.blend = { sb[1] or 1.0, sb[2] or 0.0, sb[3] or 0.0 }
+  dst.rand = nil
+  dst.gain = seq_layer_clamp_gain(src.gain)
   for i = 1, 3 do
     local sv = src.verts and src.verts[i]
     if type(dst.verts[i]) ~= "table" then
@@ -119,6 +200,15 @@ function seq_layering_copy_side(dst, src)
       dst.verts[i].name = sv.name
       dst.verts[i].locked = sv.locked == true
       dst.verts[i].vol = seq_layer_vert_vol(sv)
+      dst.verts[i].len = seq_layer_clamp_len(sv.len)
+      dst.verts[i].fade = seq_layer_clamp_fade(sv.fade)
+      if type(sv.rand) == "table" then
+        local tags = {}
+        for k, t in ipairs(sv.rand.tags or {}) do tags[k] = t end
+        dst.verts[i].rand = { role = sv.rand.role, tags = tags }
+      else
+        dst.verts[i].rand = nil
+      end
     end
   end
 end
@@ -130,6 +220,10 @@ function seq_layering_copy_to_slot(dst, src)
   dst.layers.linked = src.layers.linked == true
   dst.layers.output = src.layers.output
   dst.layers.bias = src.layers.bias or 0.0
+  dst.layers.xfade = src.layers.xfade
+  dst.layers.tail_end = src.layers.tail_end
+  dst.layers.tail_fade = src.layers.tail_fade
+  dst.layers.unlinked_sustain = nil
   dst.layers.top_locked_inited = true
   seq_layering_copy_side(dst.layers.transient, src.layers.transient)
   seq_layering_copy_side(dst.layers.sustain, src.layers.sustain)
@@ -152,7 +246,14 @@ function seq_layering_set_linked(slot, linked)
   if slot.layers.linked == linked then return end
   slot.layers.linked = linked
   if linked then
+    -- Keep the sustain's own samples, blend and volumes for when it unlinks.
+    local keep = seq_layer_default_side()
+    seq_layering_copy_side(keep, slot.layers.sustain)
+    slot.layers.unlinked_sustain = keep
     seq_layering_sync_linked(slot, "transient")
+  elseif slot.layers.unlinked_sustain then
+    seq_layering_copy_side(slot.layers.sustain, slot.layers.unlinked_sustain)
+    slot.layers.unlinked_sustain = nil
   end
 end
 
@@ -280,7 +381,10 @@ function seq_layering_collect_pool(slot, side, vert_idx)
   end
   local origin = (verts[vert_idx] and verts[vert_idx].path and find_sample_by_path(verts[vert_idx].path))
       or find_sample_by_path(slot.sample_path)
-  local role = seq_vary_role_for_origin(slot, origin)
+  local rand = verts[vert_idx] and verts[vert_idx].rand
+  local role = (rand and rand.role) or seq_vary_role_for_origin(slot, origin)
+  local tags = rand and rand.tags or nil
+  if tags and #tags == 0 then tags = nil end
 
   local function consider(s, drums_only)
     if not s or not s.path or used[s.path] then
@@ -294,6 +398,13 @@ function seq_layering_collect_pool(slot, side, vert_idx)
     end
     if role and not seq_sample_matches_vary_role(s, role) then
       return
+    end
+    if tags then
+      for t = 1, #tags do
+        if not sample_has_tag(s, tags[t]) then
+          return
+        end
+      end
     end
     pool[#pool + 1] = s
     used[s.path] = true
@@ -326,6 +437,192 @@ function seq_layering_collect_pool(slot, side, vert_idx)
     end
   end
   return pool
+end
+
+-- Drum types that have samples in the library, and the tags found on each
+-- type's samples: { roles = { role = n }, tags = { role = { { tag, count } } } }.
+-- One pass over the library, cached until the tag index changes.
+function seq_layering_role_index()
+  local samples = state.samples or {}
+  local key = tostring(state.tag_index_epoch or 0) .. ":" .. tostring(#samples)
+  local c = seq_layer_role_index_cache
+  if c and c.key == key then
+    return c
+  end
+  local is_role = {}
+  for _, role in ipairs(SEQ_ROLE_ORDER or {}) do is_role[role] = true end
+  local roles, tag_counts = {}, {}
+  local hit = {}
+  for i = 1, #samples do
+    local s = samples[i]
+    if s and s.path and not sample_scan_folder_unavailable(s) then
+      for k in pairs(hit) do hit[k] = nil end
+      local icon_role = seq_icon_role_for_sample(s)
+      if is_role[icon_role] then hit[icon_role] = true end
+      local stags = type(s.tags) == "table" and s.tags or {}
+      for t = 1, #stags do
+        local low = tostring(stags[t]):lower()
+        if is_role[low] then hit[low] = true end
+      end
+      for role in pairs(hit) do
+        roles[role] = (roles[role] or 0) + 1
+        local tc = tag_counts[role]
+        if not tc then
+          tc = {}
+          tag_counts[role] = tc
+        end
+        for t = 1, #stags do
+          local tag = tostring(stags[t])
+          tc[tag] = (tc[tag] or 0) + 1
+        end
+      end
+    end
+  end
+  local tags = {}
+  for role, tc in pairs(tag_counts) do
+    local skip = { [role] = true }
+    for _, alias in ipairs((SEQ_ROLE_TAG_CANDIDATES or {})[role] or {}) do
+      skip[alias] = true
+    end
+    local list = {}
+    for tag, n in pairs(tc) do
+      -- A tag every sample of the type has doesn't narrow anything.
+      if not skip[tag:lower()] and n < (roles[role] or 0) then
+        list[#list + 1] = { tag = tag, count = n }
+      end
+    end
+    table.sort(list, function(a, b)
+      if a.count ~= b.count then return a.count > b.count end
+      return a.tag:lower() < b.tag:lower()
+    end)
+    tags[role] = list
+  end
+  c = { key = key, roles = roles, tags = tags }
+  seq_layer_role_index_cache = c
+  return c
+end
+
+-- The track's own drum type (what a corner draws from by default).
+function seq_layering_track_role(slot)
+  return seq_vary_role_for_origin(slot, find_sample_by_path(slot.sample_path))
+end
+
+local function corner(slot, side_key, idx)
+  seq_normalize_slot_layers(slot)
+  local side = slot.layers[side_key]
+  return side and side.verts[idx], side
+end
+
+-- Drum type a corner draws from: its own choice, else the track's. The
+-- second value is true when the corner chose it.
+function seq_layering_rand_role(slot, side_key, idx)
+  local v = corner(slot, side_key, idx)
+  if v and v.rand and v.rand.role then
+    return v.rand.role, true
+  end
+  return seq_layering_track_role(slot), false
+end
+
+-- role: a drum type, or nil for the track's own. Changing the type drops tags
+-- that belonged to the old one.
+function seq_layering_set_rand_role(slot, side_key, idx, role)
+  local v = corner(slot, side_key, idx)
+  if not v then return false end
+  if role == "" or role == seq_layering_track_role(slot) then role = nil end
+  local cur = v.rand and v.rand.role or nil
+  if cur == role then return false end
+  v.rand = { role = role, tags = {} }
+  seq_layer_normalize_rand(v)
+  seq_layering_sync_linked(slot, side_key)
+  return true
+end
+
+function seq_layering_rand_has_tag(slot, side_key, idx, tag)
+  local v = corner(slot, side_key, idx)
+  if not v or not v.rand then return false end
+  for _, t in ipairs(v.rand.tags or {}) do
+    if t == tag then return true end
+  end
+  return false
+end
+
+function seq_layering_toggle_rand_tag(slot, side_key, idx, tag)
+  local v = corner(slot, side_key, idx)
+  if not v then return false end
+  v.rand = v.rand or { tags = {} }
+  local tags = v.rand.tags
+  local found = false
+  for i = #tags, 1, -1 do
+    if tags[i] == tag then
+      table.remove(tags, i)
+      found = true
+    end
+  end
+  if not found then
+    tags[#tags + 1] = tag
+  end
+  seq_layer_normalize_rand(v)
+  seq_layering_sync_linked(slot, side_key)
+  return true
+end
+
+function seq_layering_clear_rand(slot, side_key, idx)
+  local v = corner(slot, side_key, idx)
+  if not v or not v.rand then return false end
+  v.rand = nil
+  seq_layering_sync_linked(slot, side_key)
+  return true
+end
+
+-- Label of a corner's source: "Clap · punchy, dry", or the track's type.
+-- The second value is true when the corner has its own source.
+function seq_layering_rand_label(slot, side_key, idx)
+  local v = corner(slot, side_key, idx)
+  local labels = SEQ_ROLE_LABELS or {}
+  local role, own = seq_layering_rand_role(slot, side_key, idx)
+  local bits = { role and (labels[role] or role) or "Any" }
+  local tags = v and v.rand and v.rand.tags or {}
+  if #tags > 0 then
+    bits[#bits + 1] = table.concat(tags, ", ")
+  end
+  return table.concat(bits, " · "), own or #tags > 0
+end
+
+-- Samples a corner can draw from (drum type and tags), placed on the map.
+-- Cached per filter until the library or its tags change.
+function seq_layering_corner_samples(slot, side_key, idx)
+  local role = seq_layering_rand_role(slot, side_key, idx)
+  local v = corner(slot, side_key, idx)
+  local tags = v and v.rand and v.rand.tags or {}
+  local samples = state.samples or {}
+  local key = tostring(role) .. "|" .. table.concat(tags, "\0") .. "|"
+      .. tostring(state.tag_index_epoch or 0) .. ":" .. tostring(#samples)
+  local cache = seq_layer_corner_pool_cache
+  if cache and cache.key == key then
+    return cache.list
+  end
+  local list = {}
+  for i = 1, #samples do
+    local s = samples[i]
+    if s and s.path and s.x and s.y and not sample_scan_folder_unavailable(s)
+        and (not role or seq_sample_matches_vary_role(s, role)) then
+      local ok = true
+      for t = 1, #tags do
+        if not sample_has_tag(s, tags[t]) then
+          ok = false
+          break
+        end
+      end
+      if ok then
+        if not s._render_color then
+          s._render_color = get_sample_dot_color(s)
+        end
+        list[#list + 1] = s
+      end
+    end
+  end
+  seq_layer_corner_pool_cache = { key = key, list = list }
+  return list
 end
 
 function seq_layering_ensure_audible(side, idx)
@@ -458,18 +755,71 @@ function seq_layering_piece_times(sample, side_key, slot)
 end
 
 SEQ_LAYER_XFADE_SEC = 0.008
+SEQ_LAYER_XFADE_MIN = 0.001
+SEQ_LAYER_XFADE_MAX = 0.25
 SEQ_LAYER_VOL_MAX = 4.0
+
+function seq_layering_clamp_xfade(sec)
+  sec = tonumber(sec)
+  if sec == nil or sec ~= sec then
+    return SEQ_LAYER_XFADE_SEC
+  end
+  if sec < SEQ_LAYER_XFADE_MIN then return SEQ_LAYER_XFADE_MIN end
+  if sec > SEQ_LAYER_XFADE_MAX then return SEQ_LAYER_XFADE_MAX end
+  return sec
+end
+
+-- Crossfade length (seconds) between the transient and the sustain.
+function seq_layering_get_xfade(slot)
+  if not slot then return SEQ_LAYER_XFADE_SEC end
+  seq_normalize_slot_layers(slot)
+  return slot.layers.xfade
+end
+
+function seq_layering_set_xfade(slot, sec)
+  if not slot then return false end
+  seq_normalize_slot_layers(slot)
+  sec = seq_layering_clamp_xfade(sec)
+  if math.abs((slot.layers.xfade or 0) - sec) < 1e-7 then
+    return false
+  end
+  slot.layers.xfade = sec
+  return true
+end
+
+-- The crossfade window around the split, in mix time: it opens `pre` before
+-- the split and closes `post` after it. `pre` never eats more than half the
+-- transient, so a long fade still keeps the attack whole.
+function seq_layering_xfade_window(slot, split)
+  local xf = seq_layering_get_xfade(slot)
+  split = split or seq_layering_split_sec(slot)
+  local post = xf * 0.5
+  local pre = math.min(xf * 0.5, split * 0.5)
+  return pre, post
+end
 
 function seq_layering_geometry_active(slot)
   if not slot then
     return false
   end
   seq_normalize_slot_layers(slot)
+  if slot.layers.tail_end or slot.layers.tail_fade then
+    return true
+  end
   local sides = { slot.layers.transient, slot.layers.sustain }
   for s = 1, 2 do
     local side = sides[s]
     if math.abs((side.blend[1] or 1.0) - 1.0) > 0.02 then
       return true
+    end
+    if math.abs((side.gain or 1.0) - 1.0) > 0.001 then
+      return true
+    end
+    for i = 1, 3 do
+      local v = side.verts[i]
+      if v.path and (v.len or v.fade) and (side.blend[i] or 0) >= 0.02 then
+        return true
+      end
     end
     for i = 2, 3 do
       if (side.blend[i] or 0.0) >= 0.02 and side.verts[i] and side.verts[i].path then
@@ -700,92 +1050,203 @@ function seq_layering_remap_piece_lanes(pieces)
   return pieces
 end
 
-function seq_layering_build_pieces(slot)
+-- Cuts piece p at end_t (seconds from the hit) and fades it out so it reaches
+-- silence there, the fade starting at fade_from. A piece that ends earlier
+-- on its own still follows the fade.
+local function piece_end_at(p, end_t, fade_from)
+  local _, _, _, t_off, len = seq_layering_piece_span(p)
+  local p_end = t_off + len
+  if end_t and end_t < p_end then
+    p_end = math.max(t_off + 0.001, end_t)
+    p.length_sec = p_end - t_off
+  end
+  if fade_from and fade_from < p_end then
+    p.fade_out = math.max(p.fade_out or 0.0, p_end - math.max(t_off, fade_from))
+  end
+  local plen = p.length_sec or len
+  if (p.fade_out or 0) > plen then p.fade_out = plen end
+  if (p.fade_in or 0) > plen then p.fade_in = plen end
+end
+
+-- opts.no_tail: ignore the whole-hit tail; opts.no_corner_cut: ignore corner
+-- lengths and fades (both for drawing what a cut takes away).
+function seq_layering_build_pieces(slot, opts)
   seq_normalize_slot_layers(slot)
   if not seq_layering_geometry_active(slot) then
     return {}
   end
+  opts = opts or {}
+  local pieces = {}
+  local function add(path, v, weight, fields, owners)
+    local p = {
+      path = path,
+      sample = find_sample_by_path(path) or { path = path, name = v and v.name },
+      weight = weight,
+      startoffs = 0.0,
+      time_offset_sec = 0.0,
+      length_sec = nil,
+      fade_in = 0.0,
+      fade_out = 0.0,
+      owners = owners,
+    }
+    for k, val in pairs(fields or {}) do p[k] = val end
+    pieces[#pieces + 1] = p
+    return p
+  end
+
   if slot.layers.linked then
     local side = slot.layers.transient
-    local pieces = {}
     for i = 1, 3 do
       local v, w = side.verts[i], side.blend[i] or 0.0
       local path = (w >= 0.02 and v and v.path) and normalize_path(v.path) or nil
       if path then
-        pieces[#pieces + 1] = {
-          path = path,
-          sample = find_sample_by_path(path) or { path = path, name = v and v.name },
-          weight = w * seq_layer_vert_vol(v),
-          lane = i - 1,
-          startoffs = 0.0,
-          time_offset_sec = 0.0,
-          length_sec = nil,
-          fade_in = 0.0,
-          fade_out = 0.0,
-        }
+        add(path, v, w * seq_layer_vert_vol(v) * side.gain, { lane = i - 1 },
+          { { side = "transient", idx = i }, { side = "sustain", idx = i } })
       end
     end
-    return seq_layering_remap_piece_lanes(pieces)
-  end
-  local tside = slot.layers.transient
-  local sside = slot.layers.sustain
-  local split = seq_layering_split_sec(slot)
-  local xf = SEQ_LAYER_XFADE_SEC
-  if split < xf * 2.0 then
-    xf = math.max(0.002, split * 0.35)
-  end
-  local pieces = {}
-  for i = 1, 3 do
-    local tv, tw = tside.verts[i], tside.blend[i] or 0.0
-    local sv, sw = sside.verts[i], sside.blend[i] or 0.0
-    local tpath = (tw >= 0.02 and tv and tv.path) and normalize_path(tv.path) or nil
-    local spath = (sw >= 0.02 and sv and sv.path) and normalize_path(sv.path) or nil
-    if tpath and spath and tpath == spath and math.abs(tw - sw) < 0.05 then
-      pieces[#pieces + 1] = {
-        path = tpath,
-        sample = find_sample_by_path(tpath) or { path = tpath, name = tv and tv.name },
-        weight = (tw * seq_layer_vert_vol(tv) + sw * seq_layer_vert_vol(sv)) * 0.5,
-        lane = i - 1,
-        startoffs = 0.0,
-        time_offset_sec = 0.0,
-        length_sec = nil,
-        fade_in = 0.0,
-        fade_out = 0.0,
-      }
-    else
-      if tpath then
-        local sample = find_sample_by_path(tpath) or { path = tpath, name = tv and tv.name }
-        local offs = seq_layering_piece_times(sample, "transient", slot)
-        pieces[#pieces + 1] = {
-          path = tpath,
-          sample = sample,
-          weight = tw * seq_layer_vert_vol(tv),
-          lane = i - 1,
-          startoffs = offs or 0.0,
-          time_offset_sec = 0.0,
-          length_sec = split + xf,
-          fade_in = 0.0,
-          fade_out = xf,
-        }
-      end
-      if spath then
-        local sample = find_sample_by_path(spath) or { path = spath, name = sv and sv.name }
-        local offs, slen = seq_layering_piece_times(sample, "sustain", slot)
-        pieces[#pieces + 1] = {
-          path = spath,
-          sample = sample,
-          weight = sw * seq_layer_vert_vol(sv),
-          lane = i - 1,
-          startoffs = offs or 0.0,
-          time_offset_sec = split,
-          length_sec = slen,
-          fade_in = xf,
-          fade_out = 0.0,
-        }
+  else
+    local tside = slot.layers.transient
+    local sside = slot.layers.sustain
+    local split = seq_layering_split_sec(slot)
+    local pre, post = seq_layering_xfade_window(slot, split)
+    for i = 1, 3 do
+      local tv, tw = tside.verts[i], tside.blend[i] or 0.0
+      local sv, sw = sside.verts[i], sside.blend[i] or 0.0
+      local tpath = (tw >= 0.02 and tv and tv.path) and normalize_path(tv.path) or nil
+      local spath = (sw >= 0.02 and sv and sv.path) and normalize_path(sv.path) or nil
+      local tgain = tw * seq_layer_vert_vol(tv) * tside.gain
+      local sgain = sw * seq_layer_vert_vol(sv) * sside.gain
+      if tpath and spath and tpath == spath and math.abs(tgain - sgain) < 0.05
+          and tv.len == sv.len and tv.fade == sv.fade then
+        -- Same sample at the same level on both sides: play it whole.
+        add(tpath, tv, (tgain + sgain) * 0.5, { lane = i - 1 },
+          { { side = "transient", idx = i }, { side = "sustain", idx = i } })
+      else
+        if tpath then
+          local sample = find_sample_by_path(tpath) or { path = tpath, name = tv and tv.name }
+          local offs = seq_layering_piece_times(sample, "transient", slot)
+          add(tpath, tv, tgain, {
+            sample = sample,
+            lane = i - 1,
+            startoffs = offs or 0.0,
+            length_sec = split + post,
+            fade_out = pre + post,
+          }, { { side = "transient", idx = i } })
+        end
+        if spath then
+          local sample = find_sample_by_path(spath) or { path = spath, name = sv and sv.name }
+          local offs, slen = seq_layering_piece_times(sample, "sustain", slot)
+          offs = offs or 0.0
+          -- Start early by the fade's lead-in (as far as the sample allows).
+          local lead = math.min(pre, offs)
+          add(spath, sv, sgain, {
+            sample = sample,
+            lane = i - 1,
+            startoffs = offs - lead,
+            time_offset_sec = split - lead,
+            length_sec = slen + lead,
+            fade_in = lead + post,
+          }, { { side = "sustain", idx = i } })
+        end
       end
     end
   end
-  return seq_layering_remap_piece_lanes(pieces)
+
+  -- Corner lengths / fades, then the whole-hit tail.
+  local layers = slot.layers
+  local tail_on = not opts.no_tail and (layers.tail_end or layers.tail_fade)
+  local natural_end = nil
+  if tail_on and not layers.tail_end then
+    natural_end = seq_layering_natural_end(slot)
+  end
+  local kept = {}
+  for _, p in ipairs(pieces) do
+    if not opts.no_corner_cut then
+      local o = p.owners[#p.owners]
+      local v = layers[o.side].verts[o.idx]
+      if v.len or v.fade then
+        local _, _, _, t_off, len = seq_layering_piece_span(p)
+        local end_t = v.len or (t_off + len)
+        piece_end_at(p, v.len, v.fade and (math.min(end_t, t_off + len) - v.fade) or nil)
+      end
+    end
+    local keep = true
+    if tail_on then
+      local _, _, _, t_off, len = seq_layering_piece_span(p)
+      local end_t = layers.tail_end or natural_end or (t_off + len)
+      if t_off >= end_t - 0.0005 then
+        keep = false
+      else
+        piece_end_at(p, layers.tail_end, layers.tail_fade and (end_t - layers.tail_fade) or nil)
+      end
+    end
+    if keep then kept[#kept + 1] = p end
+  end
+  return seq_layering_remap_piece_lanes(kept)
+end
+
+function seq_layering_set_side_gain(slot, side_key, g)
+  seq_normalize_slot_layers(slot)
+  local side = slot.layers[side_key]
+  g = seq_layer_clamp_gain(g)
+  if math.abs((side.gain or 1.0) - g) < 1e-7 then return false end
+  side.gain = g
+  seq_layering_sync_linked(slot, side_key)
+  return true
+end
+
+-- Tail end (seconds from the hit; nil or past the natural end = none) and
+-- fade (seconds before the end). The fade never outlasts the end.
+function seq_layering_set_tail(slot, end_t, fade)
+  seq_normalize_slot_layers(slot)
+  local L = slot.layers
+  local natural = seq_layering_natural_end(slot)
+  end_t = seq_layer_clamp_len(end_t)
+  if end_t and natural and end_t >= natural - 0.001 then end_t = nil end
+  local stop = end_t or natural
+  fade = seq_layer_clamp_fade(fade)
+  if fade and stop then fade = math.min(fade, stop) end
+  if L.tail_end == end_t and L.tail_fade == fade then return false end
+  L.tail_end, L.tail_fade = end_t, fade
+  return true
+end
+
+-- Corner length and fade (seconds; nil = natural end / no fade).
+function seq_layering_set_corner_cut(slot, side_key, idx, len, fade)
+  seq_normalize_slot_layers(slot)
+  local v = slot.layers[side_key].verts[idx]
+  len, fade = seq_layer_clamp_len(len), seq_layer_clamp_fade(fade)
+  if v.len == len and v.fade == fade then return false end
+  v.len, v.fade = len, fade
+  seq_layering_sync_linked(slot, side_key)
+  return true
+end
+
+-- Where a corner's sound starts and ends in the hit (seconds), before its
+-- own length / fade, or nil when it isn't heard.
+function seq_layering_corner_span(slot, side_key, idx)
+  local t0, t1 = nil, nil
+  for _, p in ipairs(seq_layering_build_pieces(slot, { no_tail = true, no_corner_cut = true })) do
+    for _, o in ipairs(p.owners or {}) do
+      if o.side == side_key and o.idx == idx then
+        local _, _, _, t_off, len = seq_layering_piece_span(p)
+        t0 = math.min(t0 or t_off, t_off)
+        t1 = math.max(t1 or 0, t_off + len)
+      end
+    end
+  end
+  return t0, t1
+end
+
+-- End of the hit before the tail cuts it (seconds).
+function seq_layering_natural_end(slot)
+  local pieces = seq_layering_build_pieces(slot, { no_tail = true })
+  local dur = nil
+  for i = 1, #pieces do
+    local _, _, _, t_off, len = seq_layering_piece_span(pieces[i])
+    if not dur or t_off + len > dur then dur = t_off + len end
+  end
+  return dur
 end
 
 function seq_item_apply_layer_fades(item, fade_in, fade_out)
@@ -820,7 +1281,8 @@ function seq_layering_randomize_vert(slot, side, vert_idx)
   end
   local pool = seq_layering_collect_pool(slot, side, vert_idx)
   if #pool == 0 then
-    log("No other samples available to layer")
+    local filter, own = seq_layering_rand_label(slot, side, vert_idx)
+    log(own and ("No samples match " .. filter) or "No other samples available to layer")
     return false
   end
   local pick = pool[math.random(1, #pool)]
@@ -930,16 +1392,61 @@ function seq_layering_mix_fingerprint(slot)
   local bits = { tostring(slot.id or 0), slot.layers.linked and "1" or "0" }
   for _, side_key in ipairs({ "transient", "sustain" }) do
     local side = slot.layers[side_key]
-    bits[#bits + 1] = string.format("%.3f,%.3f,%.3f", side.blend[1] or 0, side.blend[2] or 0, side.blend[3] or 0)
+    bits[#bits + 1] = string.format("%.3f,%.3f,%.3f,%.4f", side.blend[1] or 0, side.blend[2] or 0, side.blend[3] or 0, side.gain or 1)
     for i = 1, 3 do
       local v = side.verts[i]
       bits[#bits + 1] = (v and v.path) or ""
-      bits[#bits + 1] = string.format("%.3f", seq_layer_vert_vol(v))
+      bits[#bits + 1] = string.format("%.3f,%.4f,%.4f", seq_layer_vert_vol(v), v.len or -1, v.fade or -1)
     end
   end
+  bits[#bits + 1] = string.format("%.4f,%.4f", slot.layers.tail_end or -1, slot.layers.tail_fade or -1)
   bits[#bits + 1] = slot.sample_path or ""
   bits[#bits + 1] = string.format("%.3f", slot.layers.bias or 0.0)
+  bits[#bits + 1] = string.format("%.4f", slot.layers.xfade or 0.0)
   return table.concat(bits, "|")
+end
+
+-- Where a piece sits: its sample, source length, source offset, start in
+-- the mix and length (seconds). A piece without a length plays to its end.
+function seq_layering_piece_span(p)
+  local sample = p.sample or find_sample_by_path(p.path)
+  local pdur = seq_sample_source_length_sec(p.path, sample)
+      or (sample and tonumber(sample.duration)) or 0.2
+  local startoffs = p.startoffs or 0.0
+  local t_off = p.time_offset_sec or 0.0
+  local len = p.length_sec
+  if not len or len <= 0 then
+    len = math.max(0.01, pdur - startoffs)
+  end
+  -- A piece never outlasts its source.
+  len = math.max(0.001, math.min(len, pdur - startoffs))
+  return sample, pdur, startoffs, t_off, len
+end
+
+-- Length of the layered hit (seconds): until its last piece ends, or nil when
+-- the track isn't layered.
+function seq_layering_mix_duration(slot)
+  if not slot then return nil end
+  local pieces = seq_layering_build_pieces(slot)
+  if #pieces == 0 then return nil end
+  local dur = 0.0
+  for i = 1, #pieces do
+    local _, _, _, t_off, len = seq_layering_piece_span(pieces[i])
+    if t_off + len > dur then dur = t_off + len end
+  end
+  return dur > 0.001 and dur or nil
+end
+
+-- Fade gain of a piece at t seconds into it (linear, as the preview draws it).
+function seq_layering_piece_gain(t, len, fade_in, fade_out)
+  local g = 1.0
+  if fade_in and fade_in > 0 and t < fade_in then
+    g = g * math.max(0.0, t / fade_in)
+  end
+  if fade_out and fade_out > 0 and t > len - fade_out then
+    g = g * math.max(0.0, (len - t) / fade_out)
+  end
+  return g
 end
 
 -- Peaks of the layered mix (normalized to 1), its duration, and "ribbon"
@@ -966,15 +1473,7 @@ function seq_layering_mix_peaks(slot, width)
   local resolved = {}
   for i = 1, #pieces do
     local p = pieces[i]
-    local sample = p.sample or find_sample_by_path(p.path)
-    local pdur = seq_sample_source_length_sec(p.path, sample)
-        or (sample and tonumber(sample.duration)) or 0.2
-    local startoffs = p.startoffs or 0.0
-    local t_off = p.time_offset_sec or 0.0
-    local len = p.length_sec
-    if not len or len <= 0 then
-      len = math.max(0.01, pdur - startoffs)
-    end
+    local sample, pdur, startoffs, t_off, len = seq_layering_piece_span(p)
     local end_t = t_off + len
     if end_t > dur then dur = end_t end
     resolved[#resolved + 1] = {
@@ -983,8 +1482,16 @@ function seq_layering_mix_peaks(slot, width)
       t_off = t_off,
       len = len,
       weight = p.weight or 1.0,
+      fade_in = p.fade_in or 0.0,
+      fade_out = p.fade_out or 0.0,
       pdur = pdur,
     }
+  end
+  -- The axis runs to where the hit would end without the tail cut, so the
+  -- cut part stays in view (and its handle can be dragged back out).
+  if slot.layers.tail_end then
+    local natural = seq_layering_natural_end(slot)
+    if natural and natural > dur then dur = natural end
   end
   if dur <= 0.001 then dur = 0.2 end
   local out, best, best_v = {}, {}, {}
@@ -1009,6 +1516,7 @@ function seq_layering_mix_peaks(slot, width)
             local si = math.floor((src_t / pd) * n) + 1
             if si >= 1 and si <= n then
               local v = (peaks[si] or 0) * rp.weight
+                  * seq_layering_piece_gain(t - rp.t_off, rp.len, rp.fade_in, rp.fade_out)
               out[b] = out[b] + v
               if v > best_v[b] then
                 best_v[b] = v
@@ -1059,7 +1567,7 @@ function seq_layering_start_mix_voice(v, into)
   if not src then
     return
   end
-  local vol = (state.preview_volume or 1.0) * (v.volume or 1.0)
+  local vol = seq_layering_voice_vol(v, into or 0.0)
   local pos = (v.startoffs or 0.0) + (into or 0.0)
   if r.CF_CreatePreview and r.CF_Preview_SetValue and r.CF_Preview_Play then
     local obj = r.CF_CreatePreview(src)
@@ -1088,6 +1596,17 @@ function seq_layering_start_mix_voice(v, into)
   if r.PCM_Source_Destroy then
     pcall(r.PCM_Source_Destroy, src)
   end
+end
+
+-- Preview volume of a voice t seconds after it starts, with its fades.
+function seq_layering_voice_vol(v, t)
+  local g = 1.0
+  if v.len and v.len > 0 then
+    g = seq_layering_piece_gain(t, v.len, v.fade_in, v.fade_out)
+  elseif v.fade_in and v.fade_in > 0 and t < v.fade_in then
+    g = math.max(0.0, t / v.fade_in)
+  end
+  return (state.preview_volume or 1.0) * (v.volume or 1.0) * g
 end
 
 function seq_layering_stop_mix_voice(v)
@@ -1126,6 +1645,11 @@ function seq_layering_update_mix_preview()
     end
     if v and v.started and v.stop_at and elapsed >= v.stop_at then
       seq_layering_stop_mix_voice(v)
+    elseif v and v.started and v.obj and ((v.fade_in or 0) > 0 or (v.fade_out or 0) > 0)
+        and r.CF_Preview_SetValue then
+      -- Fades ride the preview volume, one step per frame.
+      pcall(r.CF_Preview_SetValue, v.obj, "D_VOLUME",
+        seq_layering_voice_vol(v, elapsed - (v.start_at or 0)))
     end
   end
 end
@@ -1154,14 +1678,16 @@ function seq_layering_preview_layered(slot, start_time)
   local voices = {}
   for i = 1, #pieces do
     local piece = pieces[i]
-    local t_off = piece.time_offset_sec or 0.0
-    local len = piece.length_sec
+    local _, _, startoffs, t_off, len = seq_layering_piece_span(piece)
     voices[#voices + 1] = {
       path = piece.path,
-      startoffs = piece.startoffs or 0.0,
+      startoffs = startoffs,
       volume = piece.weight or 1.0,
       start_at = t_off,
-      stop_at = (len and len > 0) and (t_off + len) or nil,
+      stop_at = t_off + len,
+      len = len,
+      fade_in = piece.fade_in or 0.0,
+      fade_out = piece.fade_out or 0.0,
       started = false,
     }
   end
