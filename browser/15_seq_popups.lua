@@ -640,17 +640,41 @@ function render_swap_mode_bar()
     r.ImGui_BeginDisabled(ctx)
   end
 
+  local finish = nil
   if draw_ui_button("swap_cancel", nil, 28, 26, { icon = "close", style = "danger" }) then
-    end_seq_swap_mode(false)
+    finish = false
+  end
+  if r.ImGui_IsItemHovered and r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
+    r.ImGui_SetTooltip(ctx, "Cancel swap: restore the previous sample (Esc)")
   end
 
   r.ImGui_SameLine(ctx)
   if draw_ui_button("swap_confirm", nil, 28, 26, { icon = "check", style = "success" }) then
-    end_seq_swap_mode(true)
+    finish = true
+  end
+  if r.ImGui_IsItemHovered and r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
+    r.ImGui_SetTooltip(ctx, "Keep this sample (Enter)")
   end
 
   if state.block_swap_bar_input then
     r.ImGui_EndDisabled(ctx)
+  end
+
+  -- Esc cancels, Enter confirms, unless typing, dragging or in a popup.
+  if finish == nil and not state.block_swap_bar_input and r.ImGui_IsKeyPressed
+      and not (imgui_text_input_active and imgui_text_input_active())
+      and not (r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0))
+      and not (r.ImGui_IsPopupOpen and r.ImGui_PopupFlags_AnyPopup
+        and r.ImGui_IsPopupOpen(ctx, "", r.ImGui_PopupFlags_AnyPopup())) then
+    if r.ImGui_Key_Escape and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
+      finish = false
+    elseif (r.ImGui_Key_Enter and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Enter(), false))
+        or (r.ImGui_Key_KeypadEnter and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_KeypadEnter(), false)) then
+      finish = true
+    end
+  end
+  if finish ~= nil then
+    end_seq_swap_mode(finish)
   end
 
   r.ImGui_PopStyleVar(ctx, 2)

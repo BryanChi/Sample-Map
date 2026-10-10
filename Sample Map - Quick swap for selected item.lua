@@ -77,12 +77,28 @@ local TAG_KEYWORDS = {
   {tag = "guitar", keys = {"guitar"}, weight = 50},
 }
 
+-- Words of a name, lowercased: split on punctuation, letter/digit runs and
+-- camelCase, so "BigKick_02" gives big, kick, 02 and "Synth Chords" gives
+-- synth, chords (never "ch").
+local function text_tokens(text)
+  local list = {}
+  for word in (text or ""):gmatch("%w+") do
+    word = word:gsub("(%l)(%u)", "%1 %2"):gsub("(%a)(%d)", "%1 %2"):gsub("(%d)(%a)", "%1 %2")
+    for part in word:gmatch("%S+") do
+      list[#list + 1] = part:lower()
+    end
+  end
+  return list
+end
+
 local function infer_tags_from_text(text)
-  local text_l = (text or ""):lower()
+  local list = text_tokens(text)
   local tokens = {}
-  for token in text_l:gmatch("%w+") do
+  for _, token in ipairs(list) do
     tokens[token] = true
   end
+  -- Space-joined words, for multi-word keys such as "finger snap".
+  local joined = " " .. table.concat(list, " ") .. " "
 
   local scored = {}
   for _, entry in ipairs(TAG_KEYWORDS) do
@@ -90,9 +106,10 @@ local function infer_tags_from_text(text)
       local key_l = key:lower()
       local matched = false
       if key_l:find(" ", 1, true) then
-        matched = text_l:find(key_l, 1, true) ~= nil
+        matched = joined:find(" " .. key_l .. " ", 1, true) ~= nil
       else
-        matched = tokens[key_l] or text_l:find(key_l, 1, true) ~= nil
+        -- Whole words only ("tom" must not match "custom"); a plural counts.
+        matched = tokens[key_l] or tokens[key_l .. "s"] or false
       end
       if matched then
         local current = scored[entry.tag] or 0

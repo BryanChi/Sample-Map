@@ -66,10 +66,22 @@ def test_parse_and_extract_one_bar():
         _write_midi(path, events)
         notes, tpq, _tempos, sigs = groove.parse_midi_notes(path)
     assert tpq == 480
-    pattern, velocities, tpb = groove.extract_bar_pattern(notes, tpq, sigs)
+    pattern, velocities, tpb, offsets = groove.extract_bar_pattern(notes, tpq, sigs)
     assert tpb == 1920
     assert pattern["kick"] == [0, 4, 8, 12]
     assert velocities["kick"]["0"] == 100
+    assert offsets["kick"]["0"] == 0.0
+
+
+def test_extract_keeps_micro_timing_and_velocity():
+    tpq = 480
+    s16 = tpq // 4  # 120 ticks per 16th in 4/4
+    # Hat on the "e" of beat 1, played a third of a 16th late (swung), soft.
+    notes = [(0, 36, 110), (s16 + 40, 42, 40)]
+    pattern, velocities, _tpb, offsets = groove.extract_bar_pattern(notes, tpq, [])
+    assert pattern["hat"] == [1]
+    assert velocities["hat"]["1"] == 40
+    assert abs(offsets["hat"]["1"] - 40 / 120.0) < 1e-3
 
 
 def test_pick_preview_bar_skips_count_in_and_sparse_bars():

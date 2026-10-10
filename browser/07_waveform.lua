@@ -615,7 +615,16 @@ function cancel_waveform_generation()
     pcall(function() r.DestroyAudioAccessor(job.accessor) end)
   end
   if job.item and job.track then
+    r.PreventUIRefresh(1)
     pcall(function() r.DeleteTrackMediaItem(job.track, job.item) end)
+    if job.inserted_track then
+      pcall(function() r.DeleteTrack(job.track) end)
+    end
+    r.PreventUIRefresh(-1)
+  end
+  if job.peak_src then
+    -- Peak mode owns its source; in item mode the take owns it.
+    pcall(function() r.PCM_Source_Destroy(job.peak_src) end)
   end
   waveform_gen_job = nil
 end
@@ -666,68 +675,7 @@ function finalize_waveform_job(job)
   return result
 end
 
-function setup_waveform_job(job)
-  local sample = job.sample
-  local temp_track = r.GetTrack(0, 0)
-  if not temp_track then
-    temp_track = r.InsertTrackAtIndex(0, true)
-  end
-  if not temp_track then
-    return false
-  end
-
-  r.PreventUIRefresh(1)
-  local item = r.AddMediaItemToTrack(temp_track)
-  if not item then
-    r.PreventUIRefresh(-1)
-    return false
-  end
-
-  r.SetMediaItemPosition(item, 0, false)
-  local src = r.PCM_Source_CreateFromFile(sample.path)
-  if not src then
-    r.DeleteTrackMediaItem(temp_track, item)
-    r.PreventUIRefresh(-1)
-    return false
-  end
-
-  local duration = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
-  if duration <= 0 then
-    r.DeleteTrackMediaItem(temp_track, item)
-    r.PreventUIRefresh(-1)
-    return false
-  end
-
-  r.SetMediaItemLength(item, duration, false)
-  local take = r.AddTakeToMediaItem(item)
-  if not take then
-    r.DeleteTrackMediaItem(temp_track, item)
-    r.PreventUIRefresh(-1)
-    return false
-  end
-
-  r.SetMediaItemTake_Source(take, src)
-  r.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", 0.0)
-
-  if not r.APIExists("GetAudioAccessorSamples") then
-    r.DeleteTrackMediaItem(temp_track, item)
-    r.PreventUIRefresh(-1)
-    return false
-  end
-
-  local accessor = r.CreateTakeAudioAccessor(take)
-  r.PreventUIRefresh(-1)
-  if not accessor then
-    r.DeleteTrackMediaItem(temp_track, item)
-    return false
-  end
-
-  local sr = pick_number({ r.GetMediaSourceSampleRate(src) }, 44100.0)
-  local channels = math.max(1, math.floor(pick_number({ r.GetMediaSourceNumChannels(src) }, 2)))
-
-  job.track = temp_track
-  job.item = item
-  job.accessor = accessor
+function init_waveform_job_buffers(job, sr, channels, duration)
   job.sr = sr
   job.channels = channels
   job.duration = duration
@@ -742,6 +690,160 @@ function setup_waveform_job(job)
   end
   job.pixel_idx = 0
   job.setup_done = true
+end
+
+-- Preferred path: read peaks straight from a PCM source, so browsing never
+-- adds an item or track to the project (and never marks it modified).
+function setup_waveform_job_peaks(job)
+  if not (r.PCM_Source_CreateFromFile and r.PCM_Source_GetPeaks and r.new_array) then
+    return false
+  end
+  local src = r.PCM_Source_CreateFromFile(job.sample.path)
+  if not src then
+    return false
+  end
+  local duration = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
+  if duration <= 0 then
+    r.PCM_Source_Destroy(src)
+    return false
+  end
+  local sr = pick_number({ r.GetMediaSourceSampleRate(src) }, 44100.0)
+  local channels = math.max(1, math.floor(pick_number({ r.GetMediaSourceNumChannels(src) }, 2)))
+  job.peak_src = src
+  job.peaks_building = r.PCM_Source_BuildPeaks and r.PCM_Source_BuildPeaks(src, 0) ~= 0 or false
+  init_waveform_job_buffers(job, sr, math.min(channels, 8), duration)
+  return true
+end
+
+-- Builds peak files a slice at a time, then reads every pixel in one call.
+-- Returns false when the source gave no peaks (caller falls back to items).
+function process_waveform_peaks(job, deadline)
+  local src = job.peak_src
+  if job.peaks_building then
+    while r.PCM_Source_BuildPeaks(src, 1) ~= 0 do
+      if r.time_precise() >= deadline then
+        return true
+      end
+    end
+    r.PCM_Source_BuildPeaks(src, 2)
+    job.peaks_building = false
+  end
+  local width, channels = job.width, job.channels
+  local buf = r.new_array(channels * width * 2)
+  buf.clear()
+  local ret = r.PCM_Source_GetPeaks(src, width / job.duration, 0.0, channels, width, 0, buf)
+  local got = math.floor(tonumber(ret) or 0) % 1048576
+  if got <= 0 then
+    return false
+  end
+  local vals = buf.table and buf.table() or buf
+  -- Block of maxima (frame-major, channel-interleaved), then a block of minima.
+  local min_off = channels * width
+  for i = 0, width - 1 do
+    for c = 0, channels - 1 do
+      local v = 0.0
+      if i < got then
+        local hi = math.abs(vals[i * channels + c + 1] or 0.0)
+        local lo = math.abs(vals[min_off + i * channels + c + 1] or 0.0)
+        v = hi > lo and hi or lo
+      end
+      job.waveform_channels[c][i + 1] = v
+      job.frequency_channels[c][i + 1] = nil
+      if v > job.max_val_per_channel[c] then
+        job.max_val_per_channel[c] = v
+      end
+    end
+  end
+  job.pixel_idx = width
+  return true
+end
+
+-- Fallback (no peak API, or the source returned no peaks): a temporary item
+-- read through a take audio accessor. Prefers the script's own hidden
+-- preview track; a track inserted here is deleted again on cleanup.
+function setup_waveform_job(job)
+  local sample = job.sample
+  local temp_track = nil
+  if preview_track and r.ValidatePtr2 and r.ValidatePtr2(0, preview_track, "MediaTrack*") then
+    temp_track = preview_track
+  end
+  temp_track = temp_track or r.GetTrack(0, 0)
+  local inserted_track = false
+  if not temp_track then
+    r.InsertTrackAtIndex(0, false)
+    temp_track = r.GetTrack(0, 0)
+    inserted_track = temp_track ~= nil
+  end
+  if not temp_track then
+    return false
+  end
+  local function drop_track()
+    if inserted_track then
+      r.DeleteTrack(temp_track)
+    end
+  end
+
+  r.PreventUIRefresh(1)
+  local item = r.AddMediaItemToTrack(temp_track)
+  if not item then
+    drop_track()
+    r.PreventUIRefresh(-1)
+    return false
+  end
+
+  r.SetMediaItemPosition(item, 0, false)
+  local src = r.PCM_Source_CreateFromFile(sample.path)
+  if not src then
+    r.DeleteTrackMediaItem(temp_track, item)
+    drop_track()
+    r.PreventUIRefresh(-1)
+    return false
+  end
+
+  local duration = pick_number({ r.GetMediaSourceLength(src) }, 0.0)
+  if duration <= 0 then
+    r.DeleteTrackMediaItem(temp_track, item)
+    drop_track()
+    r.PreventUIRefresh(-1)
+    return false
+  end
+
+  r.SetMediaItemLength(item, duration, false)
+  local take = r.AddTakeToMediaItem(item)
+  if not take then
+    r.DeleteTrackMediaItem(temp_track, item)
+    drop_track()
+    r.PreventUIRefresh(-1)
+    return false
+  end
+
+  r.SetMediaItemTake_Source(take, src)
+  r.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", 0.0)
+
+  if not r.APIExists("GetAudioAccessorSamples") then
+    r.DeleteTrackMediaItem(temp_track, item)
+    drop_track()
+    r.PreventUIRefresh(-1)
+    return false
+  end
+
+  local accessor = r.CreateTakeAudioAccessor(take)
+  if not accessor then
+    r.DeleteTrackMediaItem(temp_track, item)
+    drop_track()
+    r.PreventUIRefresh(-1)
+    return false
+  end
+  r.PreventUIRefresh(-1)
+
+  local sr = pick_number({ r.GetMediaSourceSampleRate(src) }, 44100.0)
+  local channels = math.max(1, math.floor(pick_number({ r.GetMediaSourceNumChannels(src) }, 2)))
+
+  job.track = temp_track
+  job.inserted_track = inserted_track
+  job.item = item
+  job.accessor = accessor
+  init_waveform_job_buffers(job, sr, channels, duration)
   return true
 end
 
@@ -849,7 +951,9 @@ function process_waveform_slice(max_ms)
   max_ms = max_ms or 6.0
 
   if not job.setup_done then
-    if not setup_waveform_job(job) then
+    if not job.peaks_failed and setup_waveform_job_peaks(job) then
+      job.peaks_mode = true
+    elseif not setup_waveform_job(job) then
       cancel_waveform_generation()
       return
     end
@@ -861,8 +965,20 @@ function process_waveform_slice(max_ms)
   end
 
   local deadline = r.time_precise() + (max_ms / 1000.0)
-  while job.pixel_idx < job.width and r.time_precise() < deadline do
-    process_waveform_pixel(job)
+  if job.peaks_mode then
+    if not process_waveform_peaks(job, deadline) then
+      -- No peaks from this source: retry next frame through a temp item.
+      pcall(function() r.PCM_Source_Destroy(job.peak_src) end)
+      job.peak_src = nil
+      job.peaks_mode = false
+      job.peaks_failed = true
+      job.setup_done = false
+      return
+    end
+  else
+    while job.pixel_idx < job.width and r.time_precise() < deadline do
+      process_waveform_pixel(job)
+    end
   end
 
   if job.pixel_idx >= job.width then

@@ -55,8 +55,13 @@ except Exception:
     _aifc = None  # type: ignore
 
 _FFMPEG_BIN: Optional[str] = None
+_FFPROBE_BIN: Optional[str] = None
 _SOX_BIN: Optional[str] = None
 _TOOLS_READY = False
+_AFCONVERT_BIN = "/usr/bin/afconvert"
+# Formats the built-in readers handle without an external decoder.
+_NATIVE_EXTS = (".wav", ".wave", ".aif", ".aiff")
+NO_DECODER_ERROR = "no audio decoder found: install ffmpeg (or sox) to analyze this file type"
 
 
 def _find_exec(name: str) -> Optional[str]:
@@ -73,12 +78,81 @@ def _find_exec(name: str) -> Optional[str]:
 
 
 def _ensure_tools() -> None:
-    global _FFMPEG_BIN, _SOX_BIN, _TOOLS_READY
+    global _FFMPEG_BIN, _FFPROBE_BIN, _SOX_BIN, _TOOLS_READY
     if _TOOLS_READY:
         return
     _FFMPEG_BIN = _find_exec("ffmpeg")
+    _FFPROBE_BIN = _find_exec("ffprobe")
     _SOX_BIN = _find_exec("sox")
     _TOOLS_READY = True
+
+
+def have_decoder() -> bool:
+    """True when some external tool can decode compressed audio."""
+    _ensure_tools()
+    if _FFMPEG_BIN or _SOX_BIN:
+        return True
+    return sys.platform == "darwin" and os.path.isfile(_AFCONVERT_BIN)
+
+
+def _parse_ffmpeg_duration(text: str) -> Optional[float]:
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text or "")
+    if not match:
+        return None
+    h, m, sec = match.groups()
+    total = int(h) * 3600 + int(m) * 60 + float(sec)
+    return total if total > 0 else None
+
+
+def probe_duration(path: str) -> Optional[float]:
+    """Full length of a compressed file in seconds (ffprobe, ffmpeg or sox)."""
+    _ensure_tools()
+    try:
+        if _FFPROBE_BIN:
+            proc = subprocess.run(
+                [
+                    _FFPROBE_BIN,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            try:
+                val = float((proc.stdout or "").strip().splitlines()[0])
+                if val > 0:
+                    return val
+            except (ValueError, IndexError):
+                pass
+        if _FFMPEG_BIN:
+            proc = subprocess.run(
+                [_FFMPEG_BIN, "-nostdin", "-hide_banner", "-i", path],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            val = _parse_ffmpeg_duration((proc.stderr or "") + (proc.stdout or ""))
+            if val:
+                return val
+        if _SOX_BIN:
+            proc = subprocess.run(
+                [_SOX_BIN, "--i", "-D", path], capture_output=True, text=True, timeout=30
+            )
+            try:
+                val = float((proc.stdout or "").strip())
+                if val > 0:
+                    return val
+            except ValueError:
+                pass
+    except Exception:
+        return None
+    return None
 
 
 def iterative_fft(samples: List[float]) -> List[complex]:
@@ -1241,6 +1315,128 @@ def _ffmpeg_leading_audio_time(path: str) -> Optional[float]:
         return None
 
 
+def _tail_audible_end(path: str, full_dur: float) -> Optional[float]:
+    """Decode the last ~2s of a compressed file and return its audible end."""
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        tail_start = max(0.0, full_dur - _ANALYSIS_BUF_SEC)
+        if not _convert_trimmed(path, tmp_path, tail_start):
+            return None
+        loaded = read_analysis_buffer_wav(tmp_path)
+        if loaded is None:
+            return None
+        samples, sr = loaded[0], loaded[1]
+        if sample_peak(samples) < _LEADING_SILENCE_PEAK:
+            return _ffmpeg_trailing_silence_start(path, full_dur)
+        end = audible_end_from_samples(samples, sr)
+        if end is None:
+            return None
+        return min(full_dur, tail_start + end)
+    except Exception:
+        return None
+    finally:
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _parse_trailing_silence(text: str, full_dur: float) -> Optional[float]:
+    """Start of a silencedetect run that lasts to the end of the file."""
+    starts = [float(m) for m in re.findall(r"silence_start:\s*(-?[0-9.]+)", text or "")]
+    ends = [float(m) for m in re.findall(r"silence_end:\s*([0-9.]+)", text or "")]
+    if not starts:
+        return None
+    last = starts[-1]
+    if len(ends) >= len(starts) and ends[-1] < full_dur - 0.1:
+        return None  # last silence ended before the file did
+    return max(0.0, last) + _AUDIBLE_HANG_SEC
+
+
+def _ffmpeg_trailing_silence_start(path: str, full_dur: float) -> Optional[float]:
+    """Audible end of a file whose last ~2s are silent, via ffmpeg silencedetect."""
+    _ensure_tools()
+    if not _FFMPEG_BIN:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                _FFMPEG_BIN,
+                "-nostdin",
+                "-hide_banner",
+                "-i",
+                path,
+                "-af",
+                "silencedetect=noise=-50dB:d=0.15",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            timeout=45,
+            text=True,
+        )
+    except Exception:
+        return None
+    end = _parse_trailing_silence((proc.stderr or "") + (proc.stdout or ""), full_dur)
+    if end is None or end <= 0.0:
+        return None
+    return min(full_dur, end)
+
+
+def apply_full_duration(
+    result: Dict[str, float],
+    samples: List[float],
+    sr: int,
+    full_dur: Optional[float],
+    excerpt_start: float = 0.0,
+    tail_end: Optional[float] = None,
+) -> Dict[str, float]:
+    """Correct duration fields measured on a short excerpt of a longer file.
+
+    effective_duration and playback_type were computed as if the excerpt were
+    the whole file; redo them with the real length.
+    """
+    if not result or not full_dur or not samples or sr <= 0:
+        return result
+    buf_end = excerpt_start + len(samples) / float(sr)
+    if full_dur <= buf_end + 0.05:
+        return result
+    if tail_end and tail_end > 0:
+        # A silent tail that starts inside the excerpt keeps the excerpt's crop.
+        effective = tail_end if tail_end > buf_end else result.get("effective_duration", tail_end)
+    else:
+        effective = full_dur
+    result["effective_duration"] = float(effective)
+    result["playback_type"] = detect_playback_type(  # type: ignore[assignment]
+        samples, sr, full_dur, effective
+    )
+    return result
+
+
+def _analyze_excerpt(
+    tmp_path: str, path: str, mode: str, full_dur: Optional[float], excerpt_start: float
+) -> Optional[Dict[str, float]]:
+    """Analyze a decoded temp WAV, then fix durations using the source length."""
+    if not full_dur:
+        return analyze_wav(tmp_path, mode)
+    loaded = read_analysis_buffer_wav(tmp_path)
+    if loaded is None:
+        return analyze_wav(tmp_path, mode)
+    samples, sr, file_dur, buf_start = loaded
+    result, peak = analyze_samples(samples, sr, tmp_path, mode)
+    result = finish_analysis(result, tmp_path, samples, sr, mode, file_dur, peak)
+    result = shift_time_fields(result, buf_start)
+    start = excerpt_start + buf_start
+    if full_dur > start + len(samples) / float(sr) + 0.05:
+        tail_end = _tail_audible_end(path, full_dur)
+        result = apply_full_duration(result, samples, sr, full_dur, start, tail_end)
+    return result
+
+
 def analyze_via_convert(path: str, mode: str = "full") -> Optional[Dict[str, float]]:
     """Convert non-WAV to a short temp WAV, then analyze. Prefers a 2s trim."""
     tmp_path = None
@@ -1252,8 +1448,9 @@ def analyze_via_convert(path: str, mode: str = "full") -> Optional[Dict[str, flo
             converted = _convert_trimmed(path, tmp_path)
         except Exception:
             converted = False
+        excerpt = converted
         if not converted and sys.platform == "darwin":
-            afconvert = "/usr/bin/afconvert"
+            afconvert = _AFCONVERT_BIN
             if os.path.isfile(afconvert):
                 proc = subprocess.run(
                     [afconvert, path, tmp_path, "-f", "WAVE", "-d", "LEI16", "-c", "1"],
@@ -1268,6 +1465,8 @@ def analyze_via_convert(path: str, mode: str = "full") -> Optional[Dict[str, flo
                 )
         if not converted:
             return None
+        # ffmpeg/sox decode only a ~2s excerpt; afconvert decodes the whole file.
+        full_dur = probe_duration(path) if excerpt and mode not in ("transient", "weight") else None
         if _wav_file_is_silent(tmp_path):
             start = _ffmpeg_leading_audio_time(path)
             if start is not None and start > 0.1:
@@ -1276,9 +1475,9 @@ def analyze_via_convert(path: str, mode: str = "full") -> Optional[Dict[str, flo
                 except OSError:
                     pass
                 if _convert_trimmed(path, tmp_path, start):
-                    data = analyze_wav(tmp_path, mode)
+                    data = _analyze_excerpt(tmp_path, path, mode, full_dur, start)
                     return shift_time_fields(data, start) if data else None
-        return analyze_wav(tmp_path, mode)
+        return _analyze_excerpt(tmp_path, path, mode, full_dur, 0.0)
     except Exception:
         return None
     finally:
@@ -1418,7 +1617,13 @@ def analyze_job_payload(path: str, mode: str) -> Dict[str, object]:
             or payload.get("transient_end") is not None
         )
         if not useful:
-            payload["_error"] = "could not decode audio"
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in _NATIVE_EXTS and not have_decoder():
+                # Not the file's fault: say what to install, so the browser
+                # never offers to delete a file that is merely undecodable here.
+                payload["_error"] = NO_DECODER_ERROR
+            else:
+                payload["_error"] = "could not decode audio"
     except Exception as exc:
         payload["_error"] = str(exc)
     return payload

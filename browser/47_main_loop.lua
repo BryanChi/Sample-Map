@@ -219,6 +219,7 @@ function sm_loop_frame()
   if ui_ok then
     ui_call("draw_sample_drag_ghost", draw_sample_drag_ghost)
     ui_call("hint_card_flush", hint_card_flush)
+    ui_call("sm_draw_toast", sm_draw_toast)
     sm_pcall("complete_pending_sample_drop", complete_pending_sample_drop)
   end
   pcall(ui_pop_theme)

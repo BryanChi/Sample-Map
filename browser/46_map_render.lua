@@ -506,18 +506,27 @@ function scan_session_did_work(session)
 end
 
 function play_scan_complete_sound()
-  local sounds = {
-    "/System/Library/Sounds/Glass.aiff",
-    "/System/Library/Sounds/Hero.aiff",
-    "/System/Library/Sounds/Ping.aiff",
+  if SM_IS_WINDOWS then
+    -- ExecProcess with -1 returns at once and opens no console window.
+    local wav = "C:\\Windows\\Media\\chimes.wav"
+    if r.ExecProcess and r.file_exists(wav) then
+      pcall(r.ExecProcess, 'powershell -NoProfile -WindowStyle Hidden -Command "(New-Object Media.SoundPlayer \'' .. wav .. '\').PlaySync()"', -1)
+    end
+    return
+  end
+  local players = {
+    { "afplay", "/System/Library/Sounds/Glass.aiff" },
+    { "afplay", "/System/Library/Sounds/Hero.aiff" },
+    { "paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga" },
+    { "aplay", "/usr/share/sounds/alsa/Front_Center.wav" },
   }
-  for i = 1, #sounds do
-    if r.file_exists(sounds[i]) then
-      os.execute("afplay " .. shell_escape(sounds[i]) .. " >/dev/null 2>&1 &")
+  for i = 1, #players do
+    local cmd, sound = players[i][1], players[i][2]
+    if r.file_exists(sound) and (cmd == "afplay") == (SM_IS_MAC and true or false) then
+      os.execute(cmd .. " " .. shell_escape(sound) .. " >/dev/null 2>&1 &")
       return
     end
   end
-  os.execute('printf "\\a" >/dev/null 2>&1 &')
 end
 
 function finish_scan_session(still_incomplete)
@@ -629,6 +638,14 @@ function finish_scan_session(still_incomplete)
     end
   end
 
+  for _, row in ipairs(debug_samples) do
+    if tostring(row.why or ""):find("no audio decoder", 1, true) then
+      local hint = "No audio decoder found: install ffmpeg to analyze mp3, flac, ogg and m4a files, then rescan."
+      note = note and (note .. "\n" .. hint) or hint
+      break
+    end
+  end
+
   local error_tooltip = nil
   if #debug_lines > 0 then
     error_tooltip = table.concat(debug_lines, "\n")
@@ -688,10 +705,15 @@ function sample_row_is_unreadable(entry)
   if type(entry) ~= "table" then
     return false
   end
+  -- Only failures that point at the file itself. "no audio decoder found"
+  -- (ffmpeg/sox missing) and "empty analyzer output" (worker trouble) are not
+  -- the file's fault, so they are never offered for deletion.
   local why = tostring(entry.why or "")
+  if why:find("no audio decoder", 1, true) then
+    return false
+  end
   return why:find("could not decode", 1, true) ~= nil
     or why:find("file not found", 1, true) ~= nil
-    or why:find("empty analyzer", 1, true) ~= nil
 end
 
 function scan_complete_unreadable_paths(dlg)
@@ -787,13 +809,11 @@ function draw_scan_complete_sample_menu_items(path, name, why)
     r.ImGui_TextColored(ctx, UI_THEME.text_dim, why)
   end
   r.ImGui_Separator(ctx)
-  if r.ImGui_MenuItem(ctx, "Show in Finder") then
+  if r.ImGui_MenuItem(ctx, SM_REVEAL_LABEL) then
     reveal_path_in_finder(path)
   end
   if r.ImGui_MenuItem(ctx, "Open file") then
-    if path and path ~= "" then
-      os.execute("open " .. shell_escape(path) .. " >/dev/null 2>&1 &")
-    end
+    sm_open_path(path)
   end
   if r.ImGui_MenuItem(ctx, "Preview") then
     local sample = lookup_sample_by_path(path)
@@ -812,7 +832,9 @@ function draw_scan_complete_sample_menu_items(path, name, why)
       r.ImGui_SetClipboardText(ctx, path or "")
     end
   end
-  if path and path ~= "" then
+  -- Deletion is only offered for files the analyzer could not read, which is
+  -- what the confirmation text promises.
+  if path and path ~= "" and sample_row_is_unreadable({ why = why }) then
     r.ImGui_Separator(ctx)
     if r.ImGui_MenuItem(ctx, "Delete this file…") then
       local dlg = state.scan_complete_dialog

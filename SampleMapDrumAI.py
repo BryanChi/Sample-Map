@@ -29,7 +29,9 @@ stdout = JSON:
 
 The returned step lists are 16th-note positions (0..15) within one bar; the Lua
 side repeats them across every bar of the region, exactly like the built-in
-templates.
+templates. "bars" is accepted but not used: the caller folds the region into
+one bar before sending it and repeats the result, so a multi-bar variation
+would need a multi-bar writer on the Lua side first.
 """
 
 import sys

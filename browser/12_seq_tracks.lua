@@ -621,6 +621,21 @@ function seq_clear_candidate_drag_state()
   state.seq_candidate_drag_source = nil
 end
 
+-- Automatic sample changes (randomize kit, Recent kits, arrow-key browsing,
+-- stem import) run inside this so they don't overwrite the sample saved in
+-- the selected candidate square. Only an explicit pick saves there.
+SEQ_CANDIDATE_SAVE_BLOCK = 0
+
+function seq_without_candidate_save(fn, ...)
+  SEQ_CANDIDATE_SAVE_BLOCK = SEQ_CANDIDATE_SAVE_BLOCK + 1
+  local res = table.pack(pcall(fn, ...))
+  SEQ_CANDIDATE_SAVE_BLOCK = SEQ_CANDIDATE_SAVE_BLOCK - 1
+  if not res[1] then
+    error(res[2], 0)
+  end
+  return table.unpack(res, 2, res.n)
+end
+
 function seq_remember_sample_candidate(slot, sample)
   if not slot then
     return nil
@@ -632,6 +647,10 @@ function seq_remember_sample_candidate(slot, sample)
   end
   local entry = seq_candidate_entry_from_sample(sample)
   if not entry then
+    return nil
+  end
+  if (SEQ_CANDIDATE_SAVE_BLOCK or 0) > 0 and seq_candidate_entry_taken(slot.sample_candidates[idx]) then
+    -- An automatic change may fill an empty square, never replace a saved one.
     return nil
   end
   slot.sample_candidates[idx] = entry
