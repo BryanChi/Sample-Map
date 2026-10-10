@@ -241,3 +241,52 @@ def test_child_rows_and_variation_popup_render():
       return ""
     ''')
     assert err == ""
+
+
+def test_applying_a_pattern_clears_drum_types_it_does_not_use():
+    L = _runtime()
+    out = L.execute(r'''
+      SEQ_GEN_TEMPLATES.__only_kick = { kick = {0} }
+      state.seq_grid_qn = 0.25
+      state.seq_tracks = {
+        { id = 1, sample_path = "/k.wav", role = "kick" },
+        { id = 2, sample_path = "/s.wav", role = "snare" },
+        { id = 3, sample_path = "/b.wav", role = "bass" },
+        { id = 4, sample_path = "/keys.wav", role = "other" },
+      }
+      infer_seq_track_role = function(slot) return slot.role end
+      seq_note_is_locked = function(n) return type(n) == "table" and n.locked == true end
+      seq_note_qn_offset = function(n) return (n.step or 0) * 0.25 end
+      clone_table_deep = clone_table_deep or function(t)
+        local c = {}
+        for k, v in pairs(t) do c[k] = v end
+        return c
+      end
+      PAT = { notes = {
+        ["2"] = { ["4"] = { step = 4 }, ["12"] = { step = 12, locked = true } },
+        ["3"] = { ["2"] = { step = 2 } },
+        ["4"] = { ["0"] = { step = 0 } },
+      } }
+      get_seq_pattern = function() return PAT end
+      get_seq_region_length_qn = function() return 4 end
+      seq_merge_locked_cell_seen = function(seen) return seen end
+      make_default_seq_note = function(_, step) return { step = step } end
+      set_seq_note = function(_, track, step, note)
+        local key = tostring(track)
+        PAT.notes[key] = PAT.notes[key] or {}
+        PAT.notes[key][tostring(step)] = note
+      end
+      sync_seq_pattern_regions = function() end
+      generate_seq_pattern({ pattern_id = 1 }, "__only_kick", {})
+      local function keys(t)
+        local ks = {}
+        for k in pairs(t or {}) do ks[#ks + 1] = k end
+        table.sort(ks)
+        return table.concat(ks, ",")
+      end
+      return table.concat({ tostring(PAT.notes["1"] and PAT.notes["1"]["0"] ~= nil),
+        keys(PAT.notes["2"]), keys(PAT.notes["3"]), keys(PAT.notes["4"]) }, "|")
+    ''')
+    # kick gets the pattern, unused snare/bass are cleared (locked snare hit
+    # stays), the non-drum keys track is untouched.
+    assert out == "true|12||0"
