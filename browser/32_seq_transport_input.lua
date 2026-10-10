@@ -103,8 +103,73 @@ function seq_layering_blocks_input()
   return false
 end
 
+-- Side windows (Pattern Presets, Fill Designer) dock over/next to the
+-- sequencer's right edge. Each records its screen rect + hover every frame it
+-- is drawn; the sequencer reads last frame's values so hover cursors and
+-- clicks under the window never reach the grid behind it.
+function seq_side_window_track(id, visible)
+  state.seq_side_windows = state.seq_side_windows or {}
+  if not visible then
+    state.seq_side_windows[id] = nil
+    return
+  end
+  local entry = {}
+  if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
+    local x, y = r.ImGui_GetWindowPos(ctx)
+    local w, h = r.ImGui_GetWindowSize(ctx)
+    entry.x, entry.y = tonumber(x) or 0, tonumber(y) or 0
+    entry.w, entry.h = tonumber(w) or 0, tonumber(h) or 0
+  end
+  if r.ImGui_IsWindowHovered then
+    local flags = 0
+    if r.ImGui_HoveredFlags_RootAndChildWindows then
+      flags = flags | r.ImGui_HoveredFlags_RootAndChildWindows()
+    end
+    if r.ImGui_HoveredFlags_AllowWhenBlockedByPopup then
+      flags = flags | r.ImGui_HoveredFlags_AllowWhenBlockedByPopup()
+    end
+    entry.hovered = r.ImGui_IsWindowHovered(ctx, flags) and true or false
+  end
+  state.seq_side_windows[id] = entry
+end
+
+local function seq_grid_drag_active()
+  return state.seq_note_drag or state.seq_param_drag or state.seq_region_drag
+      or state.seq_razor_drag or state.seq_lane_h_drag or state.seq_track_reorder_drag
+      or state.pending_waveform_drop
+end
+
+function seq_side_windows_block_input()
+  local wins = state.seq_side_windows
+  if not wins or next(wins) == nil then
+    return false
+  end
+  -- A drag that started on the grid keeps tracking when it crosses the window.
+  if seq_grid_drag_active() then
+    return false
+  end
+  local mx, my
+  if r.ImGui_GetMousePos then
+    mx, my = r.ImGui_GetMousePos(ctx)
+    mx, my = tonumber(mx), tonumber(my)
+  end
+  for _, win in pairs(wins) do
+    if win.hovered then
+      return true
+    end
+    if mx and my and win.w and mx >= win.x and my >= win.y
+        and mx <= win.x + win.w and my <= win.y + win.h then
+      return true
+    end
+  end
+  return false
+end
+
 function imgui_any_popup_open()
   if seq_layering_blocks_input() then
+    return true
+  end
+  if seq_side_windows_block_input() then
     return true
   end
   if state.seq_region_rename then

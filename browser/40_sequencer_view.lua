@@ -1142,7 +1142,12 @@ function render_sequencer_map()
   -- Keep a hard edge so timeline graphics never read as overlapping track controls.
   r.ImGui_DrawList_AddLine(dl, timeline_x0, body_y0, timeline_x0, body_y1, 0x70829CFF, 1.5)
 
-  seq_apply_track_lane_resize_interaction(row_positions, mx, my, x0, width, left_clicked, dl)
+  if popup_blocks_input and not state.seq_lane_h_drag then
+    -- Mouse is over a popup / side window: no resize cursor or divider highlight.
+    state.seq_over_lane_resize = false
+  else
+    seq_apply_track_lane_resize_interaction(row_positions, mx, my, x0, width, left_clicked, dl)
+  end
   seq_update_track_reorder_drag(row_positions, mx, my, left_down, left_clicked, x0, timeline_x0)
   seq_draw_track_reorder_overlay(dl, row_positions, x0, x0 + width)
 
@@ -1265,6 +1270,8 @@ function render_sequencer_map()
     elseif r.ImGui_MouseCursor_ResizeAll then
       r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_ResizeAll())
     end
+  elseif popup_blocks_input then
+    -- Mouse is over a popup / side window: leave the cursor to that window.
   elseif (not edit_def) and seq_stutter_badge_at(mx, my) then
     local badge = seq_stutter_badge_at(mx, my)
     if badge and dl then

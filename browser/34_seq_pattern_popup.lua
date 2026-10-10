@@ -1975,6 +1975,7 @@ end
 
 function render_seq_pattern_popup(region)
   if not state.seq_pattern_window_open then
+    seq_side_window_track("pattern", false)
     return
   end
   seq_position_pattern_popup()
@@ -1993,6 +1994,7 @@ function render_seq_pattern_popup(region)
   if keep_open == false then
     state.seq_pattern_window_open = false
   end
+  seq_side_window_track("pattern", visible and state.seq_pattern_window_open)
   if visible then
     state.seq_gen_style = normalize_seq_gen_style(state.seq_gen_style)
     local can_generate = region and seq_preset_can_generate(state.seq_gen_style)
