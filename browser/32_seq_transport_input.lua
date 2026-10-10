@@ -684,13 +684,20 @@ function seq_hit_test_region_at(mx, my, y0, region_lane_h, timeline_x0, timeline
           return { region = reg, part = "link" }
         end
       end
+      local vis_x1 = rx1
+      if seq_fill_region_icon_fits(rx0, rx1) then
+        local fx0, fy0, fx1, fy1 = seq_fill_region_icon_rect(rx1, y0, region_lane_h)
+        if mx >= fx0 and mx <= fx1 and my >= fy0 and my <= fy1 then
+          return { region = reg, part = "fill" }
+        end
+        vis_x1 = fx0 - 2
+      end
       local _, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after = seq_collect_region_random_entries(reg)
       if has_prob or has_human or has_vel or has_vary or has_stut or has_ghost then
         local vis_x0 = rx0
         if seq_region_is_linked(reg) and (rx1 - rx0) >= (SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD * 2 + 8) then
           vis_x0 = rx0 + SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD + 8
         end
-        local vis_x1 = rx1
         local labels = seq_region_random_label_layout(vis_x0, vis_x1, y0, region_lane_h, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after)
         for _, lab in ipairs(labels) do
           if mx >= lab.x0 and mx <= lab.x1 and my >= lab.y0 and my <= lab.y1 then
