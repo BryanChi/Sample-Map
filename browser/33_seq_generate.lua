@@ -1015,8 +1015,11 @@ function seq_locked_step_seen(locked, track_id)
   return seen
 end
 
--- Clear only the tracks a generator writes to (role present in role_lookup);
--- other tracks (bass, loops, roles the generator doesn't cover) keep their notes.
+-- Applying a pattern replaces the whole beat: clear every drum-type track
+-- (any sequencer role: kick, 808, bass, snare, ... vocal), including types the
+-- pattern doesn't use, so only the pattern's hits remain. Tracks that aren't a
+-- drum type ("other": keys, pads, melodic loops) keep their notes. Locked notes
+-- are collected before this and restored by the caller.
 function seq_clear_generated_role_tracks(pattern, role_lookup)
   if not pattern or type(pattern.notes) ~= "table" or type(role_lookup) ~= "table" then
     return
@@ -1024,7 +1027,7 @@ function seq_clear_generated_role_tracks(pattern, role_lookup)
   for _, slot in ipairs(state.seq_tracks or {}) do
     if slot.sample_path and slot.id ~= nil then
       local role = infer_seq_track_role(slot)
-      if type(role_lookup[role]) == "table" then
+      if type(role_lookup[role]) == "table" or SEQ_ROLE_LABELS[role] then
         pattern.notes[tostring(slot.id)] = nil
       end
     end
