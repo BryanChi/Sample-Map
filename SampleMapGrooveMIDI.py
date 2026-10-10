@@ -14,7 +14,8 @@ Actions
   {"action": "ensure"}                         # download + unpack if needed
   {"action": "styles"}                         # list primary style names
   {"action": "list", "style": "funk", "beat_type": "beat",
-   "bpm_min": 90, "bpm_max": 140, "limit": 40, "offset": 0}
+   "bpm_min": 90, "bpm_max": 140, "limit": 40, "offset": 0,
+   "preview": true}                            # preview adds one bar per item
   {"action": "get", "id": "<gmd id>", "bars": 1, "bar_offset": 0}
   {"action": "random", "style": "rock", "styles": ["rock","punk"],
    "beat_type": "beat", "bars": 1, "seed": 123}
@@ -500,6 +501,68 @@ def summarize(row):
     }
 
 
+PREVIEW_CACHE_NAME = "previews-v1.json"
+
+
+def preview_cache_path():
+    return os.path.join(cache_dir(), PREVIEW_CACHE_NAME)
+
+
+def pick_preview_bar(notes, ticks_per_quarter, time_sigs, total_bars):
+    """First bar (from bar 1 on, skipping a likely count-in) with a full groove:
+    at least two roles and six hits. Falls back to the busiest bar."""
+    best = None
+    order = list(range(1, total_bars)) + [0] if total_bars > 1 else [0]
+    for bar in order:
+        pattern, _vel, _tpb = extract_bar_pattern(notes, ticks_per_quarter, time_sigs, bars=1, bar_offset=bar)
+        hits = sum(len(v) for v in pattern.values())
+        if len(pattern) >= 2 and hits >= 6:
+            return bar, pattern
+        if best is None or hits > best[2]:
+            best = (bar, pattern, hits)
+    return best[0], best[1]
+
+
+def build_preview(entry):
+    path = midi_abs_path(entry["midi_filename"])
+    if not os.path.isfile(path):
+        return None
+    notes, tpq, _tempos, time_sigs = parse_midi_notes(path)
+    tpb, _num, _den = ticks_per_bar(tpq, time_sigs)
+    total_bars = estimate_bar_count(entry, tpb, notes)
+    bar, pattern = pick_preview_bar(notes, tpq, time_sigs, total_bars)
+    return {"b": bar, "p": pattern}
+
+
+def load_previews(rows):
+    """{midi_filename: {"b": bar, "p": {role: [16ths]}}} for rows, computing and
+    caching any that are missing (each MIDI file is parsed once, ever)."""
+    cache = {}
+    try:
+        with open(preview_cache_path(), "r", encoding="utf-8") as fh:
+            cache = json.load(fh)
+    except (OSError, ValueError):
+        cache = {}
+    changed = False
+    for row in rows:
+        key = row["midi_filename"]
+        if key not in cache:
+            try:
+                cache[key] = build_preview(row)
+            except Exception:  # noqa: BLE001 - one bad file shouldn't break the list
+                cache[key] = None
+            changed = True
+    if changed:
+        tmp = preview_cache_path() + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(cache, fh, separators=(",", ":"))
+            os.replace(tmp, preview_cache_path())
+        except OSError:
+            pass
+    return cache
+
+
 def action_list(req):
     if not is_ready():
         return {"error": "dataset not ready; call ensure first"}
@@ -514,11 +577,19 @@ def action_list(req):
     else:
         limit = max(1, min(5000, limit))
         page = rows[offset : offset + limit]
+    items = [summarize(r) for r in page]
+    if req.get("preview"):
+        previews = load_previews(page)
+        for item, row in zip(items, page):
+            pv = previews.get(row["midi_filename"])
+            if pv:
+                item["preview"] = pv["p"]
+                item["preview_bar"] = pv["b"]
     return {
         "total": len(rows),
         "offset": offset,
         "limit": limit,
-        "items": [summarize(r) for r in page],
+        "items": items,
         "engine": ENGINE,
     }
 

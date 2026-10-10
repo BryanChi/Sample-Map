@@ -598,6 +598,24 @@ function ui_draw_extra_icon(dl, icon, cx, cy, size, color, stroke)
         end
       end
     end
+  elseif icon == "star" or icon == "star_fill" then
+    local outer = s * 0.33
+    local inner = outer * 0.43
+    local pts = {}
+    for i = 0, 9 do
+      local a = -math.pi * 0.5 + i * math.pi / 5
+      local rad = (i % 2 == 0) and outer or inner
+      pts[#pts + 1] = { cx + math.cos(a) * rad, cy + 0.03 * s + math.sin(a) * rad }
+    end
+    if icon == "star_fill" then
+      for i = 1, 10 do
+        local p, q = pts[i], pts[(i % 10) + 1]
+        r.ImGui_DrawList_AddTriangleFilled(dl, cx, cy + 0.03 * s, p[1], p[2], q[1], q[2], color)
+      end
+    else
+      pts[#pts + 1] = pts[1]
+      ui_icon_polyline(dl, pts, color, math.max(1.0, stroke * 0.75))
+    end
   elseif icon == "groove" then
     local pts = {}
     for i = 0, 12 do

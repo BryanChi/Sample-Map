@@ -4,7 +4,7 @@ local r = reaper
 
 -- True when a still-to-be-submitted list row intersects the current clip rect.
 function seq_pattern_list_item_visible(row_h)
-  local w = math.max(1.0, r.ImGui_GetContentRegionAvail(ctx))
+  local w = math.max(1.0, (r.ImGui_GetContentRegionAvail(ctx)))
   local h = math.max(1.0, row_h or 1.0)
   if r.ImGui_IsRectVisibleEx then
     local x, y = r.ImGui_GetCursorScreenPos(ctx)
@@ -100,7 +100,7 @@ function seq_pattern_variation_count(style_key)
   return #store.entries
 end
 
-function seq_record_pattern_variation(style_key, strength, seed)
+function seq_record_pattern_variation(style_key, strength, seed, preview)
   local store = seq_pattern_variation_store(style_key)
   store.counter = store.counter + 1
   local entry = {
@@ -108,6 +108,7 @@ function seq_record_pattern_variation(style_key, strength, seed)
     name = get_seq_gen_style_label(style_key) .. " #" .. tostring(store.counter),
     seed = seed,
     strength = strength,
+    preview = preview, -- role -> {16th positions} of the result, for the list
   }
   store.entries[#store.entries + 1] = entry
   return entry
@@ -230,7 +231,8 @@ function run_seq_pattern_preset(region, style_key, strength)
     local seed = seq_new_seed()
     generate_seq_pattern(region, style, { random_strength = strength, random_seed = seed })
     if strength then
-      seq_record_pattern_variation(style, strength, seed)
+      local bars = seq_template_cycle_bars(SEQ_GEN_TEMPLATES[style])
+      seq_record_pattern_variation(style, strength, seed, seq_collect_preview_positions(region, bars))
     end
   end
   end_seq_undo(label)
@@ -356,6 +358,44 @@ function seq_collect_current_role_positions(region)
       table.sort(arr)
       map[role] = arr
     end
+  end
+  return map
+end
+
+-- The first `bars` bars of the region as role -> {16th positions}, positions
+-- running 0..16*bars-1 (for list previews of generated variations).
+function seq_collect_preview_positions(region, bars)
+  bars = math.max(1, bars or 1)
+  local map = {}
+  local pattern = region and get_seq_pattern(region.pattern_id, false)
+  local notes_by_track = pattern and pattern.notes or nil
+  if not notes_by_track then return map end
+  local grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
+  local steps_per_bar = math.max(1, math.floor((4.0 / grid_qn) + 0.5))
+  local sets = {}
+  for _, slot in ipairs(state.seq_tracks or {}) do
+    local notes = slot.sample_path and notes_by_track[tostring(slot.id)] or nil
+    if notes then
+      local role = infer_seq_track_role(slot)
+      local set = sets[role] or {}
+      sets[role] = set
+      for step_key, note in pairs(notes) do
+        if note and note.enabled ~= false then
+          local step_idx = tonumber(note.step) or tonumber(step_key) or 0
+          local bar = math.floor(step_idx / steps_per_bar)
+          if bar >= 0 and bar < bars then
+            local within = step_idx % steps_per_bar
+            set[bar * 16 + math.floor((within * 16.0 / steps_per_bar) + 0.5)] = true
+          end
+        end
+      end
+    end
+  end
+  for role, set in pairs(sets) do
+    local arr = {}
+    for p in pairs(set) do arr[#arr + 1] = p end
+    table.sort(arr)
+    if #arr > 0 then map[role] = arr end
   end
   return map
 end
@@ -1037,6 +1077,7 @@ function seq_gmd_refresh_list(force)
     beat_type = state.seq_gmd_beat_type or "beat",
     limit = 0, -- 0 = return every matching groove
     offset = 0,
+    preview = true, -- one bar of hits per groove for the list's step preview
   }, 60)
   if not job then
     state.seq_gmd_status_msg = tostring(err)
@@ -1174,13 +1215,16 @@ function seq_gmd_apply_result(region, result)
   return hits > 0
 end
 
-function run_seq_gmd_load_id(region, entry_id)
+-- bar_offset picks the bar to load (the one shown in the list preview);
+-- without it the sidecar picks a random bar.
+function run_seq_gmd_load_id(region, entry_id, bar_offset)
   if not region or not entry_id then return false end
   if not seq_gmd_ensure(false) then return false end
   local result, err = seq_call_gmd({
     action = "get",
     id = entry_id,
     bars = 1,
+    bar_offset = tonumber(bar_offset),
     seed = seq_new_seed(),
   })
   if not result then
@@ -1226,6 +1270,191 @@ function seq_gmd_probe_ready()
   return false
 end
 
+-- --- Pattern window: favorites, category filter --------------------------------
+SEQ_PATTERN_EXT_SECTION = "SampleMapBrowser"
+SEQ_PATTERN_ROW_H = 46.0
+SEQ_PATTERN_FAV_COLOR = 0xFFC857FF
+
+-- Lane colors for the step previews, one per drum role.
+SEQ_PATTERN_ROLE_COLORS = {
+  kick = 0xFF6B5AFF, ["808"] = 0xFF4F7AFF, bass = 0xE8A04AFF,
+  snare = 0x5EC8FFFF, clap = 0x8FA8FFFF, rim = 0xB08CFFFF, tom = 0xD97BD0FF,
+  hat = 0x6FE39AFF, ride = 0x4FD6C4FF, crash = 0xFFF2B0FF,
+  perc = 0xE6E06AFF, fx = 0xA9B4ADFF, vocal = 0xFF8FC8FF,
+}
+
+function seq_pattern_favorites()
+  if not state.seq_pattern_favs then
+    local favs = {}
+    local raw = r.GetExtState and r.GetExtState(SEQ_PATTERN_EXT_SECTION, "pattern_favorites") or ""
+    for key in tostring(raw or ""):gmatch("[^,]+") do
+      favs[key] = true
+    end
+    state.seq_pattern_favs = favs
+    state.seq_pattern_favs_ver = 0
+  end
+  return state.seq_pattern_favs
+end
+
+function seq_pattern_is_favorite(style_key)
+  return seq_pattern_favorites()[style_key] == true
+end
+
+function seq_pattern_toggle_favorite(style_key)
+  local favs = seq_pattern_favorites()
+  favs[style_key] = (not favs[style_key]) or nil
+  local keys = {}
+  for key in pairs(favs) do
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
+  if r.SetExtState then
+    r.SetExtState(SEQ_PATTERN_EXT_SECTION, "pattern_favorites", table.concat(keys, ","), true)
+  end
+  state.seq_pattern_favs_ver = (state.seq_pattern_favs_ver or 0) + 1
+end
+
+function seq_pattern_current_category()
+  if not state.seq_pattern_category then
+    local saved = r.GetExtState and r.GetExtState(SEQ_PATTERN_EXT_SECTION, "pattern_category") or ""
+    state.seq_pattern_category = (saved ~= nil and saved ~= "") and saved or "all"
+  end
+  return state.seq_pattern_category
+end
+
+function seq_pattern_set_category(key)
+  state.seq_pattern_category = key
+  if r.SetExtState then
+    r.SetExtState(SEQ_PATTERN_EXT_SECTION, "pattern_category", key, true)
+  end
+end
+
+function seq_pattern_template_hay(style)
+  if not style._hay then
+    local parts = { style.label or "", style.key or "", seq_pattern_category_label(style.cat), style.desc or "" }
+    if style.bpm then
+      parts[#parts + 1] = tostring(style.bpm) .. " bpm"
+    end
+    for _, role in ipairs(seq_template_roles(style.key)) do
+      parts[#parts + 1] = SEQ_ROLE_LABELS[role] or role
+    end
+    style._hay = table.concat(parts, " "):lower()
+  end
+  return style._hay
+end
+
+-- Lanes for the mini step grid, cached per style.
+function seq_pattern_preview_data(style_key)
+  SEQ_PATTERN_PREVIEW_CACHE = SEQ_PATTERN_PREVIEW_CACHE or {}
+  local data = SEQ_PATTERN_PREVIEW_CACHE[style_key]
+  if data then
+    return data
+  end
+  local template = SEQ_GEN_TEMPLATES[style_key] or {}
+  data = { cols = 16 * seq_template_cycle_bars(template), lanes = {} }
+  for _, role in ipairs(seq_template_roles(style_key)) do
+    local on = {}
+    for _, s in ipairs(template[role]) do
+      on[#on + 1] = math.floor(tonumber(s) or 0)
+    end
+    data.lanes[#data.lanes + 1] = { role = role, steps = on, color = SEQ_PATTERN_ROLE_COLORS[role] or UI_THEME.text_dim }
+  end
+  SEQ_PATTERN_PREVIEW_CACHE[style_key] = data
+  return data
+end
+
+-- Same lane data built from a role -> {16th positions} map (Groove MIDI grooves,
+-- saved variations). Cached weakly per map table.
+SEQ_PATTERN_MAP_PREVIEW = setmetatable({}, { __mode = "k" })
+function seq_pattern_preview_from_map(map)
+  if type(map) ~= "table" then return nil end
+  local data = SEQ_PATTERN_MAP_PREVIEW[map]
+  if data then return data end
+  local max_step = 0
+  data = { lanes = {} }
+  for _, role in ipairs(SEQ_ROLE_ORDER) do
+    local steps = map[role]
+    if type(steps) == "table" and #steps > 0 then
+      local on = {}
+      for _, s in ipairs(steps) do
+        local n = math.floor(tonumber(s) or 0)
+        on[#on + 1] = n
+        if n > max_step then max_step = n end
+      end
+      data.lanes[#data.lanes + 1] = { role = role, steps = on, color = SEQ_PATTERN_ROLE_COLORS[role] or UI_THEME.text_dim }
+    end
+  end
+  data.cols = 16 * (math.floor(max_step / 16) + 1)
+  SEQ_PATTERN_MAP_PREVIEW[map] = data
+  return data
+end
+
+local function seq_pattern_scale_alpha(col, f)
+  if f >= 1 then return col end
+  return (col & 0xFFFFFF00) | math.floor((col & 0xFF) * f + 0.5)
+end
+
+-- Mini step grid: one thin lane per role, beats shaded in alternating bands.
+-- src: a style key, or lane data from seq_pattern_preview_from_map.
+function seq_pattern_draw_step_preview(dl, x0, y0, x1, y1, src, alpha)
+  alpha = alpha or 1.0
+  local data = type(src) == "table" and src or seq_pattern_preview_data(src)
+  local n = data and #data.lanes or 0
+  if n == 0 or x1 <= x0 then
+    return
+  end
+  local cols = data.cols
+  local cell_w = (x1 - x0) / cols
+  local gap_y = 1.0
+  local lane_h = math.max(2.0, math.min(6.0, ((y1 - y0) - gap_y * (n - 1)) / n))
+  local total_h = lane_h * n + gap_y * (n - 1)
+  local top = y0 + ((y1 - y0) - total_h) * 0.5
+
+  r.ImGui_DrawList_AddRectFilled(dl, x0 - 4, top - 3, x1 + 4, top + total_h + 3, 0x0000003A, 4.0)
+  for beat = 0, cols / 4 - 1 do
+    if beat % 2 == 0 then
+      local bx = x0 + beat * 4 * cell_w
+      r.ImGui_DrawList_AddRectFilled(dl, bx, top - 1, bx + 4 * cell_w, top + total_h + 1, 0xFFFFFF08, 1.0)
+    end
+  end
+  if cols > 16 then
+    local mid = x0 + 16 * cell_w
+    r.ImGui_DrawList_AddLine(dl, mid, top - 2, mid, top + total_h + 2, 0xFFFFFF30, 1.0)
+  end
+  local inset = cell_w > 4 and 0.75 or 0.35
+  for i, lane in ipairs(data.lanes) do
+    local ly = top + (i - 1) * (lane_h + gap_y)
+    r.ImGui_DrawList_AddRectFilled(dl, x0, ly, x1, ly + lane_h, seq_pattern_scale_alpha(0xFFFFFF0C, alpha), 1.0)
+    local col = seq_pattern_scale_alpha(lane.color, alpha)
+    for _, s in ipairs(lane.steps) do
+      if s >= 0 and s < cols then
+        local cx = x0 + s * cell_w
+        r.ImGui_DrawList_AddRectFilled(dl, cx + inset, ly, cx + cell_w - inset, ly + lane_h, col, 1.0)
+      end
+    end
+  end
+end
+
+-- Dice 1..6 drawn into the draw list (no ImGui items, so they can sit on top of
+-- a row's own button). Returns the strength under the mouse, if any.
+function seq_pattern_draw_dice_strip(dl, x, y, size, gap, mx, my, style)
+  local hit = nil
+  local down = r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0)
+  for s = 1, 6 do
+    local bx = x + (s - 1) * (size + gap)
+    local over = mx >= bx and mx <= bx + size and my >= y and my <= y + size
+    local bg, _, text_col, border = ui_button_colors(style or "default", over, over and down, false)
+    ui_draw_panel(dl, bx, y, bx + size, y + size, 4.0, bg, border, over, over and down)
+    ui_button_draw_icon(dl, "dice" .. s, bx + size * 0.5, y + size * 0.5, size + 2, over and 0xFFFFFFFF or text_col)
+    if over then hit = s end
+  end
+  return hit
+end
+
+local function seq_pattern_point_in(mx, my, x0, y0, x1, y1)
+  return mx >= x0 and mx <= x1 and my >= y0 and my <= y1
+end
+
 function seq_pattern_query_matches(query, haystack)
   if not query or query == "" then return true end
   return tostring(haystack or ""):lower():find(query, 1, true) ~= nil
@@ -1248,93 +1477,82 @@ function seq_pattern_match_template_for_gmd(group)
   return nil
 end
 
-function seq_pattern_gmd_child_count(group, template_style)
-  local n = type(group) == "table" and type(group.children) == "table" and #group.children or 0
-  if template_style then n = n + 1 end
-  return n
-end
-
-function seq_gmd_group_has_children(group, template_style)
-  if template_style then return true end
+function seq_gmd_group_has_children(group)
   local n = type(group) == "table" and type(group.children) == "table" and #group.children or 0
   return n > 1
 end
 
--- One alphabetical list of template presets + Groove MIDI presets.
--- Same-named hard-coded presets are nested as the first child of the GMD parent.
+-- Rows for the list: category captions, built-in presets (filtered by the
+-- category chip, favorites and the search), then the Groove MIDI section.
 function seq_pattern_browser_entries()
   local raw = tostring(state.seq_pattern_search or "")
   local q = raw:lower():gsub("^%s+", ""):gsub("%s+$", "")
+  local cat = seq_pattern_current_category()
+  local gmd_on = seq_gmd_available()
   if state.seq_gmd_ready then
     seq_gmd_refresh_list(false)
   end
-  local cache_key = q .. "|" .. tostring(state.seq_gmd_ready) .. "|" .. tostring(state.seq_gmd_list_key or "")
+  local cache_key = table.concat({
+    q, cat, tostring(state.seq_pattern_favs_ver or 0), tostring(state.seq_gmd_ready),
+    tostring(state.seq_gmd_list_key or ""), tostring(gmd_on),
+  }, "|")
   if state.seq_pattern_browser_cache_key == cache_key and type(state.seq_pattern_browser_cache) == "table" then
     return state.seq_pattern_browser_cache
   end
 
   local entries = {}
-  local used_templates = {}
-
-  if state.seq_gmd_ready then
-    for _, group in ipairs(state.seq_gmd_groups or {}) do
-      local template = group.template_style
-      if not template then
-        template = seq_pattern_match_template_for_gmd(group)
-        group.template_style = template
-      end
-      if template then
-        used_templates[template.key] = true
-      end
-      local hay = group.search_hay
-      if not hay then
-        hay = seq_gmd_group_search_hay(group)
-        group.search_hay = hay
-      end
-      if seq_pattern_query_matches(q, hay) then
-        entries[#entries + 1] = {
-          kind = "gmd",
-          key = group.key,
-          label = group.label,
-          sort = tostring(group.label or group.name or ""):lower(),
-          group = group,
-          template = template,
-        }
+  if cat ~= "gmd" then
+    local favs = seq_pattern_favorites()
+    for _, c in ipairs(SEQ_PATTERN_CATEGORIES) do
+      if cat == "all" or cat == "fav" or cat == c.key then
+        local rows = {}
+        for _, style in ipairs(SEQ_GEN_STYLE_ORDER) do
+          if style.key and style.cat == c.key
+              and (cat ~= "fav" or favs[style.key])
+              and seq_pattern_query_matches(q, seq_pattern_template_hay(style)) then
+            rows[#rows + 1] = style
+          end
+        end
+        if #rows > 0 then
+          entries[#entries + 1] = { kind = "caption", label = c.label, count = #rows }
+          for _, style in ipairs(rows) do
+            entries[#entries + 1] = { kind = "template", style_def = style }
+            entries.first_template = entries.first_template or style
+          end
+        end
       end
     end
   end
 
-  for _, style in ipairs(SEQ_GEN_STYLE_ORDER) do
-    if style.key and not used_templates[style.key] then
-      local label = style.label or style.key
-      local hay = label .. " " .. style.key
-      for _, role in ipairs(seq_template_roles(style.key)) do
-        hay = hay .. " " .. (SEQ_ROLE_LABELS[role] or role)
+  if gmd_on and (cat == "all" or cat == "gmd") then
+    local groups = {}
+    if state.seq_gmd_ready then
+      for _, group in ipairs(state.seq_gmd_groups or {}) do
+        local hay = group.search_hay
+        if not hay then
+          hay = seq_gmd_group_search_hay(group)
+          group.search_hay = hay
+        end
+        if seq_pattern_query_matches(q, hay) then
+          groups[#groups + 1] = group
+        end
       end
-      if seq_pattern_query_matches(q, hay) then
-        entries[#entries + 1] = {
-          kind = "template",
-          key = style.key,
-          label = label,
-          sort = tostring(label):lower(),
-          style_def = style,
-        }
+    end
+    if q == "" or #groups > 0 then
+      entries[#entries + 1] = { kind = "caption", label = "Groove MIDI", count = state.seq_gmd_ready and #groups or nil }
+      entries[#entries + 1] = { kind = "gmd_toolbar" }
+      for _, group in ipairs(groups) do
+        entries[#entries + 1] = { kind = "gmd", group = group }
       end
     end
   end
 
-  table.sort(entries, function(a, b)
-    if a.sort == b.sort then
-      if a.kind ~= b.kind then return a.kind == "gmd" end
-      return tostring(a.key) < tostring(b.key)
-    end
-    return a.sort < b.sort
-  end)
   state.seq_pattern_browser_cache_key = cache_key
   state.seq_pattern_browser_cache = entries
   return entries
 end
 
+-- Groove MIDI section controls: download button, or the beat / fill filter.
 function render_seq_gmd_toolbar()
   if not seq_gmd_available() then
     return
@@ -1346,442 +1564,403 @@ function render_seq_gmd_toolbar()
       -- Background download / probe in progress: show its status, no button.
       local dots = string.rep(".", 1 + math.floor(r.time_precise() * 2) % 3)
       r.ImGui_TextColored(ctx, UI_THEME.text_dim, tostring(state.seq_gmd_status_msg or "Working"):gsub("[.…]+$", "") .. dots)
+      r.ImGui_Dummy(ctx, 1, 4)
       return
     end
-    if draw_ui_button("seq_gmd_download", "Download Groove MIDI (~3 MB)", nil, nil, { style = "success", compact = true }) then
+    r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Real drummers' grooves from Google Magenta (CC BY 4.0).")
+    if draw_ui_button("seq_gmd_download", "Download Groove MIDI (~3 MB)", nil, 24, { style = "success", compact = true }) then
       seq_gmd_ensure(true)
     end
     if state.seq_gmd_status_msg then
-      r.ImGui_SameLine(ctx)
       r.ImGui_TextColored(ctx, 0xFFB870FF, tostring(state.seq_gmd_status_msg))
     end
+    r.ImGui_Dummy(ctx, 1, 4)
     return
   end
 
-  local beat_label = "Type: " .. tostring(state.seq_gmd_beat_type or "beat")
-  if draw_ui_button("seq_gmd_beat", beat_label, nil, nil, { style = "default", compact = true }) then
-    seq_gmd_cycle_beat_type()
+  local cur = state.seq_gmd_beat_type or "beat"
+  local opts = { { "beat", "Beats" }, { "fill", "Fills" }, { "all", "Both" } }
+  for i, opt in ipairs(opts) do
+    if i > 1 then r.ImGui_SameLine(ctx, 0, 4) end
+    local w = select(1, r.ImGui_CalcTextSize(ctx, opt[2])) + 18
+    if draw_ui_button("seq_gmd_beat_" .. opt[1], opt[2], w, 22, { compact = true, pill = true, selected = cur == opt[1] }) then
+      if cur ~= opt[1] then
+        state.seq_gmd_beat_type = opt[1]
+        state.seq_gmd_list_key = nil
+      end
+    end
   end
   if state.seq_gmd_status_msg then
-    r.ImGui_SameLine(ctx)
-    r.ImGui_TextColored(ctx, UI_THEME.text_dim, tostring(state.seq_gmd_status_msg))
+    r.ImGui_SameLine(ctx, 0, 10)
+    r.ImGui_AlignTextToFramePadding(ctx)
+    r.ImGui_TextColored(ctx, UI_THEME.text_mute, tostring(state.seq_gmd_status_msg))
   end
+  r.ImGui_Dummy(ctx, 1, 4)
 end
 
--- Shared hover-dice strip used by nested child rows.
-function seq_pattern_draw_hover_dice(region, id_prefix, x, y, size, gap, on_strength)
-  for strength = 1, 6 do
-    r.ImGui_SetCursorScreenPos(ctx, x + (strength - 1) * (size + gap), y)
-    local dice_clicked = draw_ui_button(
-      id_prefix .. "_" .. tostring(strength),
-      nil,
-      size,
-      size,
-      { icon = "dice" .. tostring(strength), compact = true, style = "default" }
-    )
-    if dice_clicked and region and on_strength then
-      on_strength(strength)
-    end
-  end
-end
-
-function render_seq_gmd_preset_row(region, group, template_style)
-  if type(group) ~= "table" then return end
-  local style_key = group.key
-  local id_safe = tostring(style_key or group.name or "gmd"):gsub("[^%w]", "_")
-  local selected = (state.seq_pattern_source == "gmd" and state.seq_gmd_selected_style == group.name)
-    or (template_style and state.seq_pattern_source ~= "gmd" and state.seq_gen_style == template_style.key)
-  local avail_w = r.ImGui_GetContentRegionAvail(ctx)
-  local row_w = math.max(1.0, avail_w)
-  local row_h = 34.0
-  local left_pad = 10.0
-  local right_pad = 8.0
-  local item_count = type(group.items) == "table" and #group.items or 0
-  local child_count = seq_pattern_gmd_child_count(group, template_style)
-  local has_children = seq_gmd_group_has_children(group, template_style)
-  state.seq_gmd_expanded = state.seq_gmd_expanded or {}
-  local expanded = state.seq_gmd_expanded[group.name] == true
-  local after_gap = (expanded and has_children) and 2.0 or 5.0
-  if not seq_pattern_list_item_visible(row_h + after_gap) then
-    r.ImGui_Dummy(ctx, 0, row_h + after_gap)
-    if expanded and has_children then
-      if template_style then
-        render_seq_pattern_nested_template_row(region, template_style, id_safe)
-      end
-      for _, child in ipairs(group.children or {}) do
-        render_seq_gmd_pattern_row(region, child, id_safe)
-      end
-      r.ImGui_Dummy(ctx, 0, 4.0)
-    end
-    return
-  end
-
-  local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
-  local x1, y1 = x0 + row_w, y0 + row_h
-  local mx, my = r.ImGui_GetMousePos(ctx)
-  local hovered = mx >= x0 and mx <= x1 and my >= y0 and my <= y1
-
-  local btn_size = 20.0
-  local btn_gap = 3.0
-  local list_w = has_children and (btn_size + 6.0) or 0.0
-  local list_x = x0 + row_w - right_pad - btn_size
-
-  -- Dice only on leaf parents (single MIDI, no nested hard-coded child).
-  local show_parent_dice = hovered and not has_children
-  local dice_size = btn_size
-  local dice_total_w = dice_size * 6.0 + btn_gap * 5.0
-  local right_edge = x0 + row_w - right_pad - list_w
-  if show_parent_dice and dice_total_w > (right_edge - x0 - 70.0) then
-    dice_size = math.max(13.0, math.floor((right_edge - x0 - 70.0 - btn_gap * 5.0) / 6.0))
-    dice_total_w = dice_size * 6.0 + btn_gap * 5.0
-  end
-  local dice_x = right_edge - dice_total_w
-
-  local interactive_left = right_edge
-  if show_parent_dice then
-    interactive_left = dice_x
-  end
-  local row_button_w = math.max(40.0, interactive_left - x0 - 4.0)
-  r.ImGui_InvisibleButton(ctx, "##seq_gmd_preset_row_" .. id_safe, row_button_w, row_h)
-  local clicked = r.ImGui_IsItemClicked(ctx, 0)
-
-  local dl = r.ImGui_GetWindowDrawList(ctx)
+-- Row panel shared by every list row; selected rows get an accent edge bar.
+local function seq_pattern_row_panel(dl, x0, y0, x1, y1, selected, hovered, rounding)
   local fill = selected and UI_THEME.accent_fill or UI_THEME.bg_panel
-  local edge = selected and UI_THEME.accent or UI_THEME.border
+  local edge = selected and 0x1EFF5E88 or UI_THEME.border_soft
   if hovered then
     fill = selected and UI_THEME.accent_fill_h or UI_THEME.surface_hvr
-    edge = UI_THEME.accent_hvr
+    edge = selected and UI_THEME.accent_hvr or UI_THEME.border_hvr
   end
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, fill, 5.0)
-  r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, edge, 5.0, 0, selected and 1.5 or 1.0)
-
-  local label_color = selected and 0xFFFFFFFF or UI_THEME.text
-  local label_right = show_parent_dice and dice_x or (x0 + row_w - right_pad - list_w)
-  local label_max_w = math.max(20.0, label_right - x0 - left_pad - 6.0)
-  if not show_parent_dice then
-    label_max_w = math.min(label_max_w, row_w * 0.50)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, fill, rounding)
+  r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, edge, rounding, 0, 1.0)
+  if selected then
+    r.ImGui_DrawList_AddRectFilled(dl, x0 + 1, y0 + 7, x0 + 4, y1 - 7, UI_THEME.accent, 1.5)
   end
-  local label_text = seq_truncate_text_to_width(group.label or group.name, label_max_w)
-  r.ImGui_DrawList_AddText(dl, x0 + left_pad, y0 + 9.0, label_color, label_text)
+end
 
-  if not show_parent_dice then
-    local meta_text = child_count == 1 and "1 variation" or (tostring(child_count) .. " variations")
-    local label_w = select(1, r.ImGui_CalcTextSize(ctx, label_text))
-    local meta_right = x0 + row_w - right_pad - list_w
-    local meta_max_w = math.max(20.0, meta_right - (x0 + left_pad + label_w) - 12.0)
-    meta_text = seq_truncate_text_to_width(meta_text, meta_max_w)
-    local meta_w = select(1, r.ImGui_CalcTextSize(ctx, meta_text))
-    r.ImGui_DrawList_AddText(dl, meta_right - meta_w, y0 + 9.0, 0x8AA6C8FF, meta_text)
+-- Built-in preset: star, name, BPM / bars, and a step preview on the right.
+-- Hovering swaps the meta line for dice 1..6 (1 subtle, 6 unruly).
+function render_seq_pattern_preset_row(region, style_def)
+  local style_key = style_def.key
+  local row_w = math.max(1.0, (r.ImGui_GetContentRegionAvail(ctx)))
+  local row_h = SEQ_PATTERN_ROW_H
+  local after_gap = 4.0
+  if not seq_pattern_list_item_visible(row_h + after_gap) then
+    r.ImGui_Dummy(ctx, 0, row_h + after_gap)
+    return
+  end
+  local selected = state.seq_pattern_source ~= "gmd" and state.seq_gen_style == style_key
+  local can_generate = region and seq_preset_can_generate(style_key)
+  local fav = seq_pattern_is_favorite(style_key)
+  local var_count = seq_pattern_variation_count(style_key)
+
+  r.ImGui_InvisibleButton(ctx, "##seq_pattern_preset_row_" .. style_key, row_w, row_h)
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local clicked = r.ImGui_IsItemClicked(ctx, 0)
+  local rclicked = r.ImGui_IsItemClicked(ctx, 1)
+  local x0, y0 = r.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = x0 + row_w, y0 + row_h
+  local mx, my = r.ImGui_GetMousePos(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+
+  seq_pattern_row_panel(dl, x0, y0, x1, y1, selected, hovered, 6.0)
+
+  local pad = 8.0
+  local star_s = 18.0
+  local star_x, star_y = x0 + pad, y0 + 5.0
+  local text_x = star_x + star_s + 6.0
+  local grid_w = math.floor(math.min(150.0, row_w * 0.40))
+  local grid_x1 = x1 - pad - 2.0
+  local grid_x0 = grid_x1 - grid_w
+
+  -- Star (favorite).
+  local over_star = hovered and seq_pattern_point_in(mx, my, star_x - 2, star_y - 2, star_x + star_s + 2, star_y + star_s + 2)
+  local star_col = fav and SEQ_PATTERN_FAV_COLOR or (over_star and UI_THEME.text or UI_THEME.text_mute)
+  ui_button_draw_icon(dl, fav and "star_fill" or "star", star_x + star_s * 0.5, star_y + star_s * 0.5, star_s, star_col)
+
+  -- Name.
+  local label_col = selected and 0xFFFFFFFF or (can_generate and UI_THEME.text or UI_THEME.text_dim)
+  local label = seq_truncate_text_to_width(style_def.label or style_key, grid_x0 - text_x - 10.0)
+  r.ImGui_DrawList_AddText(dl, text_x, y0 + 6.0, label_col, label)
+
+  -- Second line: dice on hover, otherwise BPM / bars / saved variations.
+  local line_y = y0 + 25.0
+  local dice_s, dice_gap = 15.0, 3.0
+  local dice_hit, over_list = nil, false
+  local list_x = text_x + 6 * (dice_s + dice_gap) + 4.0
+  if hovered then
+    dice_hit = seq_pattern_draw_dice_strip(dl, text_x, line_y, dice_s, dice_gap, mx, my, "default")
+    if var_count > 0 then
+      over_list = seq_pattern_point_in(mx, my, list_x, line_y, list_x + dice_s, line_y + dice_s)
+      local bg, _, text_col, border = ui_button_colors(selected and "primary" or "default", over_list, false, false)
+      ui_draw_panel(dl, list_x, line_y, list_x + dice_s, line_y + dice_s, 4.0, bg, border, over_list, false)
+      ui_button_draw_icon(dl, "list", list_x + dice_s * 0.5, line_y + dice_s * 0.5, dice_s + 2, over_list and 0xFFFFFFFF or text_col)
+    end
+  else
+    local meta = {}
+    if style_def.bpm then meta[#meta + 1] = tostring(style_def.bpm) .. " BPM" end
+    local bars = seq_template_cycle_bars(SEQ_GEN_TEMPLATES[style_key])
+    if bars > 1 then meta[#meta + 1] = tostring(bars) .. " bars" end
+    if var_count > 0 then meta[#meta + 1] = tostring(var_count) .. " saved" end
+    if #meta > 0 then
+      local meta_text = seq_truncate_text_to_width(table.concat(meta, "  \xC2\xB7  "), grid_x0 - text_x - 10.0)
+      r.ImGui_DrawList_AddText(dl, text_x, line_y + 1.0, UI_THEME.text_mute, meta_text)
+    end
   end
 
-  -- Parent click selects / toggles children — it does not load a variation.
-  if clicked then
-    state.seq_gmd_selected_style = group.name
-    if has_children then
-      state.seq_gmd_expanded[group.name] = not expanded
-      expanded = state.seq_gmd_expanded[group.name] == true
-    elseif region and item_count > 0 then
-      state.seq_pattern_source = "gmd"
-      run_seq_gmd_load_id(region, group.items[1].id)
+  seq_pattern_draw_step_preview(dl, grid_x0, y0 + 8.0, grid_x1, y1 - 8.0, style_key, can_generate and 1.0 or 0.45)
+
+  if hovered and not dice_hit and not over_list then
+    local tip = {}
+    if style_def.desc then tip[#tip + 1] = style_def.desc end
+    local roles = {}
+    for _, role in ipairs(seq_template_roles(style_key)) do
+      roles[#roles + 1] = SEQ_ROLE_LABELS[role] or role
+    end
+    tip[#tip + 1] = "Drums: " .. table.concat(roles, ", ")
+    if over_star then
+      tip = { fav and "Click to remove from favorites" or "Click to add to favorites" }
+    elseif not can_generate then
+      tip[#tip + 1] = "No matching samples in the library for these drums."
     else
-      state.seq_pattern_source = "gmd"
+      tip[#tip + 1] = "Click: apply to " .. get_seq_region_display_name(region) .. " · Right-click: favorite"
     end
+    r.ImGui_SetTooltip(ctx, table.concat(tip, "\n"))
   end
 
-  if show_parent_dice then
-    seq_pattern_draw_hover_dice(
-      region,
-      "seq_gmd_dice_" .. id_safe,
-      dice_x,
-      y0 + (row_h - dice_size) * 0.5,
-      dice_size,
-      btn_gap,
-      function(strength)
-        run_seq_gmd_preset(region, group, strength)
+  if rclicked or (clicked and over_star) then
+    seq_pattern_toggle_favorite(style_key)
+  elseif clicked and dice_hit then
+    if can_generate then
+      run_seq_pattern_preset(region, style_key, dice_hit)
+    end
+  elseif clicked and over_list then
+    state.seq_pattern_variations_open_key = style_key
+    state.seq_pattern_variations_request_open = true
+  elseif clicked and can_generate then
+    run_seq_pattern_preset(region, style_key, nil)
+  elseif clicked then
+    state.seq_pattern_source = "template"
+    state.seq_gen_style = normalize_seq_gen_style(style_key)
+    save_config()
+  end
+end
+
+-- Groove MIDI genre: one row per genre, expanding to its performances.
+function render_seq_gmd_preset_row(region, group)
+  if type(group) ~= "table" then return end
+  local id_safe = tostring(group.key or group.name or "gmd"):gsub("[^%w]", "_")
+  local row_w = math.max(1.0, (r.ImGui_GetContentRegionAvail(ctx)))
+  local row_h = 34.0
+  local item_count = type(group.items) == "table" and #group.items or 0
+  local has_children = seq_gmd_group_has_children(group)
+  state.seq_gmd_expanded = state.seq_gmd_expanded or {}
+  local expanded = state.seq_gmd_expanded[group.name] == true
+
+  if not seq_pattern_list_item_visible(row_h + 4.0) then
+    r.ImGui_Dummy(ctx, 0, row_h)
+  else
+    local selected = state.seq_pattern_source == "gmd" and state.seq_gmd_selected_style == group.name
+    r.ImGui_InvisibleButton(ctx, "##seq_gmd_preset_row_" .. id_safe, row_w, row_h)
+    local hovered = r.ImGui_IsItemHovered(ctx)
+    local clicked = r.ImGui_IsItemClicked(ctx, 0)
+    local x0, y0 = r.ImGui_GetItemRectMin(ctx)
+    local x1, y1 = x0 + row_w, y0 + row_h
+    local mx, my = r.ImGui_GetMousePos(ctx)
+    local dl = r.ImGui_GetWindowDrawList(ctx)
+    seq_pattern_row_panel(dl, x0, y0, x1, y1, selected, hovered, 6.0)
+
+    local cy = (y0 + y1) * 0.5
+    ui_button_draw_icon(dl, "midi", x0 + 17.0, cy, 18.0, selected and UI_THEME.accent or UI_THEME.text_dim)
+    local chev_x = x1 - 16.0
+    if has_children then
+      ui_button_draw_icon(dl, expanded and "chev_down" or "chev_right", chev_x, cy, 16.0, hovered and UI_THEME.text or UI_THEME.text_mute)
+    end
+
+    local dice_s, dice_gap = 15.0, 3.0
+    local dice_w = 6 * dice_s + 5 * dice_gap
+    local right = has_children and (chev_x - 14.0) or (x1 - 10.0)
+    local dice_hit = nil
+    if hovered then
+      dice_hit = seq_pattern_draw_dice_strip(dl, right - dice_w, cy - dice_s * 0.5, dice_s, dice_gap, mx, my, "default")
+    else
+      local meta = item_count == 1 and "1 groove" or (tostring(item_count) .. " grooves")
+      local mw, mh = r.ImGui_CalcTextSize(ctx, meta)
+      r.ImGui_DrawList_AddText(dl, right - mw, cy - mh * 0.5, UI_THEME.text_mute, meta)
+    end
+    local label_right = hovered and (right - dice_w - 8.0) or (right - 70.0)
+    local label = seq_truncate_text_to_width(group.label or group.name, label_right - (x0 + 32.0))
+    local _, lh = r.ImGui_CalcTextSize(ctx, label)
+    r.ImGui_DrawList_AddText(dl, x0 + 32.0, cy - lh * 0.5, selected and 0xFFFFFFFF or UI_THEME.text, label)
+
+    if hovered and not dice_hit then
+      r.ImGui_SetTooltip(ctx, "Recorded performances from the Groove MIDI Dataset\n"
+        .. (has_children and "Click: show grooves · Dice: random groove (higher = faster band)"
+          or "Click: load · Dice: random groove (higher = faster band)"))
+    end
+
+    if clicked and dice_hit then
+      run_seq_gmd_preset(region, group, dice_hit)
+    elseif clicked then
+      state.seq_gmd_selected_style = group.name
+      if has_children then
+        state.seq_gmd_expanded[group.name] = not expanded
+        expanded = state.seq_gmd_expanded[group.name] == true
+      elseif region and item_count > 0 then
+        state.seq_pattern_source = "gmd"
+        run_seq_gmd_load_id(region, group.items[1].id, group.items[1].preview_bar)
       end
-    )
-  end
-
-  if has_children then
-    r.ImGui_SetCursorScreenPos(ctx, list_x, y0 + (row_h - btn_size) * 0.5)
-    local list_clicked = draw_ui_button(
-      "seq_gmd_expand_" .. id_safe,
-      nil,
-      btn_size,
-      btn_size,
-      {
-        icon = expanded and "chev_down" or "chev_right",
-        compact = true,
-        style = expanded and "success" or "default",
-      }
-    )
-    if list_clicked then
-      state.seq_gmd_expanded[group.name] = not expanded
-      expanded = state.seq_gmd_expanded[group.name] == true
     end
   end
-
-  r.ImGui_SetCursorScreenPos(ctx, x0, y1)
-  r.ImGui_Dummy(ctx, 0, expanded and 2.0 or 5.0)
 
   if expanded and has_children then
-    if template_style then
-      render_seq_pattern_nested_template_row(region, template_style, id_safe)
-    end
     for _, child in ipairs(group.children or {}) do
       render_seq_gmd_pattern_row(region, child, id_safe)
     end
-    r.ImGui_Dummy(ctx, 0, 4.0)
+    r.ImGui_Dummy(ctx, 0, 2.0)
   end
 end
 
--- Hard-coded preset nested as the first child under a same-named Groove MIDI parent.
-function render_seq_pattern_nested_template_row(region, style_def, parent_id_safe)
-  if type(style_def) ~= "table" or not style_def.key then return end
-  local row_h = 30.0
-  local gap = 2.0
-  if not seq_pattern_list_item_visible(row_h + gap) then
-    r.ImGui_Dummy(ctx, 0, row_h + gap)
+-- One recorded groove under an expanded Groove MIDI genre.
+function render_seq_gmd_pattern_row(region, child, parent_id_safe)
+  if type(child) ~= "table" or type(child.item) ~= "table" then return end
+  local item = child.item
+  local preview = seq_pattern_preview_from_map(item.preview)
+  local row_h = preview and 36.0 or 26.0
+  if not seq_pattern_list_item_visible(row_h + 2.0) then
+    r.ImGui_Dummy(ctx, 0, row_h)
     return
   end
-  local style_key = style_def.key
-  local id_safe = tostring(parent_id_safe or "gmd") .. "_tmpl_" .. tostring(style_key):gsub("[^%w]", "_")
-  local selected = state.seq_pattern_source ~= "gmd" and state.seq_gen_style == style_key
-  local can_generate = region and seq_preset_can_generate(style_key)
-  local indent = 16.0
-  local avail = r.ImGui_GetContentRegionAvail(ctx)
-  local row_w = math.max(1.0, avail - indent)
-  local left_pad = 8.0
-  local right_pad = 6.0
-  local btn_size = 18.0
-  local btn_gap = 2.0
-
-  local has_variations = seq_pattern_variation_count(style_key) > 0
-  local list_w = has_variations and (btn_size + 4.0) or 0.0
+  local indent = 18.0
+  local row_w = math.max(1.0, (r.ImGui_GetContentRegionAvail(ctx)) - indent)
+  local id = tostring(item.id or child.index or "")
+  local id_safe = tostring(parent_id_safe or "gmd") .. "_pat_" .. id:gsub("[^%w]", "_")
+  local selected = tostring(state.seq_gmd_selected_id or "") == id
 
   local x_base, y_base = r.ImGui_GetCursorScreenPos(ctx)
   r.ImGui_SetCursorScreenPos(ctx, x_base + indent, y_base)
-
-  local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
-  local x1, y1 = x0 + row_w, y0 + row_h
-  local mx, my = r.ImGui_GetMousePos(ctx)
-  local hovered = mx >= x0 and mx <= x1 and my >= y0 and my <= y1
-
-  local list_x = x0 + row_w - right_pad - btn_size
-  local right_edge = x0 + row_w - right_pad - list_w
-  local dice_size = btn_size
-  local dice_total_w = dice_size * 6.0 + btn_gap * 5.0
-  if hovered and dice_total_w > (right_edge - x0 - 60.0) then
-    dice_size = math.max(12.0, math.floor((right_edge - x0 - 60.0 - btn_gap * 5.0) / 6.0))
-    dice_total_w = dice_size * 6.0 + btn_gap * 5.0
-  end
-  local dice_x = right_edge - dice_total_w
-  local interactive_left = hovered and dice_x or right_edge
-  local row_button_w = math.max(40.0, interactive_left - x0 - 4.0)
-
-  r.ImGui_InvisibleButton(ctx, "##seq_nested_tmpl_" .. id_safe, row_button_w, row_h)
+  r.ImGui_InvisibleButton(ctx, "##seq_gmd_pat_" .. id_safe, row_w, row_h)
+  local hovered = r.ImGui_IsItemHovered(ctx)
   local clicked = r.ImGui_IsItemClicked(ctx, 0)
+  local x0, y0 = x_base + indent, y_base
+  local x1, y1 = x0 + row_w, y0 + row_h
   local dl = r.ImGui_GetWindowDrawList(ctx)
+  r.ImGui_DrawList_AddLine(dl, x_base + 9.0, y0, x_base + 9.0, y1, UI_THEME.border, 1.0)
+  seq_pattern_row_panel(dl, x0, y0, x1, y1, selected, hovered, 5.0)
 
-  local fill = selected and UI_THEME.accent_fill or UI_THEME.bg_panel
-  local edge = selected and UI_THEME.accent or UI_THEME.border
-  if hovered then
-    fill = selected and UI_THEME.accent_fill_h or UI_THEME.surface_hvr
-    edge = UI_THEME.accent_hvr
-  end
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, fill, 4.0)
-  r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, edge, 4.0, 0, selected and 1.5 or 1.0)
-
-  local label_right = hovered and dice_x or right_edge
-  local label_max_w = math.max(20.0, label_right - x0 - left_pad - 6.0)
-  local label_text = seq_truncate_text_to_width(style_def.label or style_key, label_max_w)
-  r.ImGui_DrawList_AddText(dl, x0 + left_pad, y0 + 7.0, selected and 0xFFFFFFFF or UI_THEME.text, label_text)
-
-  if not hovered then
-    local pill_x = x0 + left_pad + select(1, r.ImGui_CalcTextSize(ctx, label_text)) + 8.0
-    draw_ui_pill_label(dl, pill_x, (y0 + y1) * 0.5, "Built-in", {
-      bg = UI_THEME.accent_fill,
-      border = UI_THEME.accent,
-      text_col = 0xF0F8FFFF,
-      pad_x = 6.0,
-      pad_y = 2.0,
-      rounding = 5.0,
-    })
-  end
-
-  if clicked and can_generate then
-    run_seq_pattern_preset(region, style_key, nil)
-  elseif clicked then
-    state.seq_pattern_source = "template"
-    state.seq_gen_style = normalize_seq_gen_style(style_key)
-    save_config()
-  end
-
-  if hovered then
-    seq_pattern_draw_hover_dice(
-      region,
-      "seq_nested_tmpl_dice_" .. id_safe,
-      dice_x,
-      y0 + (row_h - dice_size) * 0.5,
-      dice_size,
-      btn_gap,
-      function(strength)
-        if can_generate then
-          run_seq_pattern_preset(region, style_key, strength)
-        end
-      end
-    )
-  end
-
-  if has_variations then
-    r.ImGui_SetCursorScreenPos(ctx, list_x, y0 + (row_h - btn_size) * 0.5)
-    if draw_ui_button(
-      "seq_nested_tmpl_varlist_" .. id_safe,
-      nil,
-      btn_size,
-      btn_size,
-      { icon = "list", compact = true, style = selected and "primary" or "default" }
-    ) then
-      state.seq_pattern_variations_open_key = style_key
-      state.seq_pattern_variations_request_open = true
+  local cy = (y0 + y1) * 0.5
+  local bpm = tonumber(item.bpm)
+  local bpm_text = bpm and (tostring(bpm) .. " BPM") or nil
+  local label_col = selected and 0xFFFFFFFF or UI_THEME.text
+  if preview then
+    -- Name over BPM on the left, one bar of the groove on the right.
+    local grid_w = math.floor(math.min(130.0, row_w * 0.42))
+    local grid_x1 = x1 - 9.0
+    local grid_x0 = grid_x1 - grid_w
+    local text_w = grid_x0 - (x0 + 10.0) - 10.0
+    r.ImGui_DrawList_AddText(dl, x0 + 10.0, y0 + 3.0, label_col, seq_truncate_text_to_width(child.label or "Groove", text_w))
+    if bpm_text then
+      r.ImGui_DrawList_AddText(dl, x0 + 10.0, y0 + 19.0, UI_THEME.text_mute, seq_truncate_text_to_width(bpm_text, text_w))
     end
+    seq_pattern_draw_step_preview(dl, grid_x0, y0 + 6.0, grid_x1, y1 - 6.0, preview, 1.0)
+  else
+    local right = x1 - 10.0
+    if bpm_text then
+      local bw, bh = r.ImGui_CalcTextSize(ctx, bpm_text)
+      r.ImGui_DrawList_AddText(dl, right - bw, cy - bh * 0.5, UI_THEME.text_mute, bpm_text)
+      right = right - bw - 10.0
+    end
+    local label = seq_truncate_text_to_width(child.label or "Groove", right - (x0 + 10.0))
+    local _, lh = r.ImGui_CalcTextSize(ctx, label)
+    r.ImGui_DrawList_AddText(dl, x0 + 10.0, cy - lh * 0.5, label_col, label)
   end
 
-  r.ImGui_SetCursorScreenPos(ctx, x_base, y1)
-  r.ImGui_Dummy(ctx, 0, 2.0)
+  if hovered and r.ImGui_SetTooltip then
+    local tip = {}
+    if item.drummer then tip[#tip + 1] = "Drummer " .. tostring(item.drummer) end
+    if preview and item.preview_bar then tip[#tip + 1] = "Preview shows bar " .. tostring(math.floor(item.preview_bar) + 1) end
+    tip[#tip + 1] = "Click: load " .. (preview and "this bar " or "") .. "into " .. get_seq_region_display_name(region)
+    r.ImGui_SetTooltip(ctx, table.concat(tip, "\n"))
+  end
+  if clicked and region then
+    run_seq_gmd_load_id(region, id, item.preview_bar)
+  end
+  r.ImGui_SetCursorScreenPos(ctx, x_base, y1 + 2.0)
+  r.ImGui_Dummy(ctx, 0, 0)
 end
 
-function render_seq_pattern_preset_row(region, style_def)
-  local style_key = style_def.key
-  local avail_w = r.ImGui_GetContentRegionAvail(ctx)
-  local row_w = math.max(1.0, avail_w)
-  local row_h = 34.0
-  local after_gap = 5.0
-  if not seq_pattern_list_item_visible(row_h + after_gap) then
-    r.ImGui_Dummy(ctx, 0, row_h + after_gap)
-    return
-  end
-  local selected = state.seq_pattern_source ~= "gmd" and state.seq_gen_style == style_key
-  local can_generate = region and seq_preset_can_generate(style_key)
-  local left_pad = 10.0
-  local right_pad = 8.0
-
-  local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
-  local x1, y1 = x0 + row_w, y0 + row_h
-  local mx, my = r.ImGui_GetMousePos(ctx)
-  local hovered = mx >= x0 and mx <= x1 and my >= y0 and my <= y1
-
-  local has_variations = seq_pattern_variation_count(style_key) > 0
-  local btn_size = 20.0
-  local btn_gap = 3.0
-
-  -- The list button sits at the far right whenever variations exist.
-  local list_w = has_variations and (btn_size + 6.0) or 0.0
-  local list_x = x0 + row_w - right_pad - btn_size
-
-  -- Dice strip appears on hover, to the left of the list button.
-  local dice_size = btn_size
-  local dice_total_w = dice_size * 6.0 + btn_gap * 5.0
-  local right_edge = x0 + row_w - right_pad - list_w
-  if hovered and dice_total_w > (right_edge - x0 - 70.0) then
-    dice_size = math.max(13.0, math.floor((right_edge - x0 - 70.0 - btn_gap * 5.0) / 6.0))
-    dice_total_w = dice_size * 6.0 + btn_gap * 5.0
-  end
-  local dice_x = right_edge - dice_total_w
-
-  -- Row click area excludes the dice strip (on hover) and the list button so
-  -- those overlapping buttons receive their own clicks.
-  local interactive_left = right_edge
-  if hovered then
-    interactive_left = dice_x
-  end
-  local row_button_w = math.max(40.0, interactive_left - x0 - 4.0)
-  r.ImGui_InvisibleButton(ctx, "##seq_pattern_preset_row_" .. style_key, row_button_w, row_h)
-  local clicked = r.ImGui_IsItemClicked(ctx, 0)
-
+-- Title row: icon tile, "Patterns", the target region as a chip, close button.
+function seq_pattern_window_header(region_name)
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  local fill = selected and UI_THEME.accent_fill or UI_THEME.bg_panel
-  local edge = selected and UI_THEME.accent or UI_THEME.border
-  if hovered then
-    fill = selected and UI_THEME.accent_fill_h or UI_THEME.surface_hvr
-    edge = UI_THEME.accent_hvr
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  local avail = r.ImGui_GetContentRegionAvail(ctx) or 0
+  local h = 26
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + h, y + h, UI_THEME.accent_fill, UI_METRICS.radius_ctrl)
+  r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + h - 0.5, y + h - 0.5, 0x1EFF5E44, UI_METRICS.radius_ctrl, 0, 1.0)
+  ui_button_draw_icon(dl, "steps", x + h * 0.5, y + h * 0.5, h, UI_THEME.accent)
+  local title = "Patterns"
+  local tw, th = r.ImGui_CalcTextSize(ctx, title)
+  local tx = x + h + 9
+  r.ImGui_DrawList_AddText(dl, tx, y + (h - th) * 0.5, UI_THEME.text, title)
+  r.ImGui_DrawList_AddText(dl, tx + 0.5, y + (h - th) * 0.5, UI_THEME.text, title)
+  local close_s = 20
+  local chip_x = tx + tw + 10
+  local chip_max = (x + avail - close_s - 8) - chip_x - 14
+  if chip_max > 30 then
+    draw_ui_pill_label(dl, chip_x, y + h * 0.5, seq_truncate_text_to_width(region_name, chip_max), {
+      bg = UI_THEME.surface, border = UI_THEME.border, text_col = UI_THEME.text_dim,
+      pad_x = 7.0, pad_y = 2.0, rounding = 9.0,
+    })
   end
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, fill, 5.0)
-  r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, edge, 5.0, 0, selected and 1.5 or 1.0)
-
-  local label_color = selected and 0xFFFFFFFF or UI_THEME.text
-  local label_right = hovered and dice_x or (x0 + row_w - right_pad - list_w)
-  local label_max_w = math.max(20.0, label_right - x0 - left_pad - 6.0)
-  if not hovered then
-    label_max_w = math.min(label_max_w, row_w * 0.42)
+  r.ImGui_SetCursorScreenPos(ctx, x + avail - close_s, y + (h - close_s) * 0.5)
+  if draw_ui_button("seq_pattern_window_close", nil, close_s, close_s, { icon = "close", compact = true, style = "default" }) then
+    state.seq_pattern_window_open = false
   end
-  local label_text = seq_truncate_text_to_width(style_def.label, label_max_w)
-  r.ImGui_DrawList_AddText(dl, x0 + left_pad, y0 + 9.0, label_color, label_text)
+  if r.ImGui_IsItemHovered(ctx) then
+    r.ImGui_SetTooltip(ctx, "Close (Esc)")
+  end
+  r.ImGui_SetCursorScreenPos(ctx, x, y + h)
+  r.ImGui_Dummy(ctx, math.max(1, avail), 6)
+end
 
-  if not hovered then
-    local palette = {}
-    for _, role in ipairs(seq_template_roles(style_key)) do
-      palette[#palette + 1] = SEQ_ROLE_LABELS[role] or role
+-- Wrapping filter chips: All, Favorites, each category, Groove MIDI.
+function seq_pattern_render_category_chips()
+  local cur = seq_pattern_current_category()
+  local items = {
+    { key = "all", label = "All" },
+    { key = "fav", label = "Favorites", icon = "star_fill" },
+  }
+  for _, c in ipairs(SEQ_PATTERN_CATEGORIES) do
+    items[#items + 1] = { key = c.key, label = c.short, tip = c.label }
+  end
+  if seq_gmd_available() then
+    items[#items + 1] = { key = "gmd", label = "Groove MIDI", tip = "Recorded performances (Groove MIDI Dataset)" }
+  end
+  local flow = ui_flow_begin(4.0)
+  for _, item in ipairs(items) do
+    local w = select(1, r.ImGui_CalcTextSize(ctx, item.label)) + 16 + (item.icon and 16 or 0)
+    ui_flow_place(flow, w)
+    local is_cur = cur == item.key
+    if draw_ui_button("seq_pattern_cat_" .. item.key, item.label, w, 22, {
+      compact = true, pill = true, selected = is_cur, lead_icon = item.icon,
+      lead_color = item.icon and SEQ_PATTERN_FAV_COLOR or nil,
+    }) and not is_cur then
+      seq_pattern_set_category(item.key)
     end
-    if #palette > 0 then
-      local palette_text = table.concat(palette, " \xC2\xB7 ")
-      local label_w = select(1, r.ImGui_CalcTextSize(ctx, label_text))
-      local palette_right = x0 + row_w - right_pad - list_w
-      local palette_max_w = math.max(20.0, palette_right - (x0 + left_pad + label_w) - 12.0)
-      palette_text = seq_truncate_text_to_width(palette_text, palette_max_w)
-      local palette_w = select(1, r.ImGui_CalcTextSize(ctx, palette_text))
-      r.ImGui_DrawList_AddText(
-        dl,
-        palette_right - palette_w,
-        y0 + 9.0,
-        can_generate and 0x8AA6C8FF or 0x6A748AFF,
-        palette_text
-      )
-    end
-  end
-
-  if clicked and can_generate then
-    run_seq_pattern_preset(region, style_key, nil)
-  elseif clicked then
-    state.seq_pattern_source = "template"
-    state.seq_gen_style = normalize_seq_gen_style(style_key)
-    save_config()
-  end
-
-  if hovered then
-    local dice_y = y0 + (row_h - dice_size) * 0.5
-    for strength = 1, 6 do
-      r.ImGui_SetCursorScreenPos(ctx, dice_x + (strength - 1) * (dice_size + btn_gap), dice_y)
-      local dice_clicked = draw_ui_button(
-        "seq_pattern_dice_" .. style_key .. "_" .. tostring(strength),
-        nil,
-        dice_size,
-        dice_size,
-        { icon = "dice" .. tostring(strength), compact = true, style = "default" }
-      )
-      if dice_clicked and can_generate then
-        run_seq_pattern_preset(region, style_key, strength)
-      end
+    if item.tip and r.ImGui_IsItemHovered(ctx) then
+      r.ImGui_SetTooltip(ctx, item.tip)
     end
   end
+  r.ImGui_Dummy(ctx, 1, 4)
+end
 
-  if has_variations then
-    r.ImGui_SetCursorScreenPos(ctx, list_x, y0 + (row_h - btn_size) * 0.5)
-    local list_clicked = draw_ui_button(
-      "seq_pattern_varlist_" .. style_key,
-      nil,
-      btn_size,
-      btn_size,
-      { icon = "list", compact = true, style = selected and "primary" or "default" }
-    )
-    if list_clicked then
-      state.seq_pattern_variations_open_key = style_key
-      state.seq_pattern_variations_request_open = true
+-- AI variation card: a local model re-imagines what's on the grid now.
+function seq_pattern_render_ai_strip(region, can_generate)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  local avail = r.ImGui_GetContentRegionAvail(ctx) or 0
+  local h = 32
+  ui_draw_panel(dl, x, y, x + avail, y + h, UI_METRICS.radius_ctrl, 0x13241AFF, 0x5EDC8A33, false, false)
+  local dice_s, gap = 20, 3
+  local dice_x = x + avail - 6 - (6 * dice_s + 5 * gap)
+
+  r.ImGui_InvisibleButton(ctx, "##seq_ai_label", math.max(1, dice_x - x - 4), h)
+  if r.ImGui_IsItemHovered(ctx) then
+    local tip = "Re-imagines the current pattern with the local model.\nDice 1 stays close to what's on the grid, 6 strays far."
+    if not seq_drum_ai_available() then
+      tip = tip .. "\nModel script not found, so the dice use the built-in randomizer."
+    end
+    r.ImGui_SetTooltip(ctx, tip)
+  end
+  ui_button_draw_icon(dl, "vary", x + 16, y + h * 0.5, 20, UI_THEME.success)
+  local label = "AI variation"
+  local _, lh = r.ImGui_CalcTextSize(ctx, label)
+  r.ImGui_DrawList_AddText(dl, x + 30, y + (h - lh) * 0.5, 0xCFF5DDFF, label)
+
+  for s = 1, 6 do
+    r.ImGui_SetCursorScreenPos(ctx, dice_x + (s - 1) * (dice_s + gap), y + (h - dice_s) * 0.5)
+    if draw_ui_button("seq_ai_dice_" .. s, nil, dice_s, dice_s, { icon = "dice" .. s, compact = true, style = "success" })
+        and can_generate then
+      run_seq_ai_variation(region, state.seq_gen_style, s / 6.0)
     end
   end
-
-  r.ImGui_SetCursorScreenPos(ctx, x0, y1)
-  r.ImGui_Dummy(ctx, 0, 5.0)
+  r.ImGui_SetCursorScreenPos(ctx, x, y + h)
+  r.ImGui_Dummy(ctx, math.max(1, avail), 6)
 end
 
 function render_seq_pattern_popup(region)
@@ -1807,81 +1986,65 @@ function render_seq_pattern_popup(region)
   if visible then
     state.seq_gen_style = normalize_seq_gen_style(state.seq_gen_style)
     local can_generate = region and seq_preset_can_generate(state.seq_gen_style)
-
     local region_name = get_seq_region_display_name(region)
-    r.ImGui_TextColored(ctx, UI_THEME.text, "Pattern Presets")
-    r.ImGui_SameLine(ctx)
-    r.ImGui_TextColored(ctx, UI_THEME.text_dim, "· " .. region_name)
-    r.ImGui_SameLine(ctx)
-    local avail_close = r.ImGui_GetContentRegionAvail(ctx)
-    r.ImGui_SetCursorPosX(ctx, r.ImGui_GetCursorPosX(ctx) + math.max(0.0, avail_close - 22.0))
-    if draw_ui_button("seq_pattern_window_close", nil, 18.0, 18.0, { icon = "close", compact = true, style = "default" }) then
-      state.seq_pattern_window_open = false
+
+    seq_pattern_window_header(region_name)
+    local submitted, query = ui_popup_search("seq_pattern_search", "Search genres, drums or BPM", state.seq_pattern_search)
+    if query ~= state.seq_pattern_search then
+      state.seq_pattern_search = query
     end
-    r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Applies to " .. region_name .. ". Click to generate. Hover for dice: 1 is subtle, 6 is unruly.")
-    if not can_generate and state.seq_pattern_source ~= "gmd" then
-      r.ImGui_TextColored(ctx, 0xFFB870FF, "No matching samples found for this preset's types.")
+    r.ImGui_Dummy(ctx, 1, 2)
+    seq_pattern_render_category_chips()
+    seq_pattern_render_ai_strip(region, can_generate)
+    if not region then
+      r.ImGui_TextColored(ctx, 0xFFB870FF, "Select a region in the sequencer to apply patterns.")
     end
 
-    -- AI variation: a local model re-imagines the current pattern. The dice
-    -- (1..6) set how far it strays from what's currently on the grid.
-    r.ImGui_TextColored(ctx, 0x9FE3B5FF, "AI Variation")
-    r.ImGui_SameLine(ctx)
-    local ai_dice = 18.0
-    local ai_gap = 3.0
-    for strength = 1, 6 do
-      if strength > 1 then r.ImGui_SameLine(ctx, 0, ai_gap) end
-      local clicked_ai = draw_ui_button(
-        "seq_ai_dice_" .. tostring(strength),
-        nil, ai_dice, ai_dice,
-        { icon = "dice" .. tostring(strength), compact = true, style = "success" }
-      )
-      if clicked_ai and can_generate then
-        run_seq_ai_variation(region, state.seq_gen_style, strength / 6.0)
-      end
-    end
-    if not seq_drum_ai_available() then
-      r.ImGui_TextColored(ctx, 0xFFB870FF, "AI model script not found; dice will fall back to built-in randomizer.")
+    local entries = seq_pattern_browser_entries()
+    if submitted and region and entries.first_template and seq_preset_can_generate(entries.first_template.key) then
+      run_seq_pattern_preset(region, entries.first_template.key, nil)
     end
 
-    r.ImGui_Separator(ctx)
-
-    -- Search + Groove MIDI filters share one toolbar above the unified list.
-    r.ImGui_SetNextItemWidth(ctx, -1)
-    local search_changed, search_val
-    if r.ImGui_InputTextWithHint then
-      search_changed, search_val = r.ImGui_InputTextWithHint(
-        ctx, "##seq_pattern_search", "Search patterns...", state.seq_pattern_search or ""
-      )
-    else
-      search_changed, search_val = r.ImGui_InputText(ctx, "##seq_pattern_search", state.seq_pattern_search or "", 256)
-    end
-    seq_mark_text_input_item()
-    if search_changed then
-      state.seq_pattern_search = search_val or ""
-    end
-    render_seq_gmd_toolbar()
-
-    r.ImGui_Separator(ctx)
-
+    local footer_h = 22
     local list_flags = 0
     if r.ImGui_WindowFlags_NoBackground then
       list_flags = r.ImGui_WindowFlags_NoBackground()
     end
-    if r.ImGui_BeginChild(ctx, "seq_pattern_preset_list", 0, 0, 0, list_flags) then
-      local entries = seq_pattern_browser_entries()
+    if r.ImGui_BeginChild(ctx, "seq_pattern_preset_list", 0, -footer_h, 0, list_flags) then
       if #entries == 0 then
-        r.ImGui_TextColored(ctx, 0xFFB870FF, "No patterns match your search.")
+        r.ImGui_Dummy(ctx, 1, 8)
+        local cat = seq_pattern_current_category()
+        if cat == "fav" and (state.seq_pattern_search or "") == "" then
+          r.ImGui_TextColored(ctx, UI_THEME.text_dim, "No favorites yet.")
+          r.ImGui_TextColored(ctx, UI_THEME.text_mute, "Click the star on a pattern (or right-click it) to keep it here.")
+        else
+          r.ImGui_TextColored(ctx, UI_THEME.text_dim, "No patterns match.")
+          if cat ~= "all" and draw_ui_button("seq_pattern_search_all", "Search all categories", nil, 24, { compact = true }) then
+            seq_pattern_set_category("all")
+          end
+        end
       else
         for _, entry in ipairs(entries) do
-          if entry.kind == "gmd" then
-            render_seq_gmd_preset_row(region, entry.group, entry.template)
-          elseif entry.style_def then
+          if entry.kind == "caption" then
+            ui_group_caption(entry.label .. (entry.count and ("  \xC2\xB7  " .. tostring(entry.count)) or ""))
+          elseif entry.kind == "template" then
             render_seq_pattern_preset_row(region, entry.style_def)
+          elseif entry.kind == "gmd_toolbar" then
+            render_seq_gmd_toolbar()
+          elseif entry.kind == "gmd" then
+            render_seq_gmd_preset_row(region, entry.group)
           end
         end
       end
       r.ImGui_EndChild(ctx)
+    end
+    r.ImGui_TextColored(ctx, UI_THEME.text_mute, "Enter: apply top match  \xC2\xB7  Right-click: favorite  \xC2\xB7  Esc: close")
+
+    -- Esc closes the window unless a text field or popup has the keyboard.
+    if r.ImGui_IsWindowFocused and r.ImGui_IsWindowFocused(ctx, r.ImGui_FocusedFlags_RootAndChildWindows and r.ImGui_FocusedFlags_RootAndChildWindows() or 0)
+        and not (r.ImGui_IsAnyItemActive and r.ImGui_IsAnyItemActive(ctx))
+        and r.ImGui_IsKeyPressed and r.ImGui_Key_Escape and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
+      state.seq_pattern_window_open = false
     end
 
     -- Generated-variation history popup only (Groove MIDI uses inline collapse).
@@ -1898,188 +2061,65 @@ function render_seq_pattern_popup(region)
   end_window(visible, true)
 end
 
+-- One saved dice / AI roll: icon, number and strength on the left, the
+-- resulting pattern as a step preview on the right.
 function render_seq_pattern_variation_row(region, style_key, entry)
-  local row_w = math.max(1.0, r.ImGui_GetContentRegionAvail(ctx))
-  local row_h = 30.0
+  local row_w = math.max(1.0, (r.ImGui_GetContentRegionAvail(ctx)))
+  local preview = seq_pattern_preview_from_map(entry.ai_pattern or entry.preview)
+  local row_h = 36.0
   r.ImGui_InvisibleButton(ctx, "##seq_var_" .. tostring(entry.id), row_w, row_h)
   local x0, y0 = r.ImGui_GetItemRectMin(ctx)
-  local x1, y1 = r.ImGui_GetItemRectMax(ctx)
-  row_w = x1 - x0
+  local x1, y1 = x0 + row_w, y0 + row_h
   local hovered = r.ImGui_IsItemHovered(ctx)
   local clicked = r.ImGui_IsItemClicked(ctx, 0)
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  local cy = (y0 + y1) * 0.5
+  seq_pattern_row_panel(dl, x0, y0, x1, y1, false, hovered, 5.0)
+
+  local icon = entry.ai and "vary" or ("dice" .. tostring(math.max(1, math.min(6, entry.strength or 1))))
+  ui_button_draw_icon(dl, icon, x0 + 16.0, (y0 + y1) * 0.5, 20.0, entry.ai and UI_THEME.success or UI_THEME.text_dim)
+
+  local grid_w = preview and math.floor(math.min(140.0, row_w * 0.48)) or 0
+  local grid_x1 = x1 - 9.0
+  local grid_x0 = grid_x1 - grid_w
+  local text_x = x0 + 32.0
+  local text_w = (preview and grid_x0 or x1) - text_x - 10.0
+  local title = "#" .. tostring(entry.id)
+  r.ImGui_DrawList_AddText(dl, text_x, y0 + 3.0, UI_THEME.text, title)
+  r.ImGui_DrawList_AddText(dl, text_x + 0.5, y0 + 3.0, UI_THEME.text, title)
+  local meta
+  if entry.ai then
+    meta = string.format("AI \xC2\xB7 %d%%", math.floor((entry.ai_variation or 0.5) * 100.0 + 0.5))
+  else
+    meta = "Dice " .. tostring(entry.strength or 1)
+  end
+  r.ImGui_DrawList_AddText(dl, text_x, y0 + 19.0, UI_THEME.text_mute, seq_truncate_text_to_width(meta, text_w))
+  if preview then
+    seq_pattern_draw_step_preview(dl, grid_x0, y0 + 6.0, grid_x1, y1 - 6.0, preview, 1.0)
+  end
 
   if hovered then
-    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, 0x174A24AA, 4.0)
-    r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, UI_THEME.accent, 4.0, 0, 1.0)
+    r.ImGui_SetTooltip(ctx, "Click: apply this variation again")
   end
-
-  local x = x0 + 6.0
-  local base_name = get_seq_gen_style_label(style_key)
-  local _, name_h = r.ImGui_CalcTextSize(ctx, base_name)
-  r.ImGui_DrawList_AddText(dl, x, cy - name_h * 0.5, UI_THEME.text, base_name)
-  x = x + select(1, r.ImGui_CalcTextSize(ctx, base_name)) + 8.0
-
-  local num_text = "#" .. tostring(entry.id)
-  local pill_w = draw_ui_pill_label(dl, x, cy, num_text, {
-    bg = UI_THEME.accent_fill,
-    border = UI_THEME.accent,
-    text_col = 0xF0F8FFFF,
-    pad_x = 7.0,
-    pad_y = 2.0,
-    rounding = 6.0,
-  })
-  x = x + pill_w + 6.0
-
-  if entry.ai then
-    draw_ui_pill_label(dl, x, cy, "AI", {
-      bg = 0x243A2EFF,
-      border = 0x66CC88FF,
-      text_col = 0xCFF5DDFF,
-      pad_x = 7.0,
-      pad_y = 2.0,
-      rounding = 5.0,
-    })
-    local pct = math.floor((entry.ai_variation or 0.5) * 100.0 + 0.5)
-    x = x + select(1, r.ImGui_CalcTextSize(ctx, "AI")) + 14.0 + 6.0
-    draw_ui_pill_label(dl, x, cy, pct .. "%", {
-      bg = UI_THEME.surface,
-      border = UI_THEME.border,
-      text_col = UI_THEME.text_dim,
-      pad_x = 6.0,
-      pad_y = 2.0,
-      rounding = 5.0,
-    })
-  else
-    local dice_text = "dice " .. tostring(entry.strength or 1)
-    draw_ui_pill_label(dl, x, cy, dice_text, {
-      bg = UI_THEME.surface,
-      border = UI_THEME.border,
-      text_col = UI_THEME.text_dim,
-      pad_x = 6.0,
-      pad_y = 2.0,
-      rounding = 5.0,
-    })
-  end
-
   if clicked then
     seq_apply_pattern_variation(region, style_key, entry)
     r.ImGui_CloseCurrentPopup(ctx)
   end
 end
 
-function render_seq_gmd_pattern_row(region, child, parent_id_safe)
-  if type(child) ~= "table" or type(child.item) ~= "table" then return end
-  local row_h = 30.0
-  local gap = 2.0
-  if not seq_pattern_list_item_visible(row_h + gap) then
-    r.ImGui_Dummy(ctx, 0, row_h + gap)
-    return
-  end
-  local item = child.item
-  local indent = 16.0
-  local avail = r.ImGui_GetContentRegionAvail(ctx)
-  local row_w = math.max(1.0, avail - indent)
-  local left_pad = 8.0
-  local right_pad = 6.0
-  local id = tostring(item.id or child.index or "")
-  local id_safe = tostring(parent_id_safe or "gmd") .. "_pat_" .. id:gsub("[^%w]", "_")
-  local btn_size = 18.0
-  local btn_gap = 2.0
-  local selected = tostring(state.seq_gmd_selected_id or "") == id
-
-  local x_base, y_base = r.ImGui_GetCursorScreenPos(ctx)
-  r.ImGui_SetCursorScreenPos(ctx, x_base + indent, y_base)
-
-  local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
-  local x1, y1 = x0 + row_w, y0 + row_h
-  local mx, my = r.ImGui_GetMousePos(ctx)
-  local hovered = mx >= x0 and mx <= x1 and my >= y0 and my <= y1
-
-  local right_edge = x0 + row_w - right_pad
-  local dice_size = btn_size
-  local dice_total_w = dice_size * 6.0 + btn_gap * 5.0
-  if hovered and dice_total_w > (right_edge - x0 - 60.0) then
-    dice_size = math.max(12.0, math.floor((right_edge - x0 - 60.0 - btn_gap * 5.0) / 6.0))
-    dice_total_w = dice_size * 6.0 + btn_gap * 5.0
-  end
-  local dice_x = right_edge - dice_total_w
-  local interactive_left = hovered and dice_x or right_edge
-  local row_button_w = math.max(40.0, interactive_left - x0 - 4.0)
-
-  r.ImGui_InvisibleButton(ctx, "##seq_gmd_pat_" .. id_safe, row_button_w, row_h)
-  local clicked = r.ImGui_IsItemClicked(ctx, 0)
-  local dl = r.ImGui_GetWindowDrawList(ctx)
-
-  local fill = selected and UI_THEME.accent_fill or UI_THEME.bg_panel
-  local edge = selected and UI_THEME.accent or UI_THEME.border
-  if hovered then
-    fill = selected and UI_THEME.accent_fill_h or UI_THEME.surface_hvr
-    edge = UI_THEME.accent_hvr
-  end
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, fill, 4.0)
-  r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, edge, 4.0, 0, 1.0)
-
-  local label_right = hovered and dice_x or right_edge
-  local label_max_w = math.max(20.0, label_right - x0 - left_pad - 6.0)
-  local label_text = seq_truncate_text_to_width(child.label or "Groove", label_max_w)
-  r.ImGui_DrawList_AddText(dl, x0 + left_pad, y0 + 7.0, selected and 0xFFFFFFFF or UI_THEME.text, label_text)
-
-  if not hovered then
-    local bpm = tonumber(item.bpm)
-    if bpm then
-      local bpm_text = tostring(bpm) .. " BPM"
-      local label_w = select(1, r.ImGui_CalcTextSize(ctx, label_text))
-      local meta_right = label_right
-      local meta_max_w = math.max(20.0, meta_right - (x0 + left_pad + label_w) - 10.0)
-      bpm_text = seq_truncate_text_to_width(bpm_text, meta_max_w)
-      local meta_w = select(1, r.ImGui_CalcTextSize(ctx, bpm_text))
-      r.ImGui_DrawList_AddText(dl, meta_right - meta_w, y0 + 8.0, 0x8AA6C8FF, bpm_text)
-    end
-  end
-
-  if clicked and region then
-    run_seq_gmd_load_id(region, id)
-  end
-
-  if hovered then
-    seq_pattern_draw_hover_dice(
-      region,
-      "seq_gmd_pat_dice_" .. id_safe,
-      dice_x,
-      y0 + (row_h - dice_size) * 0.5,
-      dice_size,
-      btn_gap,
-      function(_strength)
-        run_seq_gmd_load_id(region, id)
-      end
-    )
-  end
-
-  r.ImGui_SetCursorScreenPos(ctx, x_base, y1)
-  r.ImGui_Dummy(ctx, 0, 2.0)
-end
-
--- Popup for code-generated / AI variation history only (not Groove MIDI).
 function render_seq_pattern_variations_popup(region)
   local style_key = state.seq_pattern_variations_open_key
   if type(style_key) == "string" and style_key:sub(1, 4) == "gmd:" then
     return
   end
   if r.ImGui_SetNextWindowSizeConstraints then
-    r.ImGui_SetNextWindowSizeConstraints(ctx, 280.0, 80.0, 280.0, 520.0)
+    r.ImGui_SetNextWindowSizeConstraints(ctx, 340.0, 80.0, 340.0, 560.0)
   end
   if not r.ImGui_BeginPopup(ctx, "seq_pattern_variations_popup") then
     return
   end
 
-  r.ImGui_TextColored(ctx, UI_THEME.text, "Generated Variations")
+  ui_popup_header("list", "Generated variations", style_key and get_seq_gen_style_label(style_key) or nil)
   local store = style_key and state.seq_pattern_variations and state.seq_pattern_variations[style_key]
-  if style_key then
-    r.ImGui_TextColored(ctx, UI_THEME.text_dim, get_seq_gen_style_label(style_key))
-  end
-  r.ImGui_Separator(ctx)
 
   if not store or #store.entries == 0 then
     r.ImGui_TextColored(ctx, UI_THEME.text_dim, "No variations yet. Roll a dice to add some.")
@@ -2087,13 +2127,14 @@ function render_seq_pattern_variations_popup(region)
     for i = #store.entries, 1, -1 do
       render_seq_pattern_variation_row(region, style_key, store.entries[i])
     end
-    r.ImGui_Separator(ctx)
+    r.ImGui_Dummy(ctx, 1, 4)
     if draw_ui_button("seq_var_clear", "Clear list", nil, nil, { compact = true, style = "danger" }) then
       store.entries = {}
       r.ImGui_CloseCurrentPopup(ctx)
     end
   end
 
+  ui_popup_close_on_escape()
   r.ImGui_EndPopup(ctx)
 end
 
