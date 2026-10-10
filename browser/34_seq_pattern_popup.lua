@@ -2218,10 +2218,9 @@ end
 
 function render_seq_kit_random_genre_chips(tags, id_prefix, priority_set, counts, enabled)
   local flow = ui_flow_begin(6.0)
-  local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   local shown = 0
   for idx, tag in ipairs(tags) do
-    ui_flow_place(flow, select(1, r.ImGui_CalcTextSize(ctx, tag)) + pad_x * 2)
+    ui_flow_place(flow, tag_chip_width(tag))
     shown = shown + 1
     local used_in_project = priority_set and priority_set[tag:lower()] == true
     if draw_tag_button(ctx, tag, false, tag, id_prefix .. tostring(idx) .. "_") and enabled ~= false then

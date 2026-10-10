@@ -448,9 +448,7 @@ SEQ_ADD_TRACK_GROUPS = {
 }
 
 function seq_add_popup_tag_width(tag_label)
-  local text_w = r.ImGui_CalcTextSize(ctx, tag_label)
-  local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
-  return text_w + pad_x * 2
+  return tag_chip_width(tag_label)
 end
 
 function seq_add_popup_group_key(tag)

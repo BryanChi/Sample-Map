@@ -355,10 +355,9 @@ function render_filter_input()
     return ordered
   end
 
+  -- "+N" overflow labels draw as the dotless "__hidden_tags__" chip.
   local function calc_tag_button_width(label)
-    local text_w = r.ImGui_CalcTextSize(ctx, label)
-    local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
-    return text_w + (pad_x or 4) * 2
+    return tag_chip_width(label, label:sub(1, 1) == "+" and "__hidden_tags__" or label)
   end
 
   local function calc_compact_button_width(label)
