@@ -372,24 +372,65 @@ function seq_evict_overlaps_keeping(keep_regions)
   return changed
 end
 
+-- New start positions for swapping regions a and b: the later one moves to
+-- where the earlier one started, the earlier one ends where the later one
+-- ended, and regions in between shift by the length difference. Nothing
+-- outside the two regions moves. Returns { [region_id] = new_start_qn }.
+function seq_region_swap_layout(a, b)
+  if not a or not b or a.id == b.id then
+    return nil
+  end
+  local first, second = a, b
+  if (b.start_qn or 0.0) < (a.start_qn or 0.0) then
+    first, second = b, a
+  end
+  local f_start = first.start_qn or 0.0
+  local f_len = get_seq_region_length_qn(first)
+  local s_start = second.start_qn or 0.0
+  local s_end = s_start + get_seq_region_length_qn(second)
+  local delta = (s_end - s_start) - f_len
+  local starts = {
+    [second.id] = f_start,
+    [first.id] = math.max(0.0, s_end - f_len),
+  }
+  if math.abs(delta) > 0.000001 then
+    for _, reg in ipairs(state.seq_regions or {}) do
+      local rs = reg.start_qn or 0.0
+      if reg.id ~= first.id and reg.id ~= second.id
+          and rs >= f_start + f_len - 0.000001 and rs < s_start - 0.000001 then
+        starts[reg.id] = rs + delta
+      end
+    end
+  end
+  return starts
+end
+
 function seq_swap_region_positions(a, b)
   if not a or not b or a.id == b.id then
     return false
   end
-  local a_start = a.start_qn or 0.0
-  local b_start = b.start_qn or 0.0
-  if math.abs(a_start - b_start) < 0.000001 then
+  if math.abs((a.start_qn or 0.0) - (b.start_qn or 0.0)) < 0.000001 then
     return false
   end
-  remove_seq_rendered_items(a)
-  remove_seq_rendered_items(b)
-  a.start_qn = b_start
-  b.start_qn = a_start
+  local starts = seq_region_swap_layout(a, b)
+  local moved = {}
+  for _, reg in ipairs(state.seq_regions or {}) do
+    local new_start = starts[reg.id]
+    if new_start and math.abs(new_start - (reg.start_qn or 0.0)) > 0.000001 then
+      remove_seq_rendered_items(reg)
+      moved[#moved + 1] = { reg = reg, start_qn = new_start }
+    end
+  end
+  for _, m in ipairs(moved) do
+    m.reg.start_qn = m.start_qn
+  end
   sort_seq_regions()
+  -- Safety net only (e.g. a time-signature change inside the span).
   seq_pack_overlapping_regions()
   save_config()
-  sync_seq_region(a)
-  sync_seq_region(b)
+  for _, m in ipairs(moved) do
+    sync_seq_region(m.reg)
+  end
   return true
 end
 
@@ -685,7 +726,7 @@ function seq_hit_test_region_at(mx, my, y0, region_lane_h, timeline_x0, timeline
         end
       end
       local _, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after = seq_collect_region_random_entries(reg)
-      if has_prob or has_human or has_vel or has_vary or has_stut or has_ghost then
+      if has_prob or has_human or has_vel or has_vary or has_stut or has_ghost or has_grace or has_after then
         local vis_x0 = rx0
         if seq_region_is_linked(reg) and (rx1 - rx0) >= (SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD * 2 + 8) then
           vis_x0 = rx0 + SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD + 8

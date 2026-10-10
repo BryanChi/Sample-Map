@@ -1021,6 +1021,11 @@ function end_seq_undo(label)
 end
 
 function seq_undo()
+  if state.seq_swap_track_id and not seq_undo_applying then
+    -- Swap mode holds its undo entry open until it ends.
+    sm_notify("Finish or cancel the swap first (Enter / Esc)", "warn")
+    return false
+  end
   if seq_undo_applying or seq_undo_is_open() then
     return false
   end
@@ -1038,6 +1043,11 @@ function seq_undo()
 end
 
 function seq_redo()
+  if state.seq_swap_track_id and not seq_undo_applying then
+    -- Swap mode holds its undo entry open until it ends.
+    sm_notify("Finish or cancel the swap first (Enter / Esc)", "warn")
+    return false
+  end
   if seq_undo_applying or seq_undo_is_open() then
     return false
   end

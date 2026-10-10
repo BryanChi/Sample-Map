@@ -315,6 +315,22 @@ function seq_razor_clamped_move_delta(drag, step_qn)
   return delta_qn, delta_tracks
 end
 
+-- Where a razor-moved note lands: destination slot, region and the offset
+-- inside it, or nil when the spot has no region (gap or past the last end).
+function seq_razor_move_dest(item, delta_qn, delta_tracks)
+  local _, orig_idx = find_seq_track_by_id(item.track_id)
+  local dest_slot = orig_idx and state.seq_tracks[orig_idx + delta_tracks]
+  local dest_qn = item.abs_qn + delta_qn
+  local dest_region = seq_region_at_qn(dest_qn)
+  if dest_slot and dest_region and dest_qn >= 0 then
+    local rel = dest_qn - (dest_region.start_qn or 0.0)
+    if rel >= -1e-9 and rel < get_seq_region_length_qn(dest_region) - 1e-9 then
+      return dest_slot, dest_region, rel
+    end
+  end
+  return nil
+end
+
 function seq_razor_apply_move(drag, step_qn)
   if not drag or drag.mode ~= "move" then
     return
@@ -326,6 +342,7 @@ function seq_razor_apply_move(drag, step_qn)
   end
 
   state.seq_patterns = clone_table_deep(drag.patterns_backup)
+  drag.kept_in_place = 0
   if delta_qn ~= 0 or delta_tracks ~= 0 then
     local dest_razors = {}
     for _, orig in ipairs(drag.razors_orig or {}) do
@@ -335,30 +352,37 @@ function seq_razor_apply_move(drag, step_qn)
         track_ids = seq_shift_track_ids(orig.track_ids, delta_tracks) or orig.track_ids,
       }
     end
+    -- Notes whose destination has no region stay where they were (like a
+    -- single-note drag snapping back) instead of being dropped.
+    local kept = {}
     if not drag.copy then
       for _, item in ipairs(drag.payload or {}) do
         local region = get_seq_region_by_id(item.region_id)
-        delete_seq_note(region, item.track_id, item.step_key)
-      end
-    end
-    seq_razor_clear_notes_in_areas(dest_razors, step_qn)
-    for _, item in ipairs(drag.payload or {}) do
-      local _, orig_idx = find_seq_track_by_id(item.track_id)
-      local dest_slot = orig_idx and state.seq_tracks[orig_idx + delta_tracks]
-      local dest_qn = item.abs_qn + delta_qn
-      local dest_region = seq_region_at_qn(dest_qn)
-      if dest_slot and dest_region and dest_qn >= 0 then
-        local rel = dest_qn - (dest_region.start_qn or 0.0)
-        if rel >= -1e-9 and rel < get_seq_region_length_qn(dest_region) - 1e-9 then
-          local note = clone_table_deep(item.note)
-          note.qn_offset = rel
-          note.step = math.floor((rel / step_qn) + 1e-9)
-          seq_keep_copied_note_over_region(note, item.length_qn, dest_region, rel)
-          local key = seq_alloc_note_key(dest_region, dest_slot.id, rel)
-          set_seq_note(dest_region, dest_slot.id, key, note)
+        if seq_razor_move_dest(item, delta_qn, delta_tracks) then
+          delete_seq_note(region, item.track_id, item.step_key)
+        elseif region then
+          kept[#kept + 1] = { region = region, item = item }
         end
       end
     end
+    seq_razor_clear_notes_in_areas(dest_razors, step_qn)
+    -- Put kept notes back (the destination areas may cover them) before the
+    -- moved notes take their keys.
+    for _, k in ipairs(kept) do
+      set_seq_note(k.region, k.item.track_id, k.item.step_key, clone_table_deep(k.item.note))
+    end
+    for _, item in ipairs(drag.payload or {}) do
+      local dest_slot, dest_region, rel = seq_razor_move_dest(item, delta_qn, delta_tracks)
+      if dest_slot then
+        local note = clone_table_deep(item.note)
+        note.qn_offset = rel
+        note.step = math.floor((rel / step_qn) + 1e-9)
+        seq_keep_copied_note_over_region(note, item.length_qn, dest_region, rel)
+        local key = seq_alloc_note_key(dest_region, dest_slot.id, rel)
+        set_seq_note(dest_region, dest_slot.id, key, note)
+      end
+    end
+    drag.kept_in_place = #kept
   end
 
   local moved_razors = {}
@@ -474,6 +498,11 @@ function seq_commit_razor_drag(step_qn)
     if drag.dirty then
       seq_razor_sync_moved_items(drag, step_qn)
       save_config()
+      local kept = drag.kept_in_place or 0
+      if kept > 0 then
+        sm_notify(kept == 1 and "1 note had no region to land in and stayed put"
+          or string.format("%d notes had no region to land in and stayed put", kept), "info")
+      end
     end
     if drag.undo_open then
       end_seq_undo(drag.undo_label or (drag.copy and "Copy razor notes" or "Move razor notes"))
@@ -625,6 +654,20 @@ function handle_seq_razor_keys()
       r.ImGui_SetNextFrameWantCaptureKeyboard(ctx, true)
     end
     seq_delete_notes_in_razors()
+    return true
+  end
+  -- No razors: Delete removes the region last clicked in the region lane.
+  local target = delete_pressed and state.seq_region_key_target
+    and get_seq_region_by_id(state.seq_region_key_target)
+  if target then
+    if r.ImGui_SetNextFrameWantCaptureKeyboard then
+      r.ImGui_SetNextFrameWantCaptureKeyboard(ctx, true)
+    end
+    state.seq_region_key_target = nil
+    local label = begin_seq_undo("Delete sequencer region")
+    seq_delete_region_by_id(target.id)
+    end_seq_undo(label)
+    sm_notify("Deleted region " .. tostring(target.name or "") .. " (" .. shortcut_display("undo") .. " to undo)", "info")
     return true
   end
   return false

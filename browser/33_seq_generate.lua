@@ -1046,8 +1046,9 @@ function generate_seq_pattern(region, style_key, opts)
 
   local grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
   local region_len_qn = get_seq_region_length_qn(region)
-  local steps_per_bar = math.max(1, math.floor((4.0 / grid_qn) + 0.5))
-  local bar_count = math.max(1, math.floor((region_len_qn / 4.0) + 0.5))
+  -- Bars follow the time signature; template 16ths past a short bar's end
+  -- (e.g. 13-16 in 3/4) are dropped so every bar starts on its bar line.
+  local steps_per_bar, bar_count, steps_per_4qn = seq_region_bar_grid(region, grid_qn)
   local max_steps = math.max(1, math.floor((region_len_qn / grid_qn) + 0.5))
   local strength = type(opts.random_strength) == "number" and math.max(0, math.min(6, math.floor(opts.random_strength + 0.5))) or 0
   local random_seed = opts.random_seed or seq_new_seed()
@@ -1082,7 +1083,7 @@ function generate_seq_pattern(region, style_key, opts)
             local note = make_default_seq_note(slot, step_idx, step_idx * grid_qn)
             if note then
               local pos16 = steps_per_bar > 0
-                and math.floor(((step_idx % steps_per_bar) * 16.0 / steps_per_bar) + 0.5)
+                and math.floor(((step_idx % steps_per_bar) * 16.0 / steps_per_4qn) + 0.5)
                 or step_idx
               note.offset_qn = seq_pattern_base_offset(role, pos16, style_key, grid_qn)
               local rnd_stut = seq_pattern_rand(random_seed + step_idx * 733 + (slot.id or 0) * 41)
@@ -1109,8 +1110,8 @@ function generate_seq_pattern(region, style_key, opts)
           for _, raw_step in ipairs(role_steps) do
             local template_step = raw_step - cycle_lo
             local grid_step = (template_step >= 0 and template_step < 16)
-              and seq_template_step_to_grid_step(template_step, steps_per_bar) or nil
-            if grid_step then
+              and seq_template_step_to_grid_step(template_step, steps_per_4qn) or nil
+            if grid_step and grid_step < steps_per_bar then
               local base_idx = bar_lo + grid_step
               local is_anchor = seq_role_anchor_hit(role, template_step)
 
@@ -1158,8 +1159,8 @@ function generate_seq_pattern(region, style_key, opts)
           if add_prob > 0 then
             for template_step = 0, 15 do
               if not template_step_lookup[cycle_lo + template_step] then
-                local grid_step = seq_template_step_to_grid_step(template_step, steps_per_bar)
-                if grid_step then
+                local grid_step = seq_template_step_to_grid_step(template_step, steps_per_4qn)
+                if grid_step and grid_step < steps_per_bar then
                   local idx = bar_lo + grid_step
                   if not seen[idx] then
                     local rnd_add = seq_pattern_rand(random_seed + idx * 617 + (slot.id or 0) * 23 + template_step * 5)
@@ -1181,7 +1182,7 @@ function generate_seq_pattern(region, style_key, opts)
   save_config()
   sync_seq_pattern_regions(region.pattern_id)
   if skipped_unassigned then
-    log("Skipped unassigned sequencer tracks while generating pattern")
+    sm_notify("Skipped tracks without a sample", "info")
   end
   if strength > 0 then
     log(string.format("Randomized %s pattern at dice %d (disp %.0f / dens %.0f / stut %.0f, %d hits)",

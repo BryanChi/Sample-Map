@@ -280,8 +280,7 @@ function seq_write_role_positions(region, style_key, role_map)
 
   local grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
   local region_len_qn = get_seq_region_length_qn(region)
-  local steps_per_bar = math.max(1, math.floor((4.0 / grid_qn) + 0.5))
-  local bar_count = math.max(1, math.floor((region_len_qn / 4.0) + 0.5))
+  local steps_per_bar, bar_count, steps_per_4qn = seq_region_bar_grid(region, grid_qn)
   local max_steps = math.max(1, math.floor((region_len_qn / grid_qn) + 0.5))
 
   local locked_notes = seq_collect_locked_notes(pattern, grid_qn)
@@ -297,8 +296,8 @@ function seq_write_role_positions(region, style_key, role_map)
         local seen = seq_merge_locked_cell_seen(seq_locked_step_seen(locked_notes, slot.id), pattern, slot.id)
         for bar = 0, bar_count - 1 do
           for _, pos16 in ipairs(positions) do
-            local grid_step = seq_template_step_to_grid_step(pos16, steps_per_bar)
-            if grid_step then
+            local grid_step = seq_template_step_to_grid_step(pos16, steps_per_4qn)
+            if grid_step and grid_step < steps_per_bar then
               local step_idx = bar * steps_per_bar + grid_step
               if step_idx >= 0 and step_idx < max_steps and not seen[step_idx] then
                 local note = make_default_seq_note(slot, step_idx, step_idx * grid_qn)
@@ -332,7 +331,7 @@ function seq_collect_current_role_positions(region)
   local notes_by_track = pattern and pattern.notes or nil
 
   local grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
-  local steps_per_bar = math.max(1, math.floor((4.0 / grid_qn) + 0.5))
+  local steps_per_bar, _, steps_per_4qn = seq_region_bar_grid(region, grid_qn)
 
   for _, slot in ipairs(state.seq_tracks) do
     if slot.sample_path then
@@ -344,7 +343,7 @@ function seq_collect_current_role_positions(region)
           if note and note.enabled ~= false then
             local step_idx = tonumber(note.step) or tonumber(step_key) or 0
             local within = step_idx % steps_per_bar
-            local pos16 = math.floor((within * 16.0 / steps_per_bar) + 0.5)
+            local pos16 = math.floor((within * 16.0 / steps_per_4qn) + 0.5)
             if pos16 >= 0 and pos16 < 16 then
               set[pos16] = true
             end
@@ -371,7 +370,7 @@ function seq_collect_preview_positions(region, bars)
   local notes_by_track = pattern and pattern.notes or nil
   if not notes_by_track then return map end
   local grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
-  local steps_per_bar = math.max(1, math.floor((4.0 / grid_qn) + 0.5))
+  local steps_per_bar, _, steps_per_4qn = seq_region_bar_grid(region, grid_qn)
   local sets = {}
   for _, slot in ipairs(state.seq_tracks or {}) do
     local notes = slot.sample_path and notes_by_track[tostring(slot.id)] or nil
@@ -384,8 +383,10 @@ function seq_collect_preview_positions(region, bars)
           local step_idx = tonumber(note.step) or tonumber(step_key) or 0
           local bar = math.floor(step_idx / steps_per_bar)
           if bar >= 0 and bar < bars then
-            local within = step_idx % steps_per_bar
-            set[bar * 16 + math.floor((within * 16.0 / steps_per_bar) + 0.5)] = true
+            local pos16 = math.floor(((step_idx % steps_per_bar) * 16.0 / steps_per_4qn) + 0.5)
+            if pos16 < 16 then
+              set[bar * 16 + pos16] = true
+            end
           end
         end
       end
@@ -624,8 +625,9 @@ function run_seq_ai_variation(region, style_key, variation)
   -- make it generatable after all, the built-in randomizer covers it.
   if region and seq_has_generatable_track(style) then
     local pre_grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
-    local pre_steps_per_bar = math.max(1, math.floor((4.0 / pre_grid_qn) + 0.5))
-    local pre_bar_count = math.max(1, math.floor((get_seq_region_length_qn(region) / 4.0) + 0.5))
+    -- The model works in 16ths of a 4/4 bar; positions past a shorter bar's
+    -- end are dropped when written back.
+    local _, pre_bar_count, pre_steps_per_bar = seq_region_bar_grid(region, pre_grid_qn)
     local pre_positions = seq_collect_current_role_positions(region)
     for _, role in ipairs(seq_template_roles(style)) do
       if pre_positions[role] == nil then
