@@ -330,8 +330,10 @@ function render_sequencer_map()
       end
       local _, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after = seq_collect_region_random_entries(reg)
       local chips_x0 = link_fits and (rx0 + SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD + 8) or rx0
-      local random_labels = seq_region_random_label_layout(chips_x0, rx1, y0, region_lane_h, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after)
-      local name_right = rx1 - 6
+      local fill_fits = seq_fill_region_icon_fits(rx0, rx1)
+      local chips_x1 = fill_fits and (select(1, seq_fill_region_icon_rect(rx1, y0, region_lane_h)) - 2) or rx1
+      local random_labels = seq_region_random_label_layout(chips_x0, chips_x1, y0, region_lane_h, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after)
+      local name_right = fill_fits and (chips_x1 - 4) or (rx1 - 6)
       if #random_labels > 0 then
         name_right = random_labels[1].x0 - 4
       end
@@ -351,6 +353,9 @@ function render_sequencer_map()
         r.ImGui_DrawList_AddText(dl, label_x, y0 + 5, selected and 0xFFFFFFFF or 0xFFFFFF96, label)
       end
       seq_draw_region_random_labels(dl, random_labels, mx, my)
+      if fill_fits then
+        seq_fill_draw_region_icon(dl, rx1, y0, region_lane_h, mx, my, reg)
+      end
       if region_clipped then
         r.ImGui_DrawList_PopClipRect(dl)
       end
@@ -467,7 +472,14 @@ function render_sequencer_map()
 
   if hovered and not state.seq_region_drag and mx >= timeline_x0 and mx <= timeline_x0 + timeline_w and my >= y0 and my <= y0 + region_lane_h then
     local hover_hit = seq_hit_test_region_at(mx, my, y0, region_lane_h, timeline_x0, timeline_w, view_start_qn, qn_span, qn_to_x)
-    if hover_hit and hover_hit.part == "link" then
+    if hover_hit and hover_hit.part == "fill" then
+      if r.ImGui_SetMouseCursor and r.ImGui_MouseCursor_Hand then
+        r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_Hand())
+      end
+      if r.ImGui_SetTooltip then
+        r.ImGui_SetTooltip(ctx, "Click: design drum fills for this region")
+      end
+    elseif hover_hit and hover_hit.part == "link" then
       if r.ImGui_SetMouseCursor and r.ImGui_MouseCursor_Hand then
         r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_Hand())
       end
@@ -588,7 +600,10 @@ function render_sequencer_map()
       else
         state.seq_random_popup_pending = nil
         if hit then
-          if hit.part == "link" then
+          if hit.part == "fill" then
+          seq_fill_open_for_region(hit.region)
+          region = hit.region
+        elseif hit.part == "link" then
           local label = begin_seq_undo("Unlink sequencer region")
           seq_unpool_region(hit.region)
           end_seq_undo(label)
@@ -755,6 +770,12 @@ function render_sequencer_map()
     r.ImGui_SetItemAllowOverlap(ctx)
   end
   body_y1 = body_y0 + map_body_h
+
+  -- "Fill" chip on the razor area (drawn last frame) opens the fill designer.
+  if left_clicked and seq_fill_razor_chip_hit(mx, my) then
+    seq_fill_open_for_razor()
+    left_clicked = false
+  end
 
   local hover_on_razor, razor_hover_track_id, razor_hover_qn = seq_compute_razor_hover(
     mx, my, visual_rows, body_y0, body_y1, timeline_x0, timeline_w, view_start_qn, qn_span
@@ -1072,6 +1093,7 @@ function render_sequencer_map()
       r.ImGui_DrawList_AddLine(dl, rx1, body_y0, rx1, body_y1, edge, (selected or link_hl) and 2.0 or 1.0)
     end
   end
+  seq_fill_draw_spot_markers(dl, qn_to_x, timeline_x0, timeline_x1, body_y0, body_y1)
 
   if not seq_lod_skip_cell_grid then
     for col = vis_col0, vis_col1 + 1, seq_grid_stride do
@@ -2026,6 +2048,7 @@ function render_sequencer_map()
   end
 
   draw_seq_razors(dl, row_positions, timeline_x0, timeline_x1, view_start_qn, qn_span, step_qn, razor_hover_track_id, razor_hover_qn)
+  seq_fill_draw_razor_chip(dl, row_positions, timeline_x0, timeline_x1, view_start_qn, qn_span, mx, my)
 
   local mouse_released = r.ImGui_IsMouseReleased(ctx, 0) or r.ImGui_IsMouseReleased(ctx, 1)
   if r.ImGui_IsMouseReleased(ctx, 1) and state.seq_razor_drag and state.seq_razor_drag.mode ~= "move" then
@@ -2398,6 +2421,7 @@ function render_sequencer_map()
   end
 
   render_seq_pattern_popup(region)
+  render_seq_fill_window()
   r.ImGui_Dummy(ctx, 0, 0)
   r.ImGui_EndChild(ctx)
   seq_stem_import_accept_file_drop()

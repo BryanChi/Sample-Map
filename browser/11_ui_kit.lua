@@ -616,6 +616,16 @@ function ui_draw_extra_icon(dl, icon, cx, cy, size, color, stroke)
       pts[#pts + 1] = pts[1]
       ui_icon_polyline(dl, pts, color, math.max(1.0, stroke * 0.75))
     end
+  elseif icon == "fill" then
+    -- A run of hits getting taller into the downbeat.
+    local bw = s * 0.07
+    local base = cy + s * 0.24
+    local heights = { 0.14, 0.22, 0.31, 0.42 }
+    for i, hgt in ipairs(heights) do
+      local bx = cx - s * 0.27 + (i - 1) * s * 0.15
+      r.ImGui_DrawList_AddRectFilled(dl, bx - bw * 0.5, base - s * hgt, bx + bw * 0.5, base, color, 1.0)
+    end
+    r.ImGui_DrawList_AddCircleFilled(dl, cx + s * 0.30, cy - s * 0.20, s * 0.065, color, 10)
   elseif icon == "groove" then
     local pts = {}
     for i = 0, 12 do

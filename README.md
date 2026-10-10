@@ -33,6 +33,7 @@ REAPER script that scans audio folders into an interactive 2D sample map, with a
 - **View** menu: switch between Sample Map and Sequencer, toggle the File Explorer, or pop either view into its own window.
 - **Tools** menu: copy scan logs and debug helpers.
 - **Settings** are grouped by area (Library, Sample Map, Tags, Sequencer, General) and searchable.
+- **Fills** (sequencer): open the fill designer from the fill icon on a region, the *Fill* button in the toolbar, or the *Fill* chip on a razor area (Alt + right-drag; REAPER's own razor edits work too). Fills land at phrase ends (every 2/4/8/16 bars) and right before the region ends, or exactly in the razor areas. Pick a fill from the library, switch the span to a pattern preset, roll random fills with the dice, or Ctrl+click several to mix them across the spots.
 
 ## Layout
 

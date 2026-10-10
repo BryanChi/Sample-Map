@@ -617,7 +617,8 @@ function render_seq_top_toolbar()
   end
   local pat_w = calc_compact_chip_width(pat_btn_label) + 16
   local grv_w = calc_compact_chip_width(groove_label) + 16
-  local pocket_w = pocket_pad + pat_w + inner_gap + grv_w + pocket_pad
+  local fill_w = calc_compact_chip_width("Fill") + 16
+  local pocket_w = pocket_pad + pat_w + inner_gap + grv_w + inner_gap + fill_w + pocket_pad
   local group_w = name_w + pocket_w
   do
     local gx, gy = r.ImGui_GetCursorScreenPos(ctx)
@@ -773,6 +774,23 @@ function render_seq_top_toolbar()
     end
     if r.ImGui_IsItemHovered(ctx) then
       r.ImGui_SetTooltip(ctx, "Groove for " .. region_name .. " — this region only")
+    end
+    r.ImGui_SameLine(ctx, 0, inner_gap)
+    local fill_state = seq_fill_state()
+    if draw_ui_button("seq_fill_window_open", "Fill", nil, inner_h, {
+      compact = true,
+      lead_icon = "fill",
+      style = "primary",
+      selected = fill_state.open,
+    }) then
+      seq_fill_toggle_window(focus_region)
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      if seq_fill_any_razor() then
+        r.ImGui_SetTooltip(ctx, "Fill designer: drum fills for the razor areas")
+      else
+        r.ImGui_SetTooltip(ctx, "Fill designer: drum fills at phrase ends of " .. region_name)
+      end
     end
 
     r.ImGui_SetCursorScreenPos(ctx, gx + group_w, gy)
