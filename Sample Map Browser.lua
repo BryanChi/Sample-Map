@@ -70,6 +70,7 @@ SAMPLE_MAP_BROWSER_MODULES = {
   "32_seq_transport_input.lua",
   "33_seq_generate.lua",
   "34_seq_pattern_popup.lua",
+  "34b_seq_fill_designer.lua",
   "35_seq_kit_random.lua",
   "36_seq_razor.lua",
   "37_seq_note_drag.lua",

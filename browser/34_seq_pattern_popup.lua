@@ -37,6 +37,11 @@ end
 
 function open_seq_pattern_popup()
   state.seq_pattern_window_open = not state.seq_pattern_window_open
+  if state.seq_pattern_window_open and state.seq_fill then
+    -- Both windows dock in the same spot beside the main window.
+    state.seq_fill.open = false
+    state.seq_fill_session = nil
+  end
 end
 
 -- Position the preset popup flush against the left or right edge of the main
