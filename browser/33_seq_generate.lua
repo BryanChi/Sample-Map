@@ -1502,6 +1502,19 @@ function seq_kit_history_label(keywords)
   return "Any genre"
 end
 
+-- Per-region samples on this track, so a Recent kit can put them back.
+function seq_kit_collect_region_samples(slot)
+  local out = nil
+  for _, region in ipairs(state.seq_regions or {}) do
+    local rec = seq_region_own_track_sample and seq_region_own_track_sample(region, slot.id)
+    if rec and region.id ~= nil then
+      out = out or {}
+      out[#out + 1] = { region_id = region.id, path = rec.path, name = rec.name }
+    end
+  end
+  return out
+end
+
 function collect_seq_kit_elements()
   local by_role = {}
   for _, slot in ipairs(state.seq_tracks or {}) do
@@ -1513,6 +1526,7 @@ function collect_seq_kit_elements()
         sample_path = slot.sample_path,
         sample_name = slot.sample_name or basename(slot.sample_path),
         sample_tag = slot.sample_tag,
+        region_samples = seq_kit_collect_region_samples(slot),
       }
     end
   end
@@ -1557,6 +1571,19 @@ function snapshot_seq_kit_history(keywords, opts)
   end
   local sig = seq_kit_signature(elements)
   if opts.skip_duplicate ~= false and seq_kit_history_has_signature(sig) then
+    -- Same main samples: store the current per-region samples on that entry
+    -- so going back restores them. Never clear ones it already has.
+    for _, entry in ipairs(state.seq_kit_history or {}) do
+      if seq_kit_signature(entry.elements) == sig then
+        for i, elem in ipairs(elements) do
+          local old = entry.elements[i]
+          if old and elem.region_samples then
+            old.region_samples = elem.region_samples
+          end
+        end
+        break
+      end
+    end
     return nil
   end
 
@@ -1671,17 +1698,23 @@ function apply_seq_kit_history_element(element, opts)
   end
   local sample = find_sample_by_path(element.sample_path)
   if not sample then
-    log("Sample not found in library: " .. tostring(element.sample_name or element.sample_path))
+    local msg = "Sample not found in library: " .. tostring(element.sample_name or element.sample_path)
+    if opts.silent then log(msg) else sm_notify(msg, "warn") end
     return false
   end
   local slot = find_seq_track_for_kit_element(element)
   if not slot then
-    log("No sequencer track for " .. tostring(SEQ_ROLE_LABELS[element.role] or element.role or "sample"))
+    local msg = "No sequencer track for " .. tostring(SEQ_ROLE_LABELS[element.role] or element.role or "sample")
+    if opts.silent then log(msg) else sm_notify(msg, "warn") end
     return false
   end
   local own_undo = opts.undo ~= false
   local label = own_undo and begin_seq_undo("Apply kit sample") or nil
-  local ok = seq_kit_assign_sample(slot, sample)
+  -- A kit change is not a pick into the selected candidate square.
+  local ok = seq_without_candidate_save(seq_kit_assign_sample, slot, sample)
+  if seq_kit_restore_slot_extras(slot, element) then
+    ok = true
+  end
   if ok then
     if element.sample_tag and seq_trim_text(element.sample_tag) ~= "" then
       slot.sample_tag = element.sample_tag
@@ -1750,6 +1783,174 @@ function seq_kit_clear_slot_region_samples(slot)
   return cleared
 end
 
+-- Shift+V picks and locked notes are explicit choices: a kit change leaves
+-- their pinned sample alone.
+function seq_kit_note_pinned(note)
+  if type(note) ~= "table" then
+    return false
+  end
+  if note.picked_sample or (seq_note_is_locked and seq_note_is_locked(note)) then
+    return true
+  end
+  if type(note.stutter_hits) == "table" then
+    for _, hit in pairs(note.stutter_hits) do
+      if type(hit) == "table" and hit.picked_sample then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- Stem-imported notes carry their hit strength. While they play their slice
+-- of the stem the dynamics are in the audio; once the slice is released for
+-- another sample, the strength becomes the note volume (unless edited).
+function seq_note_release_stem_velocity(note)
+  if type(note) ~= "table" or type(note.stem_velocity) ~= "number" then
+    return
+  end
+  local vol = tonumber(note.volume) or 1.0
+  if math.abs(vol - 1.0) < 1e-6 then
+    note.volume = note.stem_velocity
+  end
+  note.stem_velocity = nil
+end
+
+-- Remember a note's slice / frozen file before a kit change releases it, so
+-- applying the Recent kit that used `kit_path` again can bring it back.
+function seq_kit_stash_note(note, kit_path)
+  if type(note) ~= "table" or type(kit_path) ~= "string" or kit_path == "" then
+    return
+  end
+  local has_slice = type(note.source_offset) == "number"
+  local has_frozen = seq_note_has_frozen_sample and seq_note_has_frozen_sample(note)
+  if not has_slice and not has_frozen then
+    return
+  end
+  local stash = {
+    path = kit_path,
+    sample_path = note.sample_path,
+    sample_name = note.sample_name,
+    source_offset = note.source_offset,
+    frozen_sample_path = note.frozen_sample_path,
+    frozen_sample_name = note.frozen_sample_name,
+    volume = note.volume,
+    stem_velocity = note.stem_velocity,
+  }
+  if type(note.stutter_hits) == "table" then
+    for k, hit in pairs(note.stutter_hits) do
+      if type(hit) == "table" and (type(hit.source_offset) == "number" or hit.frozen_sample_path) then
+        stash.hits = stash.hits or {}
+        stash.hits[tostring(k)] = {
+          source_offset = hit.source_offset,
+          frozen_sample_path = hit.frozen_sample_path,
+          frozen_sample_name = hit.frozen_sample_name,
+        }
+      end
+    end
+  end
+  note.kit_stash = stash
+end
+
+function seq_kit_unstash_note(note, kit_path)
+  local stash = type(note) == "table" and note.kit_stash
+  if type(stash) ~= "table" or not seq_kit_paths_same(stash.path, kit_path) then
+    return false
+  end
+  note.kit_stash = nil
+  -- Only when nothing else pinned or sliced the note since.
+  if type(note.source_offset) == "number"
+      or (seq_note_has_frozen_sample and seq_note_has_frozen_sample(note)) then
+    return false
+  end
+  local file = stash.frozen_sample_path or stash.sample_path
+  if file and seq_path_exists and not seq_path_exists(file) then
+    return false
+  end
+  note.source_offset = stash.source_offset
+  note.frozen_sample_path = stash.frozen_sample_path
+  note.frozen_sample_name = stash.frozen_sample_name
+  if type(stash.stem_velocity) == "number" then
+    if math.abs((tonumber(note.volume) or 1.0) - stash.stem_velocity) < 1e-6 then
+      note.volume = stash.volume or 1.0
+    end
+    note.stem_velocity = stash.stem_velocity
+  end
+  if stash.sample_path then
+    note.sample_path = stash.sample_path
+    note.sample_name = stash.sample_name
+  end
+  if type(stash.hits) == "table" and type(note.stutter_hits) == "table" then
+    for k, hit in pairs(note.stutter_hits) do
+      local h = stash.hits[tostring(k)]
+      if type(hit) == "table" and type(h) == "table" then
+        hit.source_offset = h.source_offset
+        hit.frozen_sample_path = h.frozen_sample_path
+        hit.frozen_sample_name = h.frozen_sample_name
+      end
+    end
+  end
+  return true
+end
+
+-- Put back what a Recent kit had on this track besides the main sample:
+-- per-region samples and the slices / frozen files of released notes.
+-- Returns true when anything was restored (and rebuilt).
+function seq_kit_restore_slot_extras(slot, element)
+  if not slot or slot.id == nil or type(element) ~= "table" then
+    return false
+  end
+  local regions_touched = {}
+  local any = false
+  if type(element.region_samples) == "table" and seq_set_region_own_track_sample then
+    for _, rec in ipairs(element.region_samples) do
+      local region = type(rec) == "table" and get_seq_region_by_id(rec.region_id)
+      if region and type(rec.path) == "string" and rec.path ~= ""
+          and (not seq_path_exists or seq_path_exists(rec.path))
+          and not seq_region_own_track_sample(region, slot.id) then
+        seq_set_region_own_track_sample(region, slot, { path = rec.path, name = rec.name })
+        regions_touched[region.id] = region
+        any = true
+      end
+    end
+  end
+  local patterns_touched = {}
+  local track_key = tostring(slot.id)
+  for pattern_id, pattern in pairs(state.seq_patterns or {}) do
+    local track_notes = type(pattern) == "table" and type(pattern.notes) == "table" and pattern.notes[track_key]
+    if type(track_notes) == "table" then
+      for _, note in pairs(track_notes) do
+        if seq_kit_unstash_note(note, element.sample_path) then
+          patterns_touched[tostring(pattern_id)] = true
+          any = true
+        end
+      end
+    end
+  end
+  if not any then
+    return false
+  end
+  for _, region in ipairs(state.seq_regions or {}) do
+    if patterns_touched[tostring(region.pattern_id)] then
+      regions_touched[region.id] = region
+    end
+  end
+  if clear_seq_vary_rank_cache then
+    clear_seq_vary_rank_cache()
+  end
+  if sync_seq_region_track then
+    seq_pcm_take_src_begin()
+    if r.PreventUIRefresh then r.PreventUIRefresh(1) end
+    for _, region in pairs(regions_touched) do
+      sync_seq_region_track(region, slot, { skip_arrange = true, force_rebuild = true })
+    end
+    if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+    seq_pcm_take_src_end()
+    r.UpdateArrange()
+  end
+  return true
+end
+
 function seq_kit_unfreeze_slot_notes(slot)
   if not slot or slot.id == nil then
     return false
@@ -1760,8 +1961,14 @@ function seq_kit_unfreeze_slot_notes(slot)
     local track_notes = type(pattern) == "table" and type(pattern.notes) == "table" and pattern.notes[track_key]
     if type(track_notes) == "table" then
       for _, note in pairs(track_notes) do
+        if seq_kit_note_pinned(note) then
+          note = nil
+        else
+          seq_kit_stash_note(note, slot.sample_path)
+        end
         if type(note) == "table" and type(note.source_offset) == "number" then
           note.source_offset = nil
+          seq_note_release_stem_velocity(note)
           if type(note.stutter_hits) == "table" then
             for _, hit in pairs(note.stutter_hits) do
               if type(hit) == "table" then
@@ -1803,6 +2010,7 @@ function seq_release_sliced_notes_for_sample_change(slot, regions, sample)
       return
     end
     note.source_offset = nil
+    seq_note_release_stem_velocity(note)
     if type(note.stutter_hits) == "table" then
       for _, hit in pairs(note.stutter_hits) do
         if type(hit) == "table" then
@@ -1896,7 +2104,7 @@ function apply_seq_kit_history_entry(entry)
   if changed > 0 then
     log(string.format("Applied kit \"%s\" (%d sound%s)", entry.label or "Kit", changed, changed == 1 and "" or "s"))
   else
-    log("Could not apply kit \"" .. tostring(entry.label or "Kit") .. "\"")
+    sm_notify("Kit \"" .. tostring(entry.label or "Kit") .. "\" changed nothing (already in use or samples missing)", "warn")
   end
   return changed
 end
@@ -1904,7 +2112,7 @@ end
 function randomize_seq_kit(keywords, opts)
   opts = opts or {}
   if not state.seq_tracks or #state.seq_tracks == 0 then
-    log("No sequencer tracks to randomize")
+    sm_notify("No sequencer tracks to randomize", "warn")
     return 0
   end
 
@@ -1936,7 +2144,7 @@ function randomize_seq_kit(keywords, opts)
       end
       if #alt > 0 then
         local pick = alt[math.random(1, #alt)]
-        if pick and seq_kit_assign_sample(slot, pick) then
+        if pick and seq_without_candidate_save(seq_kit_assign_sample, slot, pick) then
           local candidates = SEQ_ROLE_TAG_CANDIDATES[role]
           if candidates and candidates[1] then
             slot.sample_tag = candidates[1]
@@ -1967,9 +2175,9 @@ function randomize_seq_kit(keywords, opts)
     log(msg)
   else
     if stuck > 0 then
-      log("No other matching samples to randomize kit" .. constraint)
+      sm_notify("No other matching samples to randomize kit" .. constraint, "warn")
     else
-      log("No matching samples found to randomize kit" .. constraint)
+      sm_notify("No matching samples found to randomize kit" .. constraint, "warn")
     end
   end
   return changed

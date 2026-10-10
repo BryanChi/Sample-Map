@@ -51,7 +51,7 @@ function seq_midi_draw_keyboard(dl, x, y, w, h, slot, octave)
         shift = lshift or rshift
       end
       seq_midi_set_note(slot, note, shift)
-      seq_midi_trigger_slot(slot, 110)
+      seq_midi_trigger_slot(slot, 110, note)
       changed = true
     end
     if pressed and state.seq_midi_key_drag and state.seq_midi_key_drag.origin then
@@ -160,11 +160,13 @@ function render_seq_midi_assign_popup()
     compact = true,
   }) then
     if learning then
-      state.seq_midi_learn_slot_id = nil
+      seq_midi_end_learn()
     else
-      state.seq_midi_learn_slot_id = slot.id
-      state.seq_midi_learn_range = false
+      seq_midi_begin_learn(slot, is_shift_down and is_shift_down() or false, "popup")
     end
+  end
+  if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
+    r.ImGui_SetTooltip(ctx, "Click, then play a note to assign it\nShift-click: extend the range to the next note")
   end
   r.ImGui_SameLine(ctx)
   if draw_ui_button("seq_midi_reset", "GM", 36, 22, { compact = true }) then
@@ -174,6 +176,11 @@ function render_seq_midi_assign_popup()
   end
   if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
     r.ImGui_SetTooltip(ctx, "Reset to General MIDI default for this drum")
+  end
+
+  if not seq_midi_parent_is_armed() then
+    r.ImGui_TextColored(ctx, UI_THEME.text_mute,
+      "MIDI input is off. Learn arms it while listening;\nturn on the MIDI button to play live.")
   end
 
   r.ImGui_Dummy(ctx, 1, 4)
