@@ -258,7 +258,7 @@ function render_sample_map_toolbar()
   end
   if r.ImGui_IsItemHovered(ctx) then
     if state.map_ui_edit then
-      r.ImGui_SetTooltip(ctx, "Layout edit mode is on.\nDrag a module to move it, drag its edges to resize.\nDouble-click a module to reset the layout.")
+      r.ImGui_SetTooltip(ctx, "Layout edit mode is on.\nDrag a module to move it, drag its edges to resize.\nDouble-click a module to reset the layout (asks first).")
     else
       r.ImGui_SetTooltip(ctx, "Edit Sample Map layout.\nMove modules and resize their edges.")
     end
@@ -307,10 +307,13 @@ function map_ui_consider_drag(id)
     return
   end
   if r.ImGui_IsItemHovered(ctx) and r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0) then
-    state.map_ui_layout = default_map_ui_layout()
     state.map_ui_drag = nil
     state.map_ui_drop = nil
-    save_config()
+    -- No undo for layouts, so a stray double-click must not wipe one.
+    if r.ShowMessageBox("Reset the map layout to the default arrangement?", "Reset layout", 4) == 6 then
+      state.map_ui_layout = default_map_ui_layout()
+      save_config()
+    end
     return
   end
   if state.map_ui_drag then
@@ -911,7 +914,7 @@ function map_ui_edit_overlay(id, w, h)
     r.ImGui_InvisibleButton(ctx, "##map_ui_move_" .. id, math.max(1, ww - t * 2), math.max(1, wh - t * 2))
     map_ui_consider_drag(id)
     if r.ImGui_IsItemHovered(ctx) and not state.map_ui_split_drag and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, "Drag to move. Drag edges to resize.\nDouble-click to reset layout.")
+      r.ImGui_SetTooltip(ctx, "Drag to move. Drag edges to resize.\nDouble-click to reset layout (asks first).")
     end
     r.ImGui_Dummy(ctx, 0, 0)
   end
