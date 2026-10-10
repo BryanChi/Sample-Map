@@ -78,10 +78,20 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
     state.seq_rect_drag = nil
   end
 
-  local bg = hovered and UI_THEME.surface_hvr or UI_THEME.surface
-  local edge = (hovered or active) and UI_THEME.accent or UI_THEME.border
+  seq_draw_fader(dl, x, y, w, h, value, min_v, max_v, opts, hovered, active)
+  return changed, value, active or hovered
+end
+
+-- Fader look shared by the track volume / pan bars and the MIDI range bars:
+-- a dark well, a translucent fill with a bright cap at the value, and the
+-- value text (right-aligned next to an optional leading icon).
+function seq_draw_fader(dl, x, y, w, h, value, min_v, max_v, opts, hovered, active)
   local fill = opts.fill_color or UI_THEME.accent
-  ui_draw_panel(dl, x, y, x + w, y + h, 5.0, bg, edge, hovered, active)
+  local fr, fg, fb = extract_rgb_rrgbbaa(fill)
+  local rounding = math.min(5.0, h * 0.32)
+  local well = active and 0x070A08FF or (hovered and 0x111712FF or 0x0B0F0CFF)
+  local edge = active and fill or (hovered and UI_THEME.border_hvr or UI_THEME.border)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, well, rounding)
 
   local t
   if opts.to_pos then
@@ -90,25 +100,36 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
     t = (value - min_v) / (max_v - min_v)
   end
   if t < 0.0 then t = 0.0 elseif t > 1.0 then t = 1.0 end
+  local ix0, ix1 = x + 1.5, x + w - 1.5
+  local iy0, iy1 = y + 1.5, y + h - 1.5
+  local iw = ix1 - ix0
+  local fill_a = (hovered or active) and 92 or 64
+  local body = build_color_rrgbbaa(fr, fg, fb, fill_a)
+  local sheen = build_color_rrgbbaa(fr, fg, fb, math.floor(fill_a * 0.55))
+  local cap = build_color_rrgbbaa(fr, fg, fb, (hovered or active) and 255 or 215)
+  local vx = ix0 + t * iw
+  local f0, f1
   if opts.bipolar then
-    local mid = x + w * 0.5
-    r.ImGui_DrawList_AddLine(dl, mid, y + 2, mid, y + h - 2, 0xFFFFFF55, 1.0)
-    local mx = x + t * w
-    r.ImGui_DrawList_AddRectFilled(dl, mx - 2.0, y + 2, mx + 2.0, y + h - 2, fill, 1.5)
-    if t >= 0.5 then
-      r.ImGui_DrawList_AddRectFilled(dl, mid, y + 3, mx, y + h - 3, build_color_rrgbbaa(106, 160, 224, 90), 1.0)
-    else
-      r.ImGui_DrawList_AddRectFilled(dl, mx, y + 3, mid, y + h - 3, build_color_rrgbbaa(106, 160, 224, 90), 1.0)
-    end
+    local mid = ix0 + iw * 0.5
+    f0, f1 = math.min(mid, vx), math.max(mid, vx)
+    r.ImGui_DrawList_AddLine(dl, mid, iy0 + 1.0, mid, iy1 - 1.0, 0xFFFFFF30, 1.0)
   else
-    local fill_w = math.max(2.0, t * (w - 4))
-    r.ImGui_DrawList_AddRectFilled(dl, x + 2, y + 2, x + 2 + fill_w, y + h - 2, fill, 2.0)
-    if opts.unity and opts.unity >= min_v and opts.unity <= max_v then
-      local ut = opts.to_pos and opts.to_pos(opts.unity) or ((opts.unity - min_v) / (max_v - min_v))
-      local ux = x + math.max(0.0, math.min(1.0, ut)) * w
-      r.ImGui_DrawList_AddLine(dl, ux, y + 1, ux, y + h - 1, 0xFFFFFF66, 1.0)
-    end
+    f0, f1 = ix0, vx
   end
+  if f1 - f0 > 0.5 then
+    r.ImGui_DrawList_AddRectFilled(dl, f0, iy0, f1, iy1, body, math.max(0.0, rounding - 1.5))
+    r.ImGui_DrawList_AddRectFilled(dl, f0, iy0, f1, iy0 + (iy1 - iy0) * 0.45, sheen, math.max(0.0, rounding - 1.5))
+  end
+  if not opts.bipolar and opts.unity and opts.unity >= min_v and opts.unity <= max_v then
+    local ut = opts.to_pos and opts.to_pos(opts.unity) or ((opts.unity - min_v) / (max_v - min_v))
+    local ux = ix0 + math.max(0.0, math.min(1.0, ut)) * iw
+    r.ImGui_DrawList_AddLine(dl, ux, y + 1.0, ux, y + 3.5, 0xFFFFFF70, 1.0)
+    r.ImGui_DrawList_AddLine(dl, ux, y + h - 3.5, ux, y + h - 1.0, 0xFFFFFF70, 1.0)
+  end
+  local cap_w = (hovered or active) and 2.5 or 2.0
+  local cx0 = math.max(ix0, math.min(ix1 - cap_w, vx - cap_w * 0.5))
+  r.ImGui_DrawList_AddRectFilled(dl, cx0, iy0, cx0 + cap_w, iy1, cap, 1.0)
+  r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, edge, rounding, 0, 1.0)
 
   local display = nil
   if opts.format_value then
@@ -116,15 +137,29 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
   elseif opts.value_text and opts.value_text ~= "" then
     display = opts.value_text
   end
-  if display and display ~= "" then
-    local tw, th = r.ImGui_CalcTextSize(ctx, display)
-    local tx = x + (w - tw) * 0.5
-    local ty = y + (h - th) * 0.5
-    r.ImGui_DrawList_AddText(dl, tx + 1, ty + 1, 0x000000AA, display)
-    r.ImGui_DrawList_AddText(dl, tx, ty, 0xF0F4FAFF, display)
+  local icon_w = 0.0
+  if opts.icon and w >= 54.0 and h >= 12.0 then
+    icon_w = math.min(h, 16.0)
+    local icon_col = (hovered or active) and UI_THEME.text or UI_THEME.text_dim
+    ui_button_draw_icon(dl, opts.icon, x + 2.0 + icon_w * 0.5, y + h * 0.5, icon_w, icon_col)
   end
-
-  return changed, value, active or hovered
+  if display and display ~= "" then
+    if opts.unit and w >= (opts.unit_min_w or 74.0) then
+      display = display .. opts.unit
+    end
+    local tw, th = r.ImGui_CalcTextSize(ctx, display)
+    local tx
+    if icon_w > 0 then
+      tx = x + w - tw - 5.0
+      tx = math.max(x + icon_w + 3.0, tx)
+    else
+      tx = x + (w - tw) * 0.5
+    end
+    local ty = y + (h - th) * 0.5
+    local txt = (hovered or active) and 0xFFFFFFFF or 0xDCE4DEFF
+    r.ImGui_DrawList_AddText(dl, tx + 1, ty + 1, 0x00000099, display)
+    r.ImGui_DrawList_AddText(dl, tx, ty, txt, display)
+  end
 end
 
 function seq_layout_hit(box, mx, my)
@@ -149,8 +184,13 @@ function seq_track_nav_width(lane_h)
   return get_seq_track_sample_controls_width(seq_ctrl_size_for_icon(icon_size), icon_size)
 end
 
+-- Space between control groups ([M S] | vol pan | MIDI layering overlap).
+-- Buttons inside a group touch, so the groups read as segmented pills.
+SEQ_TCP_GROUP_GAP = 6.0
+
 function seq_mix_strip_width(btn, gap, vol_w, pan_w, midi_w)
-  return (btn or 14) * 4 + (vol_w or 52) + (pan_w or 40) + (midi_w or 28) + (gap or 3) * 6
+  return (btn or 14) * 4 + (vol_w or 52) + (pan_w or 40) + (midi_w or 28)
+    + (gap or 3) + SEQ_TCP_GROUP_GAP * 2
 end
 
 function seq_box(x, y, w, h)
@@ -184,20 +224,22 @@ function seq_fit_mix_strip(avail_w, btn, gap, vol_w, pan_w, midi_w)
   return btn, vol_w, pan_w, midi_w, width()
 end
 
+-- One row: [M S]  [vol] [pan]  [MIDI layering overlap]
 function seq_place_mix_strip(layout, x, y, btn, gap, vol_w, pan_w, midi_w, row_h)
-  layout.gear = seq_box(x, y, btn, btn)
-  x = x + btn + gap
+  local by = y + (row_h - btn) * 0.5
+  layout.mute = seq_box(x, by, btn, btn)
+  x = x + btn
+  layout.solo = seq_box(x, by, btn, btn)
+  x = x + btn + SEQ_TCP_GROUP_GAP
   layout.vol = seq_box(x, y, vol_w, row_h)
   x = x + vol_w + gap
   layout.pan = seq_box(x, y, pan_w, row_h)
-  x = x + pan_w + gap
-  layout.midi = seq_box(x, y, midi_w, row_h)
-  x = x + midi_w + gap
-  layout.mute = seq_box(x, y, btn, btn)
-  x = x + btn + gap
-  layout.solo = seq_box(x, y, btn, btn)
-  x = x + btn + gap
-  layout.overlap = seq_box(x, y, btn, btn)
+  x = x + pan_w + SEQ_TCP_GROUP_GAP
+  layout.midi = seq_box(x, by, midi_w, btn)
+  x = x + midi_w
+  layout.gear = seq_box(x, by, btn, btn)
+  x = x + btn
+  layout.overlap = seq_box(x, by, btn, btn)
   return layout.overlap.x1
 end
 
@@ -740,7 +782,7 @@ function seq_get_track_control_layout(x0, y0, x1, y1, slot, opts)
   local lane_h = y1 - y0
   local pad = (lane_h >= 64.0) and 4.0 or 3.0
   local gap = 3.0
-  local expand_w = opts.hide_expand and 0.0 or 26.0
+  local expand_w = opts.hide_expand and 0.0 or 18.0
   local inner_x0 = x0 + pad
   local inner_x1 = x1 - pad
   local inner_w = math.max(0.0, inner_x1 - inner_x0)
@@ -797,7 +839,7 @@ function seq_get_track_control_layout(x0, y0, x1, y1, slot, opts)
       layout.env = seq_box(name_x + name_w + gap, mid_y, env_w, row_h)
     end
     seq_place_mix_strip(layout, mix_x, mid_y, btn, gap, vol_w, pan_w, midi_w, row_h)
-    local hit_x0 = (env_w > 0) and layout.env.x or layout.gear.x
+    local hit_x0 = (env_w > 0) and layout.env.x or layout.mute.x
     layout.mix_hit = seq_box(hit_x0, mid_y, inner_x1 - hit_x0, row_h)
 
   elseif mode == "split" then
@@ -873,11 +915,11 @@ function seq_get_track_control_layout(x0, y0, x1, y1, slot, opts)
     y = y + name_h + 3.0
     local midi_w = math.max(32.0, math.min(52.0, btn * 2.4))
     local cx = inner_x0
-    layout.gear = seq_box(cx, y, btn, btn); cx = cx + btn + gap
-    layout.mute = seq_box(cx, y, btn, btn); cx = cx + btn + gap
-    layout.solo = seq_box(cx, y, btn, btn); cx = cx + btn + gap
-    layout.overlap = seq_box(cx, y, btn, btn); cx = cx + btn + gap
-    layout.midi = seq_box(cx, y, midi_w, btn)
+    layout.mute = seq_box(cx, y, btn, btn); cx = cx + btn
+    layout.solo = seq_box(cx, y, btn, btn); cx = cx + btn + SEQ_TCP_GROUP_GAP
+    layout.midi = seq_box(cx, y, midi_w, btn); cx = cx + midi_w
+    layout.gear = seq_box(cx, y, btn, btn); cx = cx + btn
+    layout.overlap = seq_box(cx, y, btn, btn)
     y = y + btn + 3.0
     layout.vol = seq_box(inner_x0, y, inner_w, bar_h)
     y = y + bar_h + 3.0
@@ -885,7 +927,7 @@ function seq_get_track_control_layout(x0, y0, x1, y1, slot, opts)
     y = y + bar_h + 3.0
     env_h = math.max(12.0, (y1 - pad) - y)
     layout.env = seq_box(inner_x0, y, inner_w, env_h)
-    layout.mix_hit = seq_box(inner_x0, layout.gear.y, inner_w, (y1 - pad) - layout.gear.y)
+    layout.mix_hit = seq_box(inner_x0, layout.mute.y, inner_w, (y1 - pad) - layout.mute.y)
   end
 
   return layout
@@ -895,29 +937,33 @@ function seq_draw_track_name_and_expand(dl, slot, layout, expanded, name_alpha, 
   if not layout or not slot then
     return
   end
+  local mx, my = r.ImGui_GetMousePos(ctx)
   local exp = layout.expand
   if exp and exp.w > 0 then
-    local exp_label = expanded and "[-]" or "[+]"
-    local tw, th = r.ImGui_CalcTextSize(ctx, exp_label)
-    r.ImGui_DrawList_AddText(
-      dl,
-      exp.x + (exp.w - (tw or 16)) * 0.5,
-      exp.y + (exp.h - (th or 12)) * 0.5,
-      expand_color or 0xFFDFAAFF,
-      exp_label
-    )
+    -- Chevron in a small hover pad: right = collapsed, down = parameter lanes shown.
+    local size = math.min(exp.w, exp.h, 16.0)
+    local cx, cy = exp.x + exp.w * 0.5, exp.y + exp.h * 0.5
+    local hot = seq_layout_hit(exp, mx, my) and not sample_drag_active()
+    if hot or expanded then
+      r.ImGui_DrawList_AddRectFilled(dl, cx - size * 0.5, cy - size * 0.5, cx + size * 0.5, cy + size * 0.5,
+        hot and UI_THEME.surface_hvr or 0xFFFFFF0C, 4.0)
+    end
+    local col = expand_color or UI_THEME.accent
+    if not hot and not expanded then
+      col = UI_THEME.text_dim
+    end
+    ui_button_draw_icon(dl, expanded and "chev_down" or "chev_right", cx, cy, size * 1.1, col)
   end
   local name_box = layout.name
   if name_box and name_box.w > 4 then
-    local name_txt = seq_truncate_text_to_width(slot.name or fallback_name or "Track", name_box.w)
+    local name_txt = seq_truncate_text_to_width(slot.name or fallback_name or "Track", name_box.w - 2.0)
     local _, nh = r.ImGui_CalcTextSize(ctx, name_txt)
-    r.ImGui_DrawList_AddText(
-      dl,
-      name_box.x,
-      name_box.y + (name_box.h - (nh or 12)) * 0.5,
-      build_color_rrgbbaa(255, 255, 255, name_alpha or 255),
-      name_txt
-    )
+    local a = name_alpha or 255
+    local col = slot.mute and build_color_rrgbbaa(150, 160, 153, math.floor(a * 0.75))
+      or build_color_rrgbbaa(240, 245, 241, a)
+    local tx, ty = name_box.x + 2.0, name_box.y + (name_box.h - (nh or 12)) * 0.5
+    r.ImGui_DrawList_AddText(dl, tx + 1, ty + 1, 0x00000080, name_txt)
+    r.ImGui_DrawList_AddText(dl, tx, ty, col, name_txt)
   end
 end
 
@@ -944,6 +990,166 @@ function seq_lane_mix_controls_hit(row_pos, mx, my, x0, timeline_x0, map_nav_w)
     or seq_layout_hit(layout and layout.candidates, mx, my)
 end
 
+-- ===== Track control buttons ===========================================
+-- Buttons in one group touch and share a frame (segmented pill); state shows
+-- through the fill color so a row of tracks scans quickly.
+
+local function tcp_round_flag(name)
+  local fn = r["ImGui_DrawFlags_" .. name]
+  return fn and fn() or 0
+end
+
+local function tcp_seg_flags(seg)
+  if seg == "first" then
+    return tcp_round_flag("RoundCornersLeft")
+  elseif seg == "last" then
+    return tcp_round_flag("RoundCornersRight")
+  elseif seg == "mid" then
+    return tcp_round_flag("RoundCornersNone")
+  end
+  return 0
+end
+
+function seq_tcp_rounding(h)
+  return math.max(2.0, math.min(5.0, (h or 14) * 0.3))
+end
+
+-- Draws the shared frame around a group of touching buttons plus hairline
+-- dividers between them. boxes are left to right.
+function seq_tcp_group_frame(dl, boxes, hovered)
+  local first, last = boxes[1], boxes[#boxes]
+  if not first or not last or first.w <= 0 then
+    return
+  end
+  local x0, y0 = first.x, first.y
+  local x1, y1 = last.x1, math.max(first.y1, last.y1)
+  local edge = hovered and UI_THEME.border_hvr or UI_THEME.border
+  for i = 2, #boxes do
+    local b = boxes[i]
+    if b and b.w > 0 then
+      r.ImGui_DrawList_AddLine(dl, b.x, y0 + 2.0, b.x, y1 - 2.0, 0x00000070, 1.0)
+    end
+  end
+  r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, edge,
+    seq_tcp_rounding(y1 - y0), 0, 1.0)
+end
+
+-- One segment of a group. opts: active, on_fill, on_text, label, icon, glyph
+-- (function(dl, cx, cy, size, col)), badge (small dot, top right).
+-- Returns clicked, hovered, pressed.
+function seq_tcp_seg_button(id, dl, box, seg, opts)
+  opts = opts or {}
+  local x, y, w, h = box.x, box.y, box.w, box.h
+  r.ImGui_SetCursorScreenPos(ctx, x, y)
+  local clicked = r.ImGui_InvisibleButton(ctx, id, w, h)
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local pressed = r.ImGui_IsItemActive(ctx)
+  local active = opts.active
+  local bg
+  if active then
+    bg = opts.on_fill or UI_THEME.accent_fill
+    if hovered and not pressed then
+      bg = blend_colors(bg, 0xFFFFFFFF, 0.12)
+    end
+  elseif pressed then
+    bg = UI_THEME.surface_act
+  elseif hovered then
+    bg = UI_THEME.surface_hvr
+  else
+    bg = UI_THEME.surface
+  end
+  local rounding = seq_tcp_rounding(h)
+  local flags = tcp_seg_flags(seg)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, bg, rounding, flags)
+  if not active and not pressed then
+    r.ImGui_DrawList_AddLine(dl, x + ((seg == "first" or seg == nil) and rounding or 0.0), y + 1.0,
+      x + w - ((seg == "last" or seg == nil) and rounding or 0.0), y + 1.0, 0xFFFFFF12, 1.0)
+  end
+
+  local col
+  if active then
+    col = opts.on_text or 0xFFFFFFFF
+  else
+    col = hovered and UI_THEME.text or UI_THEME.text_dim
+  end
+  local cx, cy = x + w * 0.5, y + h * 0.5 + (pressed and 0.5 or 0.0)
+  local size = math.min(w, h)
+  if opts.glyph then
+    opts.glyph(dl, cx, cy, size, col)
+  elseif opts.icon then
+    ui_button_draw_icon(dl, opts.icon, cx, cy, size * (opts.icon_scale or 1.0), col)
+  elseif opts.label then
+    local tw, th = r.ImGui_CalcTextSize(ctx, opts.label)
+    r.ImGui_DrawList_AddText(dl, cx - tw * 0.5, cy - th * 0.5, col, opts.label)
+  end
+  if opts.badge then
+    local br = math.max(1.6, size * 0.11)
+    r.ImGui_DrawList_AddCircleFilled(dl, x + w - br - 1.5, y + br + 1.5, br, opts.badge, 10)
+  end
+  return clicked, hovered, pressed
+end
+
+-- Drum layering: triangle with a dot on each corner (three blended samples).
+function seq_tcp_glyph_layering(dl, cx, cy, size, col)
+  local rad = size * 0.30
+  local ax, ay = cx, cy - rad
+  local bx, by = cx - rad * 0.95, cy + rad * 0.62
+  local qx, qy = cx + rad * 0.95, cy + rad * 0.62
+  local stroke = math.max(1.0, size * 0.07)
+  r.ImGui_DrawList_AddTriangle(dl, ax, ay, bx, by, qx, qy, col, stroke)
+  local dot = math.max(1.3, size * 0.085)
+  r.ImGui_DrawList_AddCircleFilled(dl, ax, ay, dot, col, 8)
+  r.ImGui_DrawList_AddCircleFilled(dl, bx, by, dot, col, 8)
+  r.ImGui_DrawList_AddCircleFilled(dl, qx, qy, dot, col, 8)
+end
+
+-- Overlap: two hits whose tails overlap (on) or sit side by side, the first
+-- cropped where the next starts (off).
+function seq_tcp_glyph_overlap(dl, cx, cy, size, col, on)
+  local stroke = math.max(1.0, size * 0.07)
+  local hh = size * 0.17
+  if on then
+    local hw = size * 0.17
+    local off = size * 0.10
+    r.ImGui_DrawList_AddRect(dl, cx - off - hw, cy - off - hh, cx - off + hw, cy - off + hh, col, 2.0, 0, stroke)
+    r.ImGui_DrawList_AddRectFilled(dl, cx + off - hw, cy + off - hh, cx + off + hw, cy + off + hh, col, 2.0)
+  else
+    local hw = size * 0.13
+    local gap = size * 0.05
+    r.ImGui_DrawList_AddRect(dl, cx - gap - hw * 2, cy - hh, cx - gap, cy + hh, col, 2.0, 0, stroke)
+    r.ImGui_DrawList_AddRectFilled(dl, cx + gap, cy - hh, cx + gap + hw * 2, cy + hh, col, 2.0)
+  end
+end
+
+-- MIDI note chip: 5-pin icon when there is room, then the note name.
+function seq_tcp_midi_button(id, dl, box, seg, slot, open)
+  local learning = state.seq_midi_learn_slot_id == (slot and slot.id)
+  local label = learning and "…" or seq_midi_slot_label(slot)
+  local clicked, hovered, pressed = seq_tcp_seg_button(id, dl, box, seg, {
+    active = open or learning,
+    on_fill = UI_THEME.accent_fill_h,
+    on_text = 0xDFFFE8FF,
+    glyph = function(gdl, cx, cy, size, col)
+      local tw, th = r.ImGui_CalcTextSize(ctx, label)
+      local icon_w = (box.w >= tw + box.h + 4.0) and box.h * 0.9 or 0.0
+      local total = tw + (icon_w > 0 and (icon_w + 1.0) or 0.0)
+      local lx = cx - total * 0.5
+      if icon_w > 0 then
+        ui_button_draw_icon(gdl, "midi", lx + icon_w * 0.5, cy, icon_w, col)
+        lx = lx + icon_w + 1.0
+      end
+      r.ImGui_DrawList_AddText(gdl, lx, cy - th * 0.5, col, label)
+    end,
+  })
+  if learning then
+    local pulse = 0.5 + 0.5 * math.sin(r.time_precise() * 8.0)
+    r.ImGui_DrawList_AddRect(dl, box.x - 0.5, box.y - 0.5, box.x1 + 0.5, box.y1 + 0.5,
+      build_color_rrgbbaa(30, 255, 94, math.floor(80 + pulse * 150)), seq_tcp_rounding(box.h),
+      tcp_seg_flags(seg), 1.5)
+  end
+  return clicked, hovered, pressed
+end
+
 -- Compact mixer + envelope preview in the sequencer track label column.
 -- Layout is computed by seq_get_track_control_layout so widgets reflow with lane height.
 -- Returns changed_mix, overlap_changed, hovered
@@ -961,12 +1167,6 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   local hovered = false
   local overlap_changed = false
 
-  local function mark_hover()
-    if r.ImGui_IsItemHovered(ctx) then
-      hovered = true
-    end
-  end
-
   -- Open the undo session before mutating slot fields so the "before"
   -- snapshot holds the old value (callers' begin_seq_undo is then a no-op).
   local function begin_mix_undo()
@@ -976,23 +1176,45 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     seq_undo_commit_on_release = true
   end
 
-  local gear = layout.gear
-  if gear and gear.w > 0 then
-    local layering_open = state.seq_layering_slot_id == slot.id
-    if seq_layering_button("##seq_layering_" .. slot.id, dl, gear.x, gear.y, gear.w, layering_open) then
-      if layering_open then
-        state.seq_layering_slot_id = nil
-      else
-        state.seq_layering_slot_id = slot.id
-        seq_layering_seed_from_track(slot)
-      end
+  -- [M S] group
+  local mute, solo = layout.mute, layout.solo
+  local ms_hot = false
+  if mute and mute.w > 0 then
+    local clicked, hot = seq_tcp_seg_button("##seq_mute_" .. slot.id, dl, mute, "first", {
+      label = "M", active = slot.mute, on_fill = 0xB8383CFF,
+    })
+    if clicked then
+      begin_mix_undo()
+      slot.mute = not slot.mute
+      changed_mix = true
     end
-    if r.ImGui_IsItemHovered(ctx) then
+    if hot then
       hovered = true
+      ms_hot = true
       if r.ImGui_SetTooltip then
-        r.ImGui_SetTooltip(ctx, "Drum layering")
+        r.ImGui_SetTooltip(ctx, slot.mute and "Click: unmute track" or "Click: mute track")
       end
     end
+  end
+  if solo and solo.w > 0 then
+    local clicked, hot = seq_tcp_seg_button("##seq_solo_" .. slot.id, dl, solo, "last", {
+      label = "S", active = slot.solo, on_fill = 0xE0A028FF, on_text = 0x1C1404FF,
+    })
+    if clicked then
+      begin_mix_undo()
+      slot.solo = not slot.solo
+      changed_mix = true
+    end
+    if hot then
+      hovered = true
+      ms_hot = true
+      if r.ImGui_SetTooltip then
+        r.ImGui_SetTooltip(ctx, slot.solo and "Click: unsolo track" or "Click: solo track")
+      end
+    end
+  end
+  if mute and mute.w > 0 and solo and solo.w > 0 then
+    seq_tcp_group_frame(dl, { mute, solo }, ms_hot)
   end
 
   local vol = layout.vol
@@ -1008,9 +1230,16 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
         to_pos = seq_vol_amp_to_pos,
         from_pos = seq_vol_pos_to_amp,
         format_value = seq_format_track_volume,
+        icon = "gain",
+        unit = " dB",
       }
     )
-    if vol_hot then hovered = true end
+    if vol_hot then
+      hovered = true
+      if r.ImGui_IsItemHovered(ctx) and not r.ImGui_IsItemActive(ctx) and r.ImGui_SetTooltip then
+        r.ImGui_SetTooltip(ctx, "Drag: volume · Shift+drag: fine · Double-click: 0 dB")
+      end
+    end
     if vol_changed then
       begin_mix_undo()
       slot.volume = vol_val
@@ -1029,9 +1258,15 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
         horizontal = true,
         reset = 0.0,
         format_value = seq_format_track_pan,
+        icon = "pan",
       }
     )
-    if pan_hot then hovered = true end
+    if pan_hot then
+      hovered = true
+      if r.ImGui_IsItemHovered(ctx) and not r.ImGui_IsItemActive(ctx) and r.ImGui_SetTooltip then
+        r.ImGui_SetTooltip(ctx, "Drag: pan · Shift+drag: fine · Double-click: center")
+      end
+    end
     if pan_changed then
       begin_mix_undo()
       slot.pan = pan_val
@@ -1039,11 +1274,13 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     end
   end
 
+  -- [MIDI layering overlap] group
+  local tools_hot = false
   local midi = layout.midi
   if midi and midi.w > 0 then
     local midi_learning = state.seq_midi_learn_slot_id == slot.id
     local midi_open = state.seq_midi_popup_slot_id == slot.id
-    if seq_midi_note_button("##seq_midi_" .. slot.id, dl, midi.x, midi.y, midi.w, midi.h, slot, midi_learning or midi_open) then
+    if seq_tcp_midi_button("##seq_midi_" .. slot.id, dl, midi, "first", slot, midi_open) then
       seq_midi_ensure_jsfx()
       if is_alt_down and is_alt_down() then
         local def = seq_midi_default_note_for_slot(slot)
@@ -1056,7 +1293,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
       end
     end
     if r.ImGui_IsItemClicked(ctx, 1) then
-      if state.seq_midi_learn_slot_id == slot.id then
+      if midi_learning then
         seq_midi_end_learn()
       else
         seq_midi_begin_learn(slot, false, "rclick")
@@ -1064,6 +1301,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     end
     if r.ImGui_IsItemHovered(ctx) then
       hovered = true
+      tools_hot = true
       if r.ImGui_SetTooltip then
         seq_normalize_slot_midi(slot)
         local lo, hi = slot.midi_lo, slot.midi_hi
@@ -1072,44 +1310,75 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
             or (seq_midi_note_name(lo) .. "–" .. seq_midi_note_name(hi)
                 .. "  (" .. tostring(lo) .. "–" .. tostring(hi) .. ")")
         r.ImGui_SetTooltip(ctx, "MIDI " .. range
-          .. "\nClick to assign notes  ·  Right-click: learn (Esc or click to stop)  ·  Alt-click: GM default")
+          .. "\nClick: assign notes · Right-click: learn (Esc or click to stop) · Alt+click: GM default")
       end
     end
   end
 
-  local mute = layout.mute
-  if mute and mute.w > 0 then
-    if seq_ms_button("##seq_mute_" .. slot.id, dl, mute.x, mute.y, mute.w, "M", slot.mute, 0xE05050FF) then
-      begin_mix_undo()
-      slot.mute = not slot.mute
-      changed_mix = true
+  local gear = layout.gear
+  if gear and gear.w > 0 then
+    local layering_open = state.seq_layering_slot_id == slot.id
+    local layered = seq_layering_is_active and seq_layering_is_active(slot)
+    local clicked, hot = seq_tcp_seg_button("##seq_layering_" .. slot.id, dl, gear,
+      (midi and midi.w > 0) and "mid" or "first", {
+        active = layering_open,
+        on_fill = UI_THEME.accent_fill_h,
+        on_text = 0xC8FF9AFF,
+        glyph = seq_tcp_glyph_layering,
+        badge = layered and not layering_open and UI_THEME.accent or nil,
+      })
+    if clicked then
+      if layering_open then
+        state.seq_layering_slot_id = nil
+      else
+        state.seq_layering_slot_id = slot.id
+        seq_layering_seed_from_track(slot)
+      end
     end
-    mark_hover()
-  end
-  local solo = layout.solo
-  if solo and solo.w > 0 then
-    if seq_ms_button("##seq_solo_" .. slot.id, dl, solo.x, solo.y, solo.w, "S", slot.solo, 0xE8A020FF) then
-      begin_mix_undo()
-      slot.solo = not slot.solo
-      changed_mix = true
+    if hot then
+      hovered = true
+      tools_hot = true
+      if r.ImGui_SetTooltip then
+        r.ImGui_SetTooltip(ctx, layered
+          and "Drum layering (on)\nClick: open the layering window"
+          or "Drum layering\nClick: open the layering window")
+      end
     end
-    mark_hover()
   end
+
   local overlap = layout.overlap
   if overlap and overlap.w > 0 then
-    if seq_ms_button("##seq_overlap_" .. slot.id, dl, overlap.x, overlap.y, overlap.w, "O", slot.overlap, 0x40C8C8FF) then
+    local clicked, hot = seq_tcp_seg_button("##seq_overlap_" .. slot.id, dl, overlap, "last", {
+      active = slot.overlap,
+      on_fill = 0x175052FF,
+      on_text = 0x8FF2F2FF,
+      glyph = function(gdl, cx, cy, size, col)
+        seq_tcp_glyph_overlap(gdl, cx, cy, size, col, slot.overlap)
+      end,
+    })
+    if clicked then
       begin_mix_undo()
       slot.overlap = not slot.overlap
       changed_mix = true
       overlap_changed = true
     end
-    if r.ImGui_IsItemHovered(ctx) then
+    if hot then
       hovered = true
+      tools_hot = true
       if r.ImGui_SetTooltip then
         r.ImGui_SetTooltip(ctx, slot.overlap
-          and "Overlap on — hits can overlap the next note"
-          or "Overlap off — crop to the next hit")
+          and "Overlap on: hits ring out over the next note\nClick: crop at the next hit"
+          or "Overlap off: hits crop at the next note\nClick: let hits overlap")
       end
+    end
+  end
+  do
+    local group = {}
+    if midi and midi.w > 0 then group[#group + 1] = midi end
+    if gear and gear.w > 0 then group[#group + 1] = gear end
+    if overlap and overlap.w > 0 then group[#group + 1] = overlap end
+    if #group > 0 then
+      seq_tcp_group_frame(dl, group, tools_hot)
     end
   end
 
