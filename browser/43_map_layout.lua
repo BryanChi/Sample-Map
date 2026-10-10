@@ -546,10 +546,15 @@ function render_filter_input()
   r.ImGui_PopStyleVar(ctx)
 end
 
--- Logs every sample's coordinates and summary ranges (Tools → Debug).
+-- Copies every sample's coordinates and summary ranges to the clipboard
+-- (Tools → Debug). log() only feeds an in-memory buffer nobody can read.
 function debug_log_sample_coordinates()
-  log("=== DEBUG: Sample Coordinates ===")
-  log("Total samples: " .. #state.samples)
+  local out = {}
+  local function add(line)
+    out[#out + 1] = line
+  end
+  add("=== DEBUG: Sample Coordinates ===")
+  add("Total samples: " .. #state.samples)
   if #state.samples > 0 then
     local x_min, x_max = state.samples[1].x or 0.5, state.samples[1].x or 0.5
     local y_min, y_max = state.samples[1].y or 0.5, state.samples[1].y or 0.5
@@ -562,7 +567,7 @@ function debug_log_sample_coordinates()
       local freq = s.dominant_freq or 440.0
       local rms = s.rms_energy or 0.0
       local size = s.file_size or 0
-      log(string.format("Sample %d: name='%s', freq=%.1f Hz, bright=%.1f, weight=%.2f, rms=%.6f, size=%d bytes, x=%.6f, y=%.6f",
+      add(string.format("Sample %d: name='%s', freq=%.1f Hz, bright=%.1f, weight=%.2f, rms=%.6f, size=%d bytes, x=%.6f, y=%.6f",
           i, s.name or "unknown", freq, s.brightness or 0, s.sub_weight or 0, rms, size, x, y))
       x_min = math.min(x_min, x)
       x_max = math.max(x_max, x)
@@ -575,16 +580,20 @@ function debug_log_sample_coordinates()
       size_min = math.min(size_min, size)
       size_max = math.max(size_max, size)
     end
-    log("--- Summary ---")
-    log(string.format("X range: %.6f to %.6f (span: %.6f)", x_min, x_max, x_max - x_min))
-    log(string.format("Y range: %.6f to %.6f (span: %.6f)", y_min, y_max, y_max - y_min))
-    log(string.format("Frequency range: %.1f Hz to %.1f Hz", freq_min, freq_max))
-    log(string.format("RMS range: %.6f to %.6f", rms_min, rms_max))
-    log(string.format("File size range: %d to %d bytes", size_min, size_max))
+    add("--- Summary ---")
+    add(string.format("X range: %.6f to %.6f (span: %.6f)", x_min, x_max, x_max - x_min))
+    add(string.format("Y range: %.6f to %.6f (span: %.6f)", y_min, y_max, y_max - y_min))
+    add(string.format("Frequency range: %.1f Hz to %.1f Hz", freq_min, freq_max))
+    add(string.format("RMS range: %.6f to %.6f", rms_min, rms_max))
+    add(string.format("File size range: %d to %d bytes", size_min, size_max))
   else
-    log("No samples to debug")
+    add("No samples to debug")
   end
-  log("=== End Debug ===")
+  add("=== End Debug ===")
+  if r.ImGui_SetClipboardText then
+    r.ImGui_SetClipboardText(ctx, table.concat(out, "\n"))
+    sm_notify(string.format("Copied coordinates of %d sample%s to the clipboard", #state.samples, #state.samples == 1 and "" or "s"))
+  end
 end
 
 function clear_all_folders_and_samples()
@@ -601,7 +610,7 @@ function clear_all_folders_and_samples()
   state.scan_started = 0
   clear_sample_cache()
   save_config()
-  log("Cleared folders and samples")
+  sm_notify("Cleared folders and samples")
 end
 
 function menu_item_tooltip(text)
@@ -741,13 +750,13 @@ function render_header()
       local logs_text = get_scan_logs_text()
       if logs_text and logs_text ~= "" then
         r.ImGui_SetClipboardText(ctx, logs_text)
-        log("Scan logs copied to clipboard (" .. tostring(#state.scan_logs) .. " entries)")
+        sm_notify("Scan logs copied to clipboard (" .. tostring(#state.scan_logs) .. " entries)")
       else
-        log("No scan logs to copy")
+        sm_notify("No scan logs to copy yet", "warn")
       end
     end
     if r.ImGui_BeginMenu(ctx, "Debug") then
-      if r.ImGui_MenuItem(ctx, "Log Sample Coordinates") then
+      if r.ImGui_MenuItem(ctx, "Copy Sample Coordinates") then
         debug_log_sample_coordinates()
       end
       r.ImGui_EndMenu(ctx)

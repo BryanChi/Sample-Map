@@ -642,7 +642,7 @@ function stop_scan()
     #state.scan_queue
   )
   add_scan_log(msg)
-  log(msg)
+  sm_notify(string.format("Scan stopped and saved; %d file(s) left for next time", #state.scan_queue))
 end
 
 

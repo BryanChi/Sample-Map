@@ -753,7 +753,7 @@ function sm_save_tag_presets(presets)
   end
   local ok, err = sm_atomic_write(SM_TAG_PRESETS_PATH, "return " .. content)
   if not ok then
-    log("Failed to save tag presets: " .. tostring(err))
+    sm_notify("Could not save tag presets: " .. tostring(err), "error")
   end
   return ok
 end
@@ -840,7 +840,7 @@ function save_config_file()
   if saved then
     log("Saved config with " .. #state.folders .. " folder(s)")
   else
-    log("Failed to save config file: " .. tostring(save_err))
+    sm_notify("Could not save settings: " .. tostring(save_err), "error")
   end
 end
 
@@ -2341,10 +2341,10 @@ function save_samples()
   if ok_json_enc and type(json_str) == "string" then
     local json_saved, json_err = sm_atomic_write(DATA_PATH, json_str)
     if not json_saved then
-      log("Failed to write JSON cache: " .. tostring(json_err))
+      sm_notify("Could not save the sample library: " .. tostring(json_err), "error")
     end
   else
-    log("Failed to encode JSON cache: " .. tostring(json_str))
+    sm_notify("Could not save the sample library: " .. tostring(json_str), "error")
   end
 
   state.last_save_time = r.time_precise()
