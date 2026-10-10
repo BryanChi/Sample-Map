@@ -157,6 +157,44 @@ function shell_escape(str)
   return "'" .. str:gsub("'", "'\\''") .. "'"
 end
 
+SM_IS_MAC = (not SM_IS_WINDOWS) and (((r.GetOS and r.GetOS()) or ""):match("OSX") ~= nil
+  or ((r.GetOS and r.GetOS()) or ""):match("mac") ~= nil)
+-- Menu label for revealing a file in the OS file manager.
+SM_REVEAL_LABEL = SM_IS_WINDOWS and "Show in Explorer" or (SM_IS_MAC and "Show in Finder" or "Show in File Manager")
+
+-- Open a file with its default app. SWS's CF_ShellExecute when present.
+function sm_open_path(path)
+  if not path or path == "" then
+    return
+  end
+  if r.CF_ShellExecute then
+    r.CF_ShellExecute(path)
+  elseif SM_IS_WINDOWS then
+    os.execute('start "" ' .. shell_escape(path))
+  elseif SM_IS_MAC then
+    os.execute("open " .. shell_escape(path) .. " >/dev/null 2>&1 &")
+  else
+    os.execute("xdg-open " .. shell_escape(path) .. " >/dev/null 2>&1 &")
+  end
+end
+
+-- Select a file in Finder / Explorer. SWS's CF_LocateInExplorer when present.
+function sm_reveal_path(path)
+  if not path or path == "" then
+    return
+  end
+  if r.CF_LocateInExplorer then
+    r.CF_LocateInExplorer(path)
+  elseif SM_IS_WINDOWS then
+    os.execute('explorer /select,' .. shell_escape((path:gsub("/", "\\"))))
+  elseif SM_IS_MAC then
+    os.execute("open -R " .. shell_escape(path))
+  else
+    local dir = path:match("^(.*)/[^/]*$") or path
+    os.execute("xdg-open " .. shell_escape(dir) .. " >/dev/null 2>&1 &")
+  end
+end
+
 -- Write `content` to `path` atomically: write path.tmp, keep the previous file as
 -- path.bak, then rename the temp file into place. Returns true or false, err.
 function sm_atomic_write(path, content)

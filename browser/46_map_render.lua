@@ -506,18 +506,27 @@ function scan_session_did_work(session)
 end
 
 function play_scan_complete_sound()
-  local sounds = {
-    "/System/Library/Sounds/Glass.aiff",
-    "/System/Library/Sounds/Hero.aiff",
-    "/System/Library/Sounds/Ping.aiff",
+  if SM_IS_WINDOWS then
+    -- ExecProcess with -1 returns at once and opens no console window.
+    local wav = "C:\\Windows\\Media\\chimes.wav"
+    if r.ExecProcess and r.file_exists(wav) then
+      pcall(r.ExecProcess, 'powershell -NoProfile -WindowStyle Hidden -Command "(New-Object Media.SoundPlayer \'' .. wav .. '\').PlaySync()"', -1)
+    end
+    return
+  end
+  local players = {
+    { "afplay", "/System/Library/Sounds/Glass.aiff" },
+    { "afplay", "/System/Library/Sounds/Hero.aiff" },
+    { "paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga" },
+    { "aplay", "/usr/share/sounds/alsa/Front_Center.wav" },
   }
-  for i = 1, #sounds do
-    if r.file_exists(sounds[i]) then
-      os.execute("afplay " .. shell_escape(sounds[i]) .. " >/dev/null 2>&1 &")
+  for i = 1, #players do
+    local cmd, sound = players[i][1], players[i][2]
+    if r.file_exists(sound) and (cmd == "afplay") == (SM_IS_MAC and true or false) then
+      os.execute(cmd .. " " .. shell_escape(sound) .. " >/dev/null 2>&1 &")
       return
     end
   end
-  os.execute('printf "\\a" >/dev/null 2>&1 &')
 end
 
 function finish_scan_session(still_incomplete)
@@ -800,13 +809,11 @@ function draw_scan_complete_sample_menu_items(path, name, why)
     r.ImGui_TextColored(ctx, UI_THEME.text_dim, why)
   end
   r.ImGui_Separator(ctx)
-  if r.ImGui_MenuItem(ctx, "Show in Finder") then
+  if r.ImGui_MenuItem(ctx, SM_REVEAL_LABEL) then
     reveal_path_in_finder(path)
   end
   if r.ImGui_MenuItem(ctx, "Open file") then
-    if path and path ~= "" then
-      os.execute("open " .. shell_escape(path) .. " >/dev/null 2>&1 &")
-    end
+    sm_open_path(path)
   end
   if r.ImGui_MenuItem(ctx, "Preview") then
     local sample = lookup_sample_by_path(path)

@@ -1197,7 +1197,7 @@ function explorer_render_tag_popup()
   explorer_render_tag_editor(path, "popup_")
   r.ImGui_PopItemWidth(ctx)
   r.ImGui_Separator(ctx)
-  if r.ImGui_Selectable(ctx, "Reveal in Finder / Explorer") then
+  if r.ImGui_Selectable(ctx, SM_REVEAL_LABEL) then
     seq_reveal_sample_in_explorer(explorer_sample_for_path(path))
   end
   r.ImGui_EndPopup(ctx)

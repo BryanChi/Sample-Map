@@ -7,13 +7,7 @@ function seq_reveal_sample_in_explorer(sample)
   if not path or path == "" then
     return
   end
-  if r.CF_LocateInExplorer then
-    r.CF_LocateInExplorer(path)
-  elseif r.CF_ShellExecute then
-    r.CF_ShellExecute(path)
-  else
-    os.execute("open -R " .. shell_escape(path))
-  end
+  sm_reveal_path(path)
 end
 
 function draw_seq_header_sample_menu(sample)
@@ -50,7 +44,7 @@ function draw_seq_header_sample_menu(sample)
       r.ImGui_SetClipboardText(ctx, menu_sample.path or "")
     end
   end
-  if r.ImGui_MenuItem(ctx, "Show in Finder") then
+  if r.ImGui_MenuItem(ctx, SM_REVEAL_LABEL) then
     seq_reveal_sample_in_explorer(menu_sample)
   end
   r.ImGui_EndPopup(ctx)
