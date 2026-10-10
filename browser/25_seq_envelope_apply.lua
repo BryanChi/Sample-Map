@@ -785,23 +785,36 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
       opts.shaped_waveform and env or nil)
   end
   if sample and sample.path then
-    local grip_w, grip_h = 16, 14
-    local gx, gy = ix1 - grip_w - 1, iy0 + 1
+    -- Sample chip: click previews the sample, drag drops it in the arrange or map.
+    local grip_w, grip_h = 34, 16
+    local gx, gy = ix1 - grip_w - 2, iy0 + 2
     r.ImGui_SetCursorScreenPos(ctx, gx, gy)
-    r.ImGui_InvisibleButton(ctx, "##seq_env_wave_drag_" .. tostring(slot.id), grip_w, grip_h)
+    local grip_clicked = r.ImGui_InvisibleButton(ctx, "##seq_env_wave_drag_" .. tostring(slot.id), grip_w, grip_h)
     local grip_hov = r.ImGui_IsItemHovered(ctx)
-    local grip_col = grip_hov and UI_THEME.accent or UI_THEME.text_dim
+    local grip_col = grip_hov and 0xFFFFFFFF or UI_THEME.text_dim
+    r.ImGui_DrawList_AddRectFilled(dl, gx, gy, gx + grip_w, gy + grip_h,
+      grip_hov and UI_THEME.surface_hvr or 0x0B0F0CCC, 4.0)
+    r.ImGui_DrawList_AddRect(dl, gx, gy, gx + grip_w, gy + grip_h,
+      grip_hov and UI_THEME.accent or UI_THEME.border, 4.0, 0, 1.0)
+    ui_button_draw_icon(dl, "play", gx + 9, gy + grip_h * 0.5, 15, grip_col)
     for row = 0, 1 do
       for col = 0, 2 do
         r.ImGui_DrawList_AddCircleFilled(dl,
-          gx + 4 + col * 4, gy + 5 + row * 5, 1.2, grip_col, 6)
+          gx + 18 + col * 4, gy + 5.5 + row * 5, 1.1, grip_col, 6)
       end
     end
     if grip_hov and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, "Drag to drop this sample")
+      r.ImGui_SetTooltip(ctx, "Click: preview the sample · Drag: drop it in the arrange or map")
     end
     if waveform_drag_should_start(grip_hov) then
       begin_waveform_sample_drag(sample)
+    end
+    if grip_clicked and not sample_drag_active() then
+      if preview_seq_track_sample then
+        preview_seq_track_sample(slot)
+      elseif preview_sample then
+        preview_sample(sample)
+      end
     end
   end
   seq_draw_env_trans_sustain_markers(dl, sample, time_to_x, iy0, iy1)
