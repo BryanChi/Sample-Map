@@ -44,6 +44,36 @@ function open_seq_pattern_popup()
   end
 end
 
+-- Side windows (Pattern Presets, Fill Designer) dock over/next to the
+-- sequencer's right edge. Each records its screen rect + hover every frame it
+-- is drawn; the sequencer reads last frame's values so hover cursors and
+-- clicks under the window never reach the grid behind it.
+function seq_side_window_track(id, visible)
+  state.seq_side_windows = state.seq_side_windows or {}
+  if not visible then
+    state.seq_side_windows[id] = nil
+    return
+  end
+  local entry = {}
+  if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
+    local x, y = r.ImGui_GetWindowPos(ctx)
+    local w, h = r.ImGui_GetWindowSize(ctx)
+    entry.x, entry.y = tonumber(x) or 0, tonumber(y) or 0
+    entry.w, entry.h = tonumber(w) or 0, tonumber(h) or 0
+  end
+  if r.ImGui_IsWindowHovered then
+    local flags = 0
+    if r.ImGui_HoveredFlags_RootAndChildWindows then
+      flags = flags | r.ImGui_HoveredFlags_RootAndChildWindows()
+    end
+    if r.ImGui_HoveredFlags_AllowWhenBlockedByPopup then
+      flags = flags | r.ImGui_HoveredFlags_AllowWhenBlockedByPopup()
+    end
+    entry.hovered = r.ImGui_IsWindowHovered(ctx, flags) and true or false
+  end
+  state.seq_side_windows[id] = entry
+end
+
 -- Position the preset popup flush against the left or right edge of the main
 -- window (whichever side has room in the viewport) so it never covers the grid.
 function seq_position_pattern_popup()
