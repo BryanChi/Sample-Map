@@ -97,3 +97,38 @@ def test_removing_a_folder_respects_path_separators_and_keeps_tag_filters():
     assert names == "/lib/Drums/snare.wav,/lib/Drums/sub/hat.wav"
     assert filt == "kept"
     assert snare == 1
+
+
+def test_rescan_prunes_missing_files_only_in_reachable_folders():
+    L = _runtime()
+    out = L.execute(r'''
+      local files = {
+        ["/lib/A"] = { "kick.wav" },
+        ["/lib/A/kick.wav"] = true,
+      }
+      reaper.EnumerateFiles = function(dir, i)
+        local list = files[dir]
+        if type(list) ~= "table" or i < 0 then return nil end
+        return list[i + 1]
+      end
+      reaper.EnumerateSubdirectories = function(dir, i)
+        if dir == "/lib/A" and i == 0 then return nil end
+        return nil
+      end
+      reaper.file_exists = function(p) return files[p] ~= nil end
+      state.folders = { "/lib/A", "/lib/Offline" }
+      state.samples = {
+        { path = "/lib/A/kick.wav" },
+        { path = "/lib/A/deleted.wav" },
+        { path = "/lib/Offline/pad.wav" },
+      }
+      rebuild_samples_path_index()
+      enqueue_scan()
+      for _ = 1, 50 do
+        if sm_scan_enum_step(50) then break end
+      end
+      local names = {}
+      for _, s in ipairs(state.samples) do names[#names + 1] = s.path end
+      return table.concat(names, ",")
+    ''')
+    assert out == "/lib/A/kick.wav,/lib/Offline/pad.wav"

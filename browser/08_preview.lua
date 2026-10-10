@@ -286,6 +286,21 @@ function history_build_items()
   return items
 end
 
+-- False (with a short on-screen note) when the sample cannot be played:
+-- its drive/scan folder is offline, or the file was moved or deleted.
+function sample_preview_file_ok(sample)
+  if sample_scan_folder_unavailable(sample) then
+    sm_notify("Sample's drive or folder is offline", "warn")
+    return false
+  end
+  local path = tostring(sample.path)
+  if not path:find("^layering%-mix:") and not r.file_exists(path) then
+    sm_notify("File not found: " .. (path:match("([^/\\]+)$") or path) .. " (moved or deleted? Rescan to remove it)", "warn")
+    return false
+  end
+  return true
+end
+
 -- --- History navigation --------------------------------------------------------
 function preview_sample_from_history(sample)
   local start_time = get_sample_start_offset(sample)
@@ -294,7 +309,7 @@ function preview_sample_from_history(sample)
     return
   end
 
-  if sample_scan_folder_unavailable(sample) then
+  if not sample_preview_file_ok(sample) then
     return
   end
 
@@ -357,7 +372,7 @@ function preview_sample(sample, start_time)
     return
   end
 
-  if sample_scan_folder_unavailable(sample) then
+  if not sample_preview_file_ok(sample) then
     return
   end
 

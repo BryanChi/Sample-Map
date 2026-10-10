@@ -273,6 +273,7 @@ function sm_scan_enum_file(enum, dir, file)
     return
   end
   local normalized_full_path = normalize_path(dir .. "/" .. file)
+  enum.seen[normalized_full_path] = true
   local existing = samples_by_path[normalized_full_path]
   if not existing then
     existing = samples_by_path[path_index_key(normalized_full_path)]
@@ -390,6 +391,53 @@ function sm_scan_enum_step(max_ms)
   return false
 end
 
+-- Drop library entries whose files are gone, but only under scan folders that
+-- were listed in full just now and are reachable (an unmounted drive or an
+-- offline folder never loses its samples). Each candidate is also checked with
+-- file_exists, so a path the listing spelled differently is never dropped.
+function sm_scan_prune_missing(enum)
+  local roots = {}
+  for _, root in ipairs(enum.roots or {}) do
+    if scan_folder_path_exists(root) then
+      roots[#roots + 1] = root
+    end
+  end
+  if #roots == 0 then
+    return 0
+  end
+  local kept, gone = {}, {}
+  for _, sample in ipairs(state.samples) do
+    local p = sample.path and normalize_path(sample.path)
+    local drop = false
+    if p and p ~= "" and not enum.seen[p] then
+      for i = 1, #roots do
+        if sample_under_scan_folder(p, roots[i]) then
+          drop = not r.file_exists(p)
+          break
+        end
+      end
+    end
+    if drop then
+      gone[#gone + 1] = p
+    else
+      kept[#kept + 1] = sample
+    end
+  end
+  if #gone == 0 then
+    return 0
+  end
+  state.samples = kept
+  rebuild_samples_path_index()
+  rebuild_tag_index()
+  state._pending_layout = true
+  for i = 1, math.min(#gone, 20) do
+    add_scan_log("Removed missing file: " .. gone[i])
+  end
+  add_scan_log(string.format("Removed %d missing file(s) from the library", #gone))
+  sm_notify(string.format("Removed %d missing file%s from the library", #gone, #gone == 1 and "" or "s"))
+  return #gone
+end
+
 function sm_scan_enum_finish()
   local enum = state.scan_enum
   if not enum then
@@ -413,6 +461,8 @@ function sm_scan_enum_finish()
   state.last_save_time = r.time_precise()
   if enum.errors and enum.errors > 0 then
     add_scan_log(string.format("Folder enumeration hit %d error(s)", enum.errors))
+  else
+    sm_scan_prune_missing(enum)
   end
 
   local folder_label = enum.folder_label
@@ -481,6 +531,8 @@ function enqueue_scan(folder_only)
       paths = {},
       queued = {},
       already = {},
+      seen = {},
+      roots = {},
       skipped = 0,
       reanalyze = 0,
       incomplete = 0,
@@ -510,6 +562,7 @@ function enqueue_scan(folder_only)
     local folder = normalize_path(folders_to_scan[i])
     if folder and folder ~= "" then
       enum.stack[#enum.stack + 1] = folder
+      enum.roots[#enum.roots + 1] = folder
     end
   end
 
