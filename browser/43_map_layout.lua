@@ -652,16 +652,19 @@ function render_header()
       if r.ImGui_MenuItem(ctx, "Effective Range") then
         enqueue_effective_range_analysis()
       end
+      menu_item_tooltip("Recompute the audible length (trailing silence cropped) of every sample.\nRuns the full analysis, so loop/one-shot is refreshed too.")
       if r.ImGui_MenuItem(ctx, "Transient / Sustain") then
         enqueue_transient_sustain_analysis()
       end
+      menu_item_tooltip("Recompute the transient/sustain split of every drum one-shot.")
       if r.ImGui_MenuItem(ctx, "Loop / One-shot") then
         enqueue_playback_type_analysis()
       end
+      menu_item_tooltip("Reclassify every sample as loop or one-shot.\nRuns the full analysis, so the effective range is refreshed too.")
       if r.ImGui_MenuItem(ctx, "Weight") then
         enqueue_weight_analysis()
       end
-      menu_item_tooltip("Recompute weight only (skips crop, loop/one-shot, and transients).\nUse this after the weight formula changes.")
+      menu_item_tooltip("Recompute weight for every sample (skips crop, loop/one-shot, and transients).\nUse this after the weight formula changes.")
       if state.analyzer_numpy_missing and not state.analyzer_numpy_install_started then
         r.ImGui_Separator(ctx)
         if r.ImGui_MenuItem(ctx, "Install numpy…") then

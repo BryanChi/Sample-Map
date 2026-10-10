@@ -53,13 +53,6 @@ function analyzer_data_has_fields(data)
     or data.transient_end ~= nil
 end
 
-function sample_effective_range_incomplete(sample)
-  if not sample or not sample.path then
-    return false
-  end
-  return type(sample.effective_duration) ~= "number" or sample.effective_duration <= 0
-end
-
 -- Drum one-shots only (not loops, FX, or melodic instruments).
 -- Global: main chunk is near Lua's 200-local limit (see header comment).
 DRUM_TRANSIENT_TAGS = {
@@ -92,13 +85,6 @@ function sample_is_drum_oneshot(sample)
     return false
   end
   return has_drum
-end
-
-function sample_playback_type_incomplete(sample)
-  if not sample or not sample.path then
-    return false
-  end
-  return sample.playback_type == nil
 end
 
 function sample_transient_incomplete(sample)
@@ -140,7 +126,7 @@ function enqueue_analyzer_paths(predicate, empty_msg, queued_log)
 
   local pending = #state.analyzer_queue + #state.active_processes
   if pending == 0 then
-    log(empty_msg)
+    sm_notify(empty_msg)
     add_scan_log(queued_log .. ": nothing to analyze")
     return 0
   end
@@ -203,7 +189,7 @@ function enqueue_incomplete_analysis()
 
   local pending = #state.analyzer_queue + #state.active_processes
   if pending == 0 then
-    log("No incomplete samples found")
+    sm_notify("No incomplete samples: everything is analyzed")
     add_scan_log("Incomplete scan: nothing to analyze")
     return 0
   end
@@ -223,12 +209,19 @@ function enqueue_incomplete_analysis()
   return added
 end
 
+-- The per-field Re-analyze items all recompute that data for every sample
+-- they apply to (use them after an analyzer change); "Incomplete Samples"
+-- is the one that only fills in what is missing.
+function sample_has_path(sample)
+  return sample and sample.path and true or false
+end
+
 function enqueue_effective_range_analysis()
   state.analyzer_job_label = "Scanning effective range"
   state.analyzer_mode = nil
   return enqueue_analyzer_paths(
-    sample_effective_range_incomplete,
-    "No samples missing effective range (all have effective_duration)",
+    sample_has_path,
+    "No samples to re-analyze",
     "Effective range scan"
   )
 end
@@ -237,8 +230,10 @@ function enqueue_transient_sustain_analysis()
   state.analyzer_job_label = "Scanning transient/sustain"
   state.analyzer_mode = "transient"
   return enqueue_analyzer_paths(
-    sample_transient_incomplete,
-    "No drum one-shots missing transient/sustain (or none tagged as drums)",
+    function(sample)
+      return sample_has_path(sample) and sample_is_drum_oneshot(sample)
+    end,
+    "No drum one-shots to re-analyze (none tagged as drums)",
     "Transient/sustain scan"
   )
 end
@@ -247,8 +242,8 @@ function enqueue_playback_type_analysis()
   state.analyzer_job_label = "Classifying loop / one-shot"
   state.analyzer_mode = nil
   return enqueue_analyzer_paths(
-    sample_playback_type_incomplete,
-    "No samples missing loop/one-shot classification",
+    sample_has_path,
+    "No samples to re-analyze",
     "Loop/one-shot scan"
   )
 end
@@ -257,10 +252,8 @@ function enqueue_weight_analysis()
   state.analyzer_job_label = "Scanning weight"
   state.analyzer_mode = "weight"
   return enqueue_analyzer_paths(
-    function(sample)
-      return sample and sample.path
-    end,
-    "No samples to scan for weight",
+    sample_has_path,
+    "No samples to re-analyze",
     "Weight scan"
   )
 end
@@ -1031,7 +1024,7 @@ function process_scan_slice(max_ms)
     end
     if still_incomplete > 0 then
       add_scan_log(string.format(
-        "Scan finished with %d sample(s) still missing analyzer fields — click Scan for incomplete again",
+        "Scan finished with %d sample(s) still missing analyzer fields — try Library > Re-analyze > Incomplete Samples",
         still_incomplete
       ))
       log(string.format("%d samples still incomplete after analysis", still_incomplete))
