@@ -49,6 +49,8 @@ function seq_layer_default_side()
   }
 end
 
+-- Normalizes in place (no new tables once a side is well formed): this runs
+-- many times per frame while the layering window is open.
 function seq_layer_normalize_side(side)
   if type(side) ~= "table" then
     return seq_layer_default_side()
@@ -70,11 +72,7 @@ function seq_layer_normalize_side(side)
   if type(b) ~= "table" then
     side.blend = { 1.0, 0.0, 0.0 }
   else
-    local a = tonumber(b[1]) or 0
-    local bb = tonumber(b[2]) or 0
-    local c = tonumber(b[3]) or 0
-    a, bb, c = seq_layer_clamp_bary(a, bb, c)
-    side.blend = { a, bb, c }
+    b[1], b[2], b[3] = seq_layer_clamp_bary(tonumber(b[1]) or 0, tonumber(b[2]) or 0, tonumber(b[3]) or 0)
   end
   return side
 end
@@ -413,7 +411,9 @@ function seq_layering_apply_bias(base_trans, onset, dur, bias)
   return onset + math.max(min_len, len)
 end
 
-function seq_layering_piece_times(sample, side_key, slot)
+-- Onset, unbiased transient end and length (seconds) of a sample, as the
+-- transient / sustain split uses them.
+function seq_layering_trans_base(sample)
   local dur = seq_sample_source_length_sec(sample and sample.path, sample)
       or (sample and tonumber(sample.duration)) or 0.2
   if dur <= 0.001 then dur = 0.2 end
@@ -421,6 +421,32 @@ function seq_layering_piece_times(sample, side_key, slot)
   local trans = (sample and type(sample.transient_end) == "number" and sample.transient_end > 0)
       and sample.transient_end or math.min(0.024, dur * 0.18)
   trans = math.max(onset + 0.003, math.min(trans, dur * 0.9))
+  return onset, trans, dur
+end
+
+-- Inverse of seq_layering_apply_bias: the bias that puts the split at t.
+function seq_layering_bias_for_trans(base_trans, onset, dur, t)
+  onset = math.max(0.0, onset or 0.0)
+  dur = math.max(onset + 0.02, dur or 0.2)
+  local base_len = math.max(0.004, (base_trans or (onset + 0.02)) - onset)
+  local min_len = 0.004
+  local max_len = math.min(math.max(0.02, dur - onset - 0.012), math.max(base_len * 4.0, 0.12))
+  if max_len < base_len then
+    max_len = math.min(math.max(0.02, dur - onset - 0.012), base_len * 2.0)
+  end
+  local len = (tonumber(t) or (onset + base_len)) - onset
+  local bias
+  if len <= base_len then
+    bias = (base_len > min_len) and ((len - min_len) / (base_len - min_len) - 1.0) or 0.0
+  else
+    bias = (max_len > base_len) and ((len - base_len) / (max_len - base_len)) or 0.0
+  end
+  if bias < -1.0 then bias = -1.0 elseif bias > 1.0 then bias = 1.0 end
+  return bias
+end
+
+function seq_layering_piece_times(sample, side_key, slot)
+  local onset, trans, dur = seq_layering_trans_base(sample)
   if slot then
     trans = seq_layering_apply_bias(trans, onset, dur, seq_layering_get_bias(slot))
     trans = math.max(onset + 0.003, math.min(trans, dur * 0.9))
@@ -611,9 +637,11 @@ function seq_layering_insert_mix_at_position(sample, time_pos, target_track)
   return any
 end
 
-function seq_layering_split_sec(slot)
+-- The sample whose transient sets the split: the track sample, else the first
+-- transient corner that resolves.
+function seq_layering_split_sample(slot)
   local sample = slot and find_sample_by_path(slot.sample_path)
-  if not sample then
+  if not sample and slot then
     seq_normalize_slot_layers(slot)
     for i = 1, 3 do
       local v = slot.layers.transient.verts[i]
@@ -625,8 +653,32 @@ function seq_layering_split_sec(slot)
       end
     end
   end
-  local _, tlen = seq_layering_piece_times(sample, "transient", slot)
+  return sample
+end
+
+function seq_layering_split_sec(slot)
+  local _, tlen = seq_layering_piece_times(seq_layering_split_sample(slot), "transient", slot)
   return math.max(0.004, tlen or 0.02)
+end
+
+-- Split position in the split sample's own time (seconds from its start).
+function seq_layering_split_time(slot)
+  local sample = seq_layering_split_sample(slot)
+  local onset, tlen = seq_layering_piece_times(sample, "transient", slot)
+  return onset + tlen, sample
+end
+
+-- Moves the split to time t (seconds into the split sample) by setting the bias.
+function seq_layering_set_split_time(slot, t)
+  if not slot then return false end
+  seq_normalize_slot_layers(slot)
+  local onset, trans, dur = seq_layering_trans_base(seq_layering_split_sample(slot))
+  local bias = seq_layering_bias_for_trans(trans, onset, dur, t)
+  if math.abs((slot.layers.bias or 0.0) - bias) < 1e-6 then
+    return false
+  end
+  slot.layers.bias = bias
+  return true
 end
 
 function seq_layering_remap_piece_lanes(pieces)
@@ -796,36 +848,81 @@ function seq_layering_randomize_side(slot, side)
   return changed
 end
 
-function seq_layering_draw_lock(dl, x, y, w, h, locked, hovered)
-  local col = locked and 0xE8C070FF or (hovered and 0xFFFFFFFF or UI_THEME.text_dim)
-  local cx = x + w * 0.5
-  local body_y = y + h * 0.48
-  local body_h = h * 0.38
-  local body_w = w * 0.46
-  r.ImGui_DrawList_AddRectFilled(dl, cx - body_w * 0.5, body_y, cx + body_w * 0.5, body_y + body_h, col, 1.5)
-  local shackle_r = w * 0.16
-  local shackle_y = body_y
-  if locked then
-    r.ImGui_DrawList_AddCircle(dl, cx, shackle_y, shackle_r, col, 10, 1.4)
-  else
-    r.ImGui_DrawList_AddCircle(dl, cx + w * 0.08, shackle_y, shackle_r, col, 10, 1.4)
-  end
+-- Puts the whole blend on one corner.
+function seq_layering_solo_vert(slot, side_key, idx)
+  if not slot or idx < 1 or idx > 3 then return false end
+  seq_normalize_slot_layers(slot)
+  local b = slot.layers[side_key].blend
+  b[1], b[2], b[3] = 0.0, 0.0, 0.0
+  b[idx] = 1.0
+  seq_layering_sync_linked(slot, side_key)
+  return true
 end
 
-function seq_layering_icon_button(id, dl, x, y, w, h, kind, active)
-  r.ImGui_SetCursorScreenPos(ctx, x, y)
-  local clicked = r.ImGui_InvisibleButton(ctx, id, w, h)
-  local hovered = r.ImGui_IsItemHovered(ctx)
-  local pressed = r.ImGui_IsItemActive(ctx)
-  local bg = active and UI_THEME.accent_fill or (hovered and UI_THEME.surface_hvr or UI_THEME.surface)
-  local edge = hovered and UI_THEME.accent_hvr or (active and UI_THEME.accent or UI_THEME.border)
-  ui_draw_panel(dl, x, y, x + w, y + h, 6.0, bg, edge, hovered, pressed)
-  if kind == "dice" then
-    ui_button_draw_icon(dl, "dice5", x + w * 0.5, y + h * 0.5 + (pressed and 1.0 or 0.0), math.min(w, h) * 0.9, hovered and 0xFFFFFFFF or UI_THEME.text)
-  else
-    seq_layering_draw_lock(dl, x, y + (pressed and 1.0 or 0.0), w, h, active, hovered)
+-- Equal weights across the corners that hold a sample.
+function seq_layering_even_mix(slot, side_key)
+  if not slot then return false end
+  seq_normalize_slot_layers(slot)
+  local side = slot.layers[side_key]
+  local w = { 0.0, 0.0, 0.0 }
+  local n = 0
+  for i = 1, 3 do
+    if side.verts[i].path then
+      w[i] = 1.0
+      n = n + 1
+    end
   end
-  return clicked, hovered
+  if n == 0 then
+    w = { 1.0, 1.0, 1.0 }
+  end
+  side.blend[1], side.blend[2], side.blend[3] = seq_layer_clamp_bary(w[1], w[2], w[3])
+  seq_layering_sync_linked(slot, side_key)
+  return true
+end
+
+-- Back to the track sample alone: blend on the top corner, volumes at 100%.
+function seq_layering_reset_side(slot, side_key)
+  if not slot then return false end
+  seq_normalize_slot_layers(slot)
+  local side = slot.layers[side_key]
+  side.blend[1], side.blend[2], side.blend[3] = 1.0, 0.0, 0.0
+  for i = 1, 3 do
+    side.verts[i].vol = 1.0
+  end
+  seq_layering_sync_linked(slot, side_key)
+  return true
+end
+
+-- Empties an unlocked side corner (the top corner is the track sample).
+function seq_layering_clear_vert(slot, side_key, idx)
+  if not slot or idx < 2 or idx > 3 then return false end
+  seq_normalize_slot_layers(slot)
+  local side = slot.layers[side_key]
+  local v = side.verts[idx]
+  if v.locked or not v.path then return false end
+  v.path = nil
+  v.name = nil
+  v.vol = 1.0
+  local b = side.blend
+  b[idx] = 0.0
+  b[1], b[2], b[3] = seq_layer_clamp_bary(b[1], b[2], b[3])
+  seq_layering_sync_linked(slot, side_key)
+  return true
+end
+
+function seq_layering_copy_side_to_other(slot, from_key)
+  if not slot then return false end
+  seq_normalize_slot_layers(slot)
+  local to_key = (from_key == "transient") and "sustain" or "transient"
+  seq_layering_copy_side(slot.layers[to_key], slot.layers[from_key])
+  return true
+end
+
+function seq_layering_swap_sides(slot)
+  if not slot then return false end
+  seq_normalize_slot_layers(slot)
+  slot.layers.transient, slot.layers.sustain = slot.layers.sustain, slot.layers.transient
+  return true
 end
 
 function seq_layering_mix_fingerprint(slot)
@@ -845,22 +942,25 @@ function seq_layering_mix_fingerprint(slot)
   return table.concat(bits, "|")
 end
 
+-- Peaks of the layered mix (normalized to 1), its duration, and "ribbon"
+-- segments { u0, u1, color } (fractions of the width) naming the corner sample
+-- that dominates each stretch. Cached until the layering changes.
 function seq_layering_mix_peaks(slot, width)
   width = math.max(48, math.min(320, math.floor(width or 200)))
   local fp = seq_layering_mix_fingerprint(slot) .. "#" .. tostring(width)
   local cache = seq_layer_mix_wave_cache
   if cache and cache.fp == fp and cache.peaks then
-    return cache.peaks, cache.dur
+    return cache.peaks, cache.dur, cache.ribbon
   end
   local pieces = seq_layering_build_pieces(slot)
   local orig = slot.sample_path and find_sample_by_path(slot.sample_path) or nil
   if #pieces == 0 then
     if not orig then
-      return nil, nil
+      return nil, nil, nil
     end
     local peaks, dur = seq_env_get_wave_peaks(orig, width)
     seq_layer_mix_wave_cache = { fp = fp, peaks = peaks, dur = dur }
-    return peaks, dur
+    return peaks, dur, nil
   end
   local dur = 0.0
   local resolved = {}
@@ -887,8 +987,11 @@ function seq_layering_mix_peaks(slot, width)
     }
   end
   if dur <= 0.001 then dur = 0.2 end
-  local out = {}
-  for i = 1, width do out[i] = 0.0 end
+  local out, best, best_v = {}, {}, {}
+  for i = 1, width do
+    out[i] = 0.0
+    best_v[i] = 0.0
+  end
   for i = 1, #resolved do
     local rp = resolved[i]
     if rp.sample then
@@ -896,13 +999,21 @@ function seq_layering_mix_peaks(slot, width)
       pd = pd or rp.pdur
       if peaks and pd and pd > 0 then
         local n = #peaks
-        for b = 1, width do
+        -- Only the bins this piece covers.
+        local b0 = math.max(1, math.floor(rp.t_off / dur * width + 0.5))
+        local b1 = math.min(width, math.ceil((rp.t_off + rp.len) / dur * width + 0.5))
+        for b = b0, b1 do
           local t = ((b - 0.5) / width) * dur
           if t >= rp.t_off and t <= rp.t_off + rp.len then
             local src_t = rp.startoffs + (t - rp.t_off)
             local si = math.floor((src_t / pd) * n) + 1
             if si >= 1 and si <= n then
-              out[b] = out[b] + (peaks[si] or 0) * rp.weight
+              local v = (peaks[si] or 0) * rp.weight
+              out[b] = out[b] + v
+              if v > best_v[b] then
+                best_v[b] = v
+                best[b] = i
+              end
             end
           end
         end
@@ -916,8 +1027,28 @@ function seq_layering_mix_peaks(slot, width)
   if max_v > 0.0001 then
     for i = 1, width do out[i] = out[i] / max_v end
   end
-  seq_layer_mix_wave_cache = { fp = fp, peaks = out, dur = dur }
-  return out, dur
+  -- Merge runs of the same dominant piece; quiet bins extend the current run.
+  local ribbon = {}
+  local cur, run0 = nil, 1
+  for b = 1, width + 1 do
+    local who = best[b]
+    if b <= width and (not who or best_v[b] < 0.02 * max_v) then
+      who = cur
+    end
+    if who ~= cur or b > width then
+      if cur then
+        local rs = resolved[cur].sample
+        ribbon[#ribbon + 1] = {
+          u0 = (run0 - 1) / width,
+          u1 = (b - 1) / width,
+          color = get_sample_dot_color(rs),
+        }
+      end
+      cur, run0 = who, b
+    end
+  end
+  seq_layer_mix_wave_cache = { fp = fp, peaks = out, dur = dur, ribbon = ribbon }
+  return out, dur, ribbon
 end
 
 function seq_layering_start_mix_voice(v, into)
@@ -1061,924 +1192,4 @@ function seq_layering_ab_playing(slot, kind)
       and preview_sample_obj
       and slot.sample_path
       and preview_sample_obj.path == slot.sample_path
-end
-
-function seq_layering_draw_wave_pane(dl, slot, x, y, w, h, kind, hover_side)
-  local selected = state.seq_layering_ab == kind
-  local playing = seq_layering_ab_playing(slot, kind)
-  local using = seq_layering_output(slot) == kind
-  local hovered_btn = false
-  r.ImGui_SetCursorScreenPos(ctx, x, y)
-  r.ImGui_InvisibleButton(ctx, "##seq_layer_ab_" .. kind .. "_" .. tostring(slot.id), w, h)
-  hovered_btn = r.ImGui_IsItemHovered(ctx)
-  local clicked = r.ImGui_IsItemClicked(ctx, 0)
-
-  local bg = (selected or playing or using) and UI_THEME.accent_fill or (hovered_btn and UI_THEME.surface_hvr or UI_THEME.bg_panel)
-  local edge = (selected or playing or using) and UI_THEME.accent or (hovered_btn and UI_THEME.accent_hvr or UI_THEME.border)
-  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, bg, 4.0)
-  r.ImGui_DrawList_AddRect(dl, x, y, x + w, y + h, edge, 4.0, 0, (selected or playing or using) and 1.6 or 1.0)
-
-  local sample = slot.sample_path and find_sample_by_path(slot.sample_path) or nil
-  local ix, iy, iw, ih = x + 6, y + 16, w - 12, h - 22
-  local peaks, dur = nil, nil
-  if kind == "layered" then
-    peaks, dur = seq_layering_mix_peaks(slot, math.floor(iw))
-  elseif sample then
-    peaks, dur = seq_env_get_wave_peaks(sample, math.floor(iw))
-  end
-  if peaks and iw > 4 and ih > 4 then
-    seq_draw_env_waveform(dl, ix, iy, iw, ih, peaks, nil, nil, dur)
-  elseif not sample then
-    r.ImGui_DrawList_AddText(dl, x + 10, y + h * 0.5 - 7, UI_THEME.text_mute, "Assign a sample to this track")
-  end
-
-  dur = dur or (sample and tonumber(sample.duration)) or 0
-  local label = (kind == "original") and "Original" or "Layered"
-  local label_col = (selected or playing or using) and 0xFFFFFFFF or UI_THEME.text
-  r.ImGui_DrawList_AddText(dl, x + 8, y + 2, label_col, label)
-  if playing then
-    ui_button_draw_icon(dl, "play", x + w - 14, y + 10, 14, 0x7CFF4AFF)
-  end
-
-  local btn_w, btn_h = 52, 16
-  local play_pad = playing and 16 or 0
-  local btn_x = x + w - 6 - btn_w - play_pad
-  local btn_y = y + 2
-  local mx, my = r.ImGui_GetMousePos(ctx)
-  mx, my = tonumber(mx) or -1, tonumber(my) or -1
-  local over_use = mx >= btn_x and mx <= btn_x + btn_w and my >= btn_y and my <= btn_y + btn_h
-  r.ImGui_SetCursorScreenPos(ctx, btn_x, btn_y)
-  local use_clicked = draw_ui_button(
-    "seq_layer_use_" .. kind .. "_" .. tostring(slot.id),
-    using and "USING" or "USE",
-    btn_w, btn_h,
-    { compact = true, selected = using, style = using and "accent" or "default" }
-  )
-  local use_hovered = over_use or r.ImGui_IsItemHovered(ctx)
-  if use_hovered and r.ImGui_SetTooltip then
-    r.ImGui_SetTooltip(ctx, using
-      and "This is the track output"
-      or "Use this as the track output")
-  end
-  if (use_clicked or (over_use and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0)))
-      and not using then
-    seq_layering_set_output(slot, kind)
-  end
-
-  if kind == "original" and sample and dur > 0 and not (slot.layers and slot.layers.linked) then
-    local onset = (type(sample.onset) == "number" and sample.onset > 0) and sample.onset or 0.0
-    local trans = seq_layering_apply_bias(
-      (type(sample.transient_end) == "number" and sample.transient_end > 0)
-        and sample.transient_end or math.min(0.024, dur * 0.18),
-      onset, dur, seq_layering_get_bias(slot)
-    )
-    local sustain_end = sample_map_duration(sample)
-    if sustain_end <= 0 then sustain_end = dur end
-    local function t2x(t)
-      return ix + (math.max(0.0, math.min(dur, t)) / dur) * iw
-    end
-    if trans then
-      local ox, tx, sx = t2x(onset), t2x(trans), t2x(sustain_end)
-      local t_alpha = (hover_side == "transient") and 0xFF6B3C55 or 0xFF6B3C33
-      local s_alpha = (hover_side == "sustain") and 0x4A9CFF44 or 0x4A9CFF28
-      if tx > ox + 0.5 then
-        r.ImGui_DrawList_AddRectFilled(dl, ox, iy, tx, iy + ih, t_alpha, 0)
-      end
-      if sx > tx + 0.5 then
-        r.ImGui_DrawList_AddRectFilled(dl, tx, iy, sx, iy + ih, s_alpha, 0)
-      end
-      r.ImGui_DrawList_AddLine(dl, tx, iy, tx, iy + ih, 0x7CFF4AFF, 1.6)
-    end
-  end
-
-  if playing and dur > 0 then
-    local pos = get_preview_position() or state.preview_position or 0.0
-    local playhead_x = ix + (math.max(0.0, math.min(dur, pos)) / dur) * iw
-    r.ImGui_DrawList_AddLine(dl, playhead_x, y + 1, playhead_x, y + h - 1, 0xFFFF88FF, 1.6)
-    r.ImGui_DrawList_AddCircleFilled(dl, playhead_x, y + 4, 3.0, 0xFFFF88FF, 10)
-  end
-
-  if hovered_btn and not use_hovered and r.ImGui_SetTooltip then
-    r.ImGui_SetTooltip(ctx, kind == "original"
-      and "Click to play · Drag to drop original sample"
-      or "Click to play · Drag to drop layered mix")
-  end
-  local drag_sample = nil
-  if kind == "original" then
-    drag_sample = sample
-  elseif slot.sample_path then
-    drag_sample = seq_layering_drag_sample(slot)
-  end
-  if drag_sample and not use_hovered
-      and waveform_drag_should_start(hovered_btn) then
-    begin_waveform_sample_drag(drag_sample)
-  end
-  if drag_sample and sample_is_waveform_drag_source(drag_sample) then
-    draw_waveform_drag_source_cue(dl, x, y, w, h)
-  end
-  if clicked and not use_hovered and not state.pending_waveform_drop then
-    if kind == "original" then
-      seq_layering_preview_original(slot)
-    else
-      seq_layering_preview_layered(slot, 0)
-    end
-  end
-end
-
-function seq_layering_draw_waveforms(dl, slot, x, y, w, h, hover_side)
-  local gap = 6.0
-  local pane_h = (h - gap) * 0.5
-  seq_layering_draw_wave_pane(dl, slot, x, y, w, pane_h, "original", hover_side)
-  seq_layering_draw_wave_pane(dl, slot, x, y + pane_h + gap, w, pane_h, "layered", hover_side)
-end
-
-SEQ_LAYER_WAVE_H = 148.0
-SEQ_LAYER_WAVE_GAP = 0.0
-SEQ_LAYER_LINK_W = 44.0
-SEQ_LAYER_PAD_TOP = 36.0
-SEQ_LAYER_PAD_BOT = 36.0
-SEQ_LAYER_PAD_SIDE = 72.0
-SEQ_LAYER_VERT_DROP_R = 24.0
-
-function seq_layering_tri_geom(x, y, w, h)
-  local pad_top, pad_bot, pad_side = SEQ_LAYER_PAD_TOP, SEQ_LAYER_PAD_BOT, SEQ_LAYER_PAD_SIDE
-  local avail_w = math.max(72.0, w - pad_side * 2.0)
-  local avail_h = math.max(72.0, h - pad_top - pad_bot)
-  local side = math.min(avail_w, avail_h * 2.0 / math.sqrt(3.0))
-  local tri_h = side * (math.sqrt(3.0) * 0.5)
-  local ax = x + w * 0.5
-  local ay = y + pad_top
-  local bx = ax - side * 0.5
-  local by = ay + tri_h
-  local cx = ax + side * 0.5
-  local cy = by
-  return ax, ay, bx, by, cx, cy, side, tri_h
-end
-
-function seq_layering_ideal_content_h(content_w)
-  local col_w = math.max(160.0, (content_w - SEQ_LAYER_LINK_W) * 0.5)
-  local avail_w = math.max(72.0, col_w - SEQ_LAYER_PAD_SIDE * 2.0)
-  local tri_h = avail_w * (math.sqrt(3.0) * 0.5)
-  return SEQ_LAYER_WAVE_H + SEQ_LAYER_WAVE_GAP + SEQ_LAYER_PAD_TOP + tri_h + SEQ_LAYER_PAD_BOT
-end
-
-function seq_layering_rounded_tri_points(ax, ay, bx, by, cx, cy, radius)
-  local V = { { ax, ay }, { bx, by }, { cx, cy } }
-  local pts = {}
-  local steps = 7
-  for i = 1, 3 do
-    local p0 = V[i == 1 and 3 or (i - 1)]
-    local p1 = V[i]
-    local p2 = V[i == 3 and 1 or (i + 1)]
-    local e1x, e1y = p0[1] - p1[1], p0[2] - p1[2]
-    local e2x, e2y = p2[1] - p1[1], p2[2] - p1[2]
-    local l1 = math.sqrt(e1x * e1x + e1y * e1y)
-    local l2 = math.sqrt(e2x * e2x + e2y * e2y)
-    if l1 < 1e-4 or l2 < 1e-4 then
-      pts[#pts + 1] = { p1[1], p1[2] }
-    else
-      e1x, e1y = e1x / l1, e1y / l1
-      e2x, e2y = e2x / l2, e2y / l2
-      local dot = math.max(-1.0, math.min(1.0, e1x * e2x + e1y * e2y))
-      local ang = math.acos(dot)
-      local d = radius / math.max(0.18, math.tan(ang * 0.5))
-      d = math.min(d, l1 * 0.42, l2 * 0.42)
-      local a1x, a1y = p1[1] + e1x * d, p1[2] + e1y * d
-      local a2x, a2y = p1[1] + e2x * d, p1[2] + e2y * d
-      local bisx, bisy = e1x + e2x, e1y + e2y
-      local bl = math.sqrt(bisx * bisx + bisy * bisy)
-      local sin_h = math.sin(ang * 0.5)
-      local clen = (sin_h > 1e-4) and (radius / sin_h) or radius
-      local ocx = p1[1] + (bisx / bl) * clen
-      local ocy = p1[2] + (bisy / bl) * clen
-      local t0 = math.atan2(a1y - ocy, a1x - ocx)
-      local t1 = math.atan2(a2y - ocy, a2x - ocx)
-      local sweep = t1 - t0
-      while sweep > math.pi do sweep = sweep - 2.0 * math.pi end
-      while sweep < -math.pi do sweep = sweep + 2.0 * math.pi end
-      local mid = t0 + sweep * 0.5
-      local mx = ocx + math.cos(mid) * radius
-      local my = ocy + math.sin(mid) * radius
-      if (mx - p1[1]) * (mx - p1[1]) + (my - p1[2]) * (my - p1[2]) < (radius * 0.55) * (radius * 0.55) then
-        if sweep > 0 then sweep = sweep - 2.0 * math.pi else sweep = sweep + 2.0 * math.pi end
-      end
-      for s = 0, steps do
-        local t = t0 + sweep * (s / steps)
-        pts[#pts + 1] = { ocx + math.cos(t) * radius, ocy + math.sin(t) * radius }
-      end
-    end
-  end
-  return pts
-end
-
-function seq_layering_draw_poly(dl, pts, fill, stroke, stroke_w)
-  if not pts or #pts < 3 or not dl then return end
-  if fill and r.ImGui_DrawList_PathLineTo and r.ImGui_DrawList_PathFillConvex then
-    pcall(function()
-      if r.ImGui_DrawList_PathClear then r.ImGui_DrawList_PathClear(dl) end
-      for i = 1, #pts do
-        local p = pts[i]
-        if p and p[1] and p[2] then
-          r.ImGui_DrawList_PathLineTo(dl, p[1], p[2])
-        end
-      end
-      r.ImGui_DrawList_PathFillConvex(dl, fill)
-    end)
-  end
-  if stroke and stroke_w and stroke_w > 0 then
-    local n = #pts
-    for i = 1, n do
-      local a, b = pts[i], pts[i == n and 1 or (i + 1)]
-      if a and b then
-        r.ImGui_DrawList_AddLine(dl, a[1], a[2], b[1], b[2], stroke, stroke_w)
-      end
-    end
-  end
-end
-
-function seq_layering_expand_tri(ax, ay, bx, by, cx, cy, amt)
-  local mx = (ax + bx + cx) / 3.0
-  local my = (ay + by + cy) / 3.0
-  local function push(px, py)
-    local dx, dy = px - mx, py - my
-    local l = math.sqrt(dx * dx + dy * dy)
-    if l < 1e-4 then return px, py end
-    return px + dx / l * amt, py + dy / l * amt
-  end
-  local ax2, ay2 = push(ax, ay)
-  local bx2, by2 = push(bx, by)
-  local cx2, cy2 = push(cx, cy)
-  return ax2, ay2, bx2, by2, cx2, cy2
-end
-
-function seq_layer_col_alpha(color, alpha_value)
-  color = tonumber(color) or 0x1EFF5EFF
-  alpha_value = tonumber(alpha_value) or 1.0
-  local rr = math.floor((color / 16777216) % 256)
-  local gg = math.floor((color / 65536) % 256)
-  local bb = math.floor((color / 256) % 256)
-  local aa = math.max(0, math.min(255, math.floor(alpha_value * 255)))
-  return rr * 16777216 + gg * 65536 + bb * 256 + aa
-end
-
-function seq_layering_draw_polished_tri(dl, ax, ay, bx, by, cx, cy, hot)
-  if not dl then return end
-  ax, ay = tonumber(ax), tonumber(ay)
-  bx, by = tonumber(bx), tonumber(by)
-  cx, cy = tonumber(cx), tonumber(cy)
-  if not (ax and ay and bx and by and cx and cy) then return end
-  local accent = (hot and UI_THEME.accent_hvr) or UI_THEME.accent or 0x1EFF5EFF
-  local fill = UI_THEME.accent_fill or 0x0E2A18FF
-  r.ImGui_DrawList_AddTriangleFilled(dl, ax, ay, bx, by, cx, cy, fill)
-  local outlined = pcall(function()
-    local radius = 14.0
-    for i = 4, 1, -1 do
-      local grow = i * 2.4
-      local ea, ey, eb, eby, ec, ecy = seq_layering_expand_tri(ax, ay, bx, by, cx, cy, grow)
-      local pts = seq_layering_rounded_tri_points(ea, ey, eb, eby, ec, ecy, radius + i)
-      local alpha = hot and (0.10 * (5 - i)) or (0.055 * (5 - i))
-      seq_layering_draw_poly(dl, pts, nil, seq_layer_col_alpha(accent, alpha), 3.0 + i * 0.8)
-    end
-    local pts = seq_layering_rounded_tri_points(ax, ay, bx, by, cx, cy, radius)
-    seq_layering_draw_poly(dl, pts, fill, nil, 0)
-    seq_layering_draw_poly(dl, pts, nil, seq_layer_col_alpha(accent, 0.95), 2.6)
-  end)
-  if not outlined then
-    r.ImGui_DrawList_AddLine(dl, ax, ay, bx, by, accent, 2.2)
-    r.ImGui_DrawList_AddLine(dl, bx, by, cx, cy, accent, 2.2)
-    r.ImGui_DrawList_AddLine(dl, cx, cy, ax, ay, accent, 2.2)
-  end
-end
-
-function seq_layering_draw_pct_badge(dl, cx, cy, pct)
-  local text = string.format("%d%%", pct)
-  local tw = select(1, r.ImGui_CalcTextSize(ctx, text)) or 24
-  local w, h = tw + 10, 16
-  local x0, y0 = cx - w * 0.5, cy - h * 0.5
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, 0x0C100EFF, 3.0)
-  r.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h, 0x1EFF5E55, 3.0, 0, 1.0)
-  r.ImGui_DrawList_AddText(dl, x0 + 5, y0 + 1, 0xE8EEEAFF, text)
-end
-
-function seq_layering_vol_knob(id, dl, x, y, size, vert)
-  if type(vert) ~= "table" then
-    return false, false
-  end
-  r.ImGui_SetCursorScreenPos(ctx, x, y)
-  r.ImGui_InvisibleButton(ctx, id, size, size)
-  local hovered = r.ImGui_IsItemHovered(ctx)
-  local active = r.ImGui_IsItemActive(ctx)
-  local vol = seq_layer_vert_vol(vert)
-  local changed = false
-  local fine = seq_fine_drag_down()
-  if active then
-    local _, dy = r.ImGui_GetMouseDelta(ctx)
-    if dy and dy ~= 0.0 then
-      local step = ((SEQ_LAYER_VOL_MAX or 4.0) / 180.0) * (fine and SEQ_FINE_DRAG_SCALE or 1.0)
-      vol = seq_layer_vert_vol({ vol = vol + (-dy) * step })
-      vert.vol = vol
-      changed = true
-    end
-  end
-  if r.ImGui_IsItemClicked(ctx, 0) and r.ImGui_IsMouseDoubleClicked(ctx, 0) then
-    vert.vol = 1.0
-    vol = 1.0
-    changed = true
-  end
-  local cx, cy = x + size * 0.5, y + size * 0.5 + (active and 1.0 or 0.0)
-  local radius = size * 0.46
-  local fill = active and UI_THEME.accent_fill_h or (hovered and UI_THEME.surface_hvr or UI_THEME.surface)
-  local edge = (hovered or active) and UI_THEME.accent or UI_THEME.border
-  r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, radius, fill, 18)
-  r.ImGui_DrawList_AddCircle(dl, cx, cy, radius, edge, 18, hovered and 1.5 or 1.2)
-  local amin, amax = math.pi * 0.75, math.pi * 2.25
-  local t = vol / (SEQ_LAYER_VOL_MAX or 4.0)
-  local ang = amin + (amax - amin) * t
-  local ar = radius - 2.6
-  local prevx, prevy
-  for i = 0, 12 do
-    local a = amin + (ang - amin) * (i / 12)
-    local px = cx + math.cos(a) * ar
-    local py = cy + math.sin(a) * ar
-    if prevx then
-      r.ImGui_DrawList_AddLine(dl, prevx, prevy, px, py, UI_THEME.accent, 1.6)
-    end
-    prevx, prevy = px, py
-  end
-  if hovered and r.ImGui_SetTooltip then
-    r.ImGui_SetTooltip(ctx, string.format("Sample volume  %.0f%%\nDrag to adjust, double-click to reset", vol * 100.0))
-  end
-  return changed, hovered
-end
-
-function seq_layering_vert_can_drop(hit)
-  if not hit then
-    return false
-  end
-  return (not hit.locked) or (hit.idx == 1)
-end
-
-function seq_layering_store_vert_hit(side_key, idx, vx, vy, locked)
-  state.seq_layering_vert_hits = state.seq_layering_vert_hits or {}
-  state.seq_layering_vert_hits[#state.seq_layering_vert_hits + 1] = {
-    side = side_key,
-    idx = idx,
-    x = vx,
-    y = vy,
-    locked = locked == true,
-  }
-end
-
-function seq_layering_hit_vert(mx, my)
-  local hits = state.seq_layering_vert_hits
-  mx, my = tonumber(mx), tonumber(my)
-  if not hits or not mx or not my then
-    return nil
-  end
-  local rad = SEQ_LAYER_VERT_DROP_R or 24.0
-  local r2 = rad * rad
-  local best, best_d = nil, r2
-  for i = 1, #hits do
-    local h = hits[i]
-    if seq_layering_vert_can_drop(h) then
-      local dx, dy = mx - h.x, my - h.y
-      local d = dx * dx + dy * dy
-      if d <= best_d then
-        best_d = d
-        best = h
-      end
-    end
-  end
-  return best
-end
-
-function seq_layering_pointer_over_window()
-  local rect = state.seq_layering_rect
-  if not rect then
-    return false
-  end
-  local mx, my = r.ImGui_GetMousePos(ctx)
-  mx, my = tonumber(mx), tonumber(my)
-  if not mx or not my then
-    return false
-  end
-  return mx >= (rect.x or 0) and my >= (rect.y or 0)
-    and mx <= (rect.x or 0) + (rect.w or 0)
-    and my <= (rect.y or 0) + (rect.h or 0)
-end
-
-function seq_layering_resolve_drop_vert()
-  if not sample_drag_active() then
-    state.seq_layering_drop_vert = nil
-    return nil
-  end
-  local mx, my = r.ImGui_GetMousePos(ctx)
-  local hit = seq_layering_hit_vert(mx, my)
-  if hit then
-    state.seq_layering_drop_vert = { side = hit.side, idx = hit.idx }
-    return hit
-  end
-  state.seq_layering_drop_vert = nil
-  return nil
-end
-
-function seq_layering_draw_vert_drop_cues(dl)
-  if not dl or not sample_drag_active() then
-    return
-  end
-  local hits = state.seq_layering_vert_hits
-  if not hits then
-    return
-  end
-  local drop = state.seq_layering_drop_vert
-  local pulse = (drag_pulse and drag_pulse()) or 0.5
-  for i = 1, #hits do
-    local h = hits[i]
-    if seq_layering_vert_can_drop(h) then
-      local is_hot = drop and drop.side == h.side and drop.idx == h.idx
-      if is_hot then
-        r.ImGui_DrawList_AddCircleFilled(dl, h.x, h.y, 16.0, seq_layer_col_alpha(UI_THEME.accent, 0.32 + 0.22 * pulse), 20)
-        r.ImGui_DrawList_AddCircle(dl, h.x, h.y, 16.0, 0x7CFF4AFF, 20, 2.4)
-        r.ImGui_DrawList_AddCircle(dl, h.x, h.y, 21.0, seq_layer_col_alpha(UI_THEME.accent, 0.55), 20, 1.5)
-      else
-        r.ImGui_DrawList_AddCircle(dl, h.x, h.y, 13.0, seq_layer_col_alpha(UI_THEME.accent, 0.40 + 0.18 * pulse), 18, 1.6)
-      end
-    end
-  end
-end
-
-function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
-  seq_normalize_slot_layers(slot)
-  local side = slot and slot.layers and slot.layers[side_key]
-  if type(side) ~= "table" then
-    side = seq_layer_default_side()
-    if slot and type(slot.layers) == "table" then
-      slot.layers[side_key] = side
-    end
-  end
-  if type(side.verts) ~= "table" then
-    side.verts = seq_layer_default_side().verts
-  end
-  if type(side.blend) ~= "table" then
-    side.blend = { 1.0, 0.0, 0.0 }
-  end
-  x, y, w, h = tonumber(x) or 0, tonumber(y) or 0, tonumber(w) or 200, tonumber(h) or 200
-  local ax, ay, bx, by, cx, cy = seq_layering_tri_geom(x, y, w, h)
-  local hot = state.seq_layering_hover_side == side_key
-  seq_layering_draw_polished_tri(dl, ax, ay, bx, by, cx, cy, hot)
-  local side_label = (side_key == "transient") and "TRANSIENT" or "SUSTAIN"
-  local slw = select(1, r.ImGui_CalcTextSize(ctx, side_label)) or 60
-  local dice_sz = 18.0
-  local label_x = x + (w - slw) * 0.5
-  r.ImGui_SetCursorScreenPos(ctx, label_x - dice_sz - 5, y + 1)
-  if draw_ui_button("seq_layer_global_" .. slot.id .. "_" .. side_key, nil, dice_sz, dice_sz, { icon = "dice5", style = "accent" }) then
-    if seq_layering_randomize_side(slot, side_key) then
-      save_config()
-      seq_layering_sync_arrange(slot)
-    end
-  end
-  if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
-    r.ImGui_SetTooltip(ctx, "Randomize all unlocked " .. side_key .. " samples")
-  end
-  r.ImGui_DrawList_AddText(dl, label_x, y + 3, UI_THEME.accent, side_label)
-
-  local mx, my = r.ImGui_GetMousePos(ctx)
-  local inside = false
-  if mx and my then
-    local rw, rv, ru = seq_layer_barycentric_raw(mx, my, ax, ay, bx, by, cx, cy)
-    inside = rw >= -0.02 and rv >= -0.02 and ru >= -0.02
-  end
-
-  local px, py = seq_layer_point_from_bary(side.blend, ax, ay, bx, by, cx, cy)
-  local mabx, maby = (ax + bx) * 0.5, (ay + by) * 0.5
-  local mbcx, mbcy = (bx + cx) * 0.5, (by + cy) * 0.5
-  local mcax, mcay = (cx + ax) * 0.5, (cy + ay) * 0.5
-  local div = seq_layer_col_alpha(UI_THEME.accent, hot and 0.45 or 0.28)
-  r.ImGui_DrawList_AddLine(dl, px, py, mabx, maby, div, 1.1)
-  r.ImGui_DrawList_AddLine(dl, px, py, mbcx, mbcy, div, 1.1)
-  r.ImGui_DrawList_AddLine(dl, px, py, mcax, mcay, div, 1.1)
-  local hs = 7.5
-  local hax, hay = px, py - hs * 0.72
-  local hbx, hby = px - hs * 0.62, py + hs * 0.42
-  local hcx, hcy = px + hs * 0.62, py + hs * 0.42
-  r.ImGui_DrawList_AddTriangleFilled(dl, hax, hay, hbx, hby, hcx, hcy, UI_THEME.accent)
-  r.ImGui_DrawList_AddLine(dl, hax, hay, hbx, hby, 0xE8FFEEFF, 1.2)
-  r.ImGui_DrawList_AddLine(dl, hbx, hby, hcx, hcy, 0xE8FFEEFF, 1.2)
-  r.ImGui_DrawList_AddLine(dl, hcx, hcy, hax, hay, 0xE8FFEEFF, 1.2)
-
-  local verts_xy = { { ax, ay }, { bx, by }, { cx, cy } }
-  local btn = 18.0
-  local btn_gap = 3.0
-  local changed = false
-  local controls_hot = false
-
-  for i = 1, 3 do
-    local vx, vy = verts_xy[i][1], verts_xy[i][2]
-    local vert = side.verts[i]
-    if type(vert) ~= "table" then
-      vert = { path = nil, name = nil, locked = (i == 1), vol = 1.0 }
-      side.verts[i] = vert
-    end
-    local sample = vert.path and find_sample_by_path(vert.path) or nil
-    local color = sample and get_sample_dot_color(sample) or 0x667788FF
-    r.ImGui_DrawList_AddCircleFilled(dl, vx, vy, 6.5, color, 16)
-    r.ImGui_DrawList_AddCircle(dl, vx, vy, 6.5, 0xE8FFEECC, 16, 1.3)
-
-    local cluster_w = btn * 3 + btn_gap * 2
-    local cluster_x, cluster_y
-    if i == 1 then
-      cluster_x = vx + 18
-      cluster_y = vy - btn * 0.5
-    elseif i == 2 then
-      cluster_x = vx - cluster_w - 14
-      cluster_y = vy + 10
-    else
-      cluster_x = vx + 14
-      cluster_y = vy + 10
-    end
-
-    local dice_id = "##seq_layer_dice_" .. slot.id .. "_" .. side_key .. "_" .. i
-    local lock_id = "##seq_layer_lock_" .. slot.id .. "_" .. side_key .. "_" .. i
-    local vol_id = "##seq_layer_vol_" .. slot.id .. "_" .. side_key .. "_" .. i
-    local dice_clicked, dice_hovered = seq_layering_icon_button(dice_id, dl, cluster_x, cluster_y, btn, btn, "dice", false)
-    local lock_clicked, lock_hovered = seq_layering_icon_button(lock_id, dl, cluster_x + btn + btn_gap, cluster_y, btn, btn, "lock", vert.locked)
-    local vol_changed, vol_hovered = seq_layering_vol_knob(vol_id, dl, cluster_x + (btn + btn_gap) * 2, cluster_y, btn, vert)
-    if dice_clicked then
-      if seq_layering_randomize_vert(slot, side_key, i) then
-        changed = true
-      end
-    end
-    if lock_clicked then
-      vert.locked = not vert.locked
-      seq_layering_sync_linked(slot, side_key)
-      changed = true
-    end
-    if vol_changed then
-      seq_layering_sync_linked(slot, side_key)
-      state.seq_layering_vol_drag = true
-    end
-    if dice_hovered or lock_hovered or vol_hovered then
-      controls_hot = true
-    end
-    if dice_hovered and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, vert.locked and "Unlock to randomize" or "Randomize this sample")
-    elseif lock_hovered and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, vert.locked and "Unlock this sample" or "Lock this sample")
-    end
-
-    local name = "empty"
-    if vert.path and vert.path ~= "" then
-      name = basename(vert.path)
-    elseif vert.name and vert.name ~= "" then
-      name = tostring(vert.name)
-    end
-    name = name:upper()
-    if #name > 18 then
-      name = name:sub(1, 14) .. "..."
-    end
-    local nw = select(1, r.ImGui_CalcTextSize(ctx, name)) or 40
-    local nx, ny
-    if i == 1 then
-      nx = vx - 12 - nw
-      ny = vy - 7
-    else
-      nx = cluster_x
-      ny = cluster_y + btn + 2
-    end
-    r.ImGui_DrawList_AddText(dl, nx, ny, sample and 0xF4F7FCFF or UI_THEME.text_mute, name)
-
-    local pct = math.floor(((side.blend[i] or 0) * 100) + 0.5)
-    local ptx, pty
-    if i == 1 then
-      ptx, pty = vx, vy + 20
-    elseif i == 2 then
-      ptx, pty = vx + 20, vy - 14
-    else
-      ptx, pty = vx - 20, vy - 14
-    end
-    seq_layering_draw_pct_badge(dl, ptx, pty, pct)
-
-    -- Vertex hit for preview. Sample drops use screen-space hit tests so they
-    -- still work when the map (or another window) has captured the mouse.
-    seq_layering_store_vert_hit(side_key, i, vx, vy, vert.locked == true)
-    r.ImGui_SetCursorScreenPos(ctx, vx - 14, vy - 14)
-    r.ImGui_InvisibleButton(ctx, "##seq_layer_vert_" .. slot.id .. "_" .. side_key .. "_" .. i, 28, 28)
-    if r.ImGui_IsItemHovered(ctx) then
-      controls_hot = true
-    end
-    if r.ImGui_IsItemClicked(ctx, 0) and sample and not sample_drag_active() then
-      state.seq_layering_ab = nil
-      preview_sample(sample)
-    end
-  end
-
-  local drag_id = side_key
-  local dragging = state.seq_layering_drag and state.seq_layering_drag.side == drag_id
-      and state.seq_layering_drag.slot_id == slot.id
-  local win_hovered = r.ImGui_IsWindowHovered and r.ImGui_IsWindowHovered(ctx) or true
-  if dragging then
-    if r.ImGui_IsMouseDown(ctx, 0) then
-      local ba, bb, bc = seq_layer_barycentric(mx, my, ax, ay, bx, by, cx, cy)
-      side.blend = { ba, bb, bc }
-      seq_layering_sync_linked(slot, side_key)
-    else
-      state.seq_layering_drag = nil
-      seq_layering_sync_linked(slot, side_key)
-      changed = true
-    end
-  elseif win_hovered and inside and not controls_hot and not sample_drag_active() then
-    state.seq_layering_hover_side = side_key
-    if r.ImGui_IsMouseClicked(ctx, 0) then
-      state.seq_layering_drag = { side = drag_id, slot_id = slot.id }
-      local ba, bb, bc = seq_layer_barycentric(mx, my, ax, ay, bx, by, cx, cy)
-      side.blend = { ba, bb, bc }
-      seq_layering_sync_linked(slot, side_key)
-    end
-  end
-
-  if state.seq_layering_vol_drag and not r.ImGui_IsMouseDown(ctx, 0) then
-    state.seq_layering_vol_drag = nil
-    changed = true
-  end
-
-  if changed then
-    save_config()
-    seq_layering_sync_arrange(slot)
-  end
-end
-
--- Drum-layering edits (blend drag, dice, lock, volume knobs, bias, link,
--- A/B output) mutate slot.layers directly. Open one undo session when a click
--- lands in the layering window (before any widget mutates) and close it once
--- all mouse buttons are released; unchanged sessions are dropped by end_seq_undo.
-function seq_layering_undo_maybe_begin()
-  if state.seq_layering_undo_owned or not state.seq_layering_hovered then
-    return
-  end
-  if not r.ImGui_IsMouseClicked then
-    return
-  end
-  if r.ImGui_IsMouseClicked(ctx, 0) or r.ImGui_IsMouseClicked(ctx, 1) then
-    if seq_undo_own_begin("Edit drum layering", { lazy_reaper = true }) then
-      state.seq_layering_undo_owned = true
-    end
-  end
-end
-
-function seq_layering_undo_maybe_end(force)
-  if not state.seq_layering_undo_owned then
-    return
-  end
-  if not force and r.ImGui_IsMouseDown
-      and (r.ImGui_IsMouseDown(ctx, 0) or r.ImGui_IsMouseDown(ctx, 1)) then
-    return
-  end
-  state.seq_layering_undo_owned = nil
-  if seq_undo_is_open() then
-    end_seq_undo()
-  end
-end
-
-function render_seq_layering_window()
-  seq_layering_undo_maybe_end()
-  if not state.seq_layering_slot_id then
-    state.seq_layering_hover_side = nil
-    state.seq_layering_hovered = false
-    state.seq_layering_rect = nil
-    state.seq_layering_vert_hits = nil
-    state.seq_layering_drop_vert = nil
-    return
-  end
-  local slot = find_seq_track_by_id(state.seq_layering_slot_id)
-  if not slot then
-    state.seq_layering_slot_id = nil
-    state.seq_layering_vert_hits = nil
-    state.seq_layering_drop_vert = nil
-    return
-  end
-  seq_layering_seed_from_track(slot)
-
-  local stored_w = tonumber(state.seq_layering_win_w) or 760
-  stored_w = math.max(620, math.min(1200, stored_w))
-  local ideal_h = seq_layering_ideal_content_h(math.max(400, stored_w - 20)) + 36
-  if r.ImGui_SetNextWindowSizeConstraints then
-    r.ImGui_SetNextWindowSizeConstraints(ctx, 620.0, 360.0, 1400.0, 1200.0)
-  end
-  if r.ImGui_Cond_Always then
-    r.ImGui_SetNextWindowSize(ctx, stored_w, ideal_h, r.ImGui_Cond_Always())
-  else
-    r.ImGui_SetNextWindowSize(ctx, stored_w, ideal_h, r.ImGui_Cond_FirstUseEver())
-  end
-
-  local title = "Drum Layering — " .. (slot.name or "Track")
-  local flags = 0
-  if r.ImGui_WindowFlags_NoCollapse then
-    flags = flags | r.ImGui_WindowFlags_NoCollapse()
-  end
-  if r.ImGui_WindowFlags_NoDocking then
-    flags = flags | r.ImGui_WindowFlags_NoDocking()
-  end
-  if r.ImGui_SetNextWindowCollapsed then
-    r.ImGui_SetNextWindowCollapsed(ctx, false, r.ImGui_Cond_Always and r.ImGui_Cond_Always() or 0)
-  end
-  local began_ok, visible, open = pcall(r.ImGui_Begin, ctx, title .. "###seq_layering_window", true, flags)
-  if not began_ok then
-    if log then log("Drum layering Begin failed: " .. tostring(visible)) end
-    return
-  end
-  if open == false then
-    state.seq_layering_slot_id = nil
-    state.seq_layering_drag = nil
-    state.seq_layering_hover_side = nil
-    state.seq_layering_hovered = false
-    state.seq_layering_rect = nil
-  end
-
-  if visible then
-    if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
-      local x, y = r.ImGui_GetWindowPos(ctx)
-      local w, h = r.ImGui_GetWindowSize(ctx)
-      state.seq_layering_rect = {
-        x = tonumber(x) or 0,
-        y = tonumber(y) or 0,
-        w = tonumber(w) or 0,
-        h = tonumber(h) or 0,
-      }
-    end
-    local hover_flags = 0
-    if r.ImGui_HoveredFlags_RootAndChildWindows then
-      hover_flags = r.ImGui_HoveredFlags_RootAndChildWindows()
-    end
-    state.seq_layering_hovered = r.ImGui_IsWindowHovered
-        and r.ImGui_IsWindowHovered(ctx, hover_flags)
-        or false
-    seq_layering_undo_maybe_begin()
-    local body_ok, body_err = pcall(seq_layering_render_body, slot)
-    if not body_ok and log then
-      log("Drum layering draw error: " .. tostring(body_err))
-    end
-    seq_layering_undo_maybe_end()
-    pcall(r.ImGui_End, ctx)
-  else
-    state.seq_layering_hovered = false
-  end
-end
-
-function seq_layering_draw_bias(dl, slot, x, y, w, h, linked)
-  if not slot or not dl then return end
-  seq_normalize_slot_layers(slot)
-  local bias = slot.layers.bias or 0.0
-  r.ImGui_SetCursorScreenPos(ctx, x, y)
-  r.ImGui_InvisibleButton(ctx, "##seq_layer_bias_" .. tostring(slot.id), w, h)
-  local hovered = r.ImGui_IsItemHovered(ctx)
-  local active = r.ImGui_IsItemActive(ctx)
-  local disabled = linked == true
-
-  if not disabled then
-    if hovered and r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0) then
-      slot.layers.bias = 0.0
-      state.seq_layering_bias_drag = nil
-      save_config()
-      seq_layering_sync_arrange(slot, { force_rebuild = true })
-    elseif active then
-      local dx = select(1, r.ImGui_GetMouseDelta(ctx))
-      if dx and dx ~= 0.0 then
-        state.seq_layering_bias_drag = true
-        -- Left shortens the transient; right lengthens it.
-        bias = bias + dx / math.max(36.0, w * 0.85)
-        if bias < -1.0 then bias = -1.0 elseif bias > 1.0 then bias = 1.0 end
-        slot.layers.bias = bias
-      end
-    elseif state.seq_layering_bias_drag and not (r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0)) then
-      state.seq_layering_bias_drag = nil
-      save_config()
-      seq_layering_sync_arrange(slot, { force_rebuild = true })
-    end
-  elseif state.seq_layering_bias_drag then
-    state.seq_layering_bias_drag = nil
-  end
-
-  local mid_x = x + w * 0.5
-  local u = ((slot.layers.bias or 0.0) + 1.0) * 0.5
-  local thumb_x = x + 4 + u * math.max(1.0, w - 8)
-  local fill_col = disabled and 0x3A4A40FF or UI_THEME.accent
-  local bg = (hovered or active) and not disabled and UI_THEME.surface_hvr or UI_THEME.surface
-  local edge = (hovered or active) and not disabled and UI_THEME.accent or UI_THEME.border
-  ui_draw_panel(dl, x, y, x + w, y + h, 5.0, bg, edge, hovered and not disabled, active and not disabled)
-  r.ImGui_DrawList_AddLine(dl, mid_x, y + 3, mid_x, y + h - 3, 0xFFFFFF28, 1.0)
-  if thumb_x < mid_x then
-    r.ImGui_DrawList_AddRectFilled(dl, thumb_x, y + 4, mid_x, y + h - 4, fill_col, 2.0)
-  elseif thumb_x > mid_x then
-    r.ImGui_DrawList_AddRectFilled(dl, mid_x, y + 4, thumb_x, y + h - 4, fill_col, 2.0)
-  end
-  r.ImGui_DrawList_AddRectFilled(dl, thumb_x - 3, y + 2, thumb_x + 3, y + h - 2, fill_col, 2.0)
-
-  local label = "BIAS"
-  local lw = select(1, r.ImGui_CalcTextSize(ctx, label)) or 22
-  r.ImGui_DrawList_AddText(dl, x + (w - lw) * 0.5, y + h + 3,
-    disabled and UI_THEME.text_mute or UI_THEME.text_dim, label)
-
-  if hovered and r.ImGui_SetTooltip then
-    if disabled then
-      r.ImGui_SetTooltip(ctx, "Unlink to split transient / sustain")
-    else
-      local split = seq_layering_split_sec(slot)
-      r.ImGui_SetTooltip(ctx, string.format(
-        "Transient  %.0f ms\nLeft: shorter   Right: longer\nDouble-click to reset",
-        (split or 0.0) * 1000.0
-      ))
-    end
-  end
-end
-
-function seq_layering_render_body(slot)
-  local prev_hover = state.seq_layering_hover_side
-  state.seq_layering_hover_side = nil
-  state.seq_layering_vert_hits = {}
-  if not sample_drag_active() then
-    state.seq_layering_drop_vert = nil
-  end
-
-  seq_normalize_slot_layers(slot)
-  local linked = slot.layers and slot.layers.linked == true
-  local dl = r.ImGui_GetWindowDrawList and r.ImGui_GetWindowDrawList(ctx)
-  if not dl and r.ImGui_GetForegroundDrawList then
-    dl = r.ImGui_GetForegroundDrawList(ctx)
-  end
-  local avail_w = select(1, r.ImGui_GetContentRegionAvail(ctx)) or 700
-  avail_w = tonumber(avail_w) or 700
-  if avail_w < 200 then avail_w = 200 end
-  if r.ImGui_GetWindowSize then
-    local win_w = select(1, r.ImGui_GetWindowSize(ctx))
-    win_w = tonumber(win_w)
-    if win_w and win_w > 0 then
-      state.seq_layering_win_w = win_w
-    end
-  end
-
-  local wave_h = SEQ_LAYER_WAVE_H
-  local col_w = (avail_w - SEQ_LAYER_LINK_W) * 0.5
-  if col_w < 160 then col_w = 160 end
-  local tri_h = select(8, seq_layering_tri_geom(0, 0, col_w, 800)) or 180
-  local block_h = SEQ_LAYER_PAD_TOP + tri_h + SEQ_LAYER_PAD_BOT
-  local wx, wy = 0, 0
-  if r.ImGui_GetCursorScreenPos then
-    wx, wy = r.ImGui_GetCursorScreenPos(ctx)
-  end
-  wx, wy = tonumber(wx) or 0, tonumber(wy) or 0
-  if r.ImGui_PushStyleVar and r.ImGui_StyleVar_ItemSpacing then
-    r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 0, 0)
-  end
-  if dl then
-    seq_layering_draw_waveforms(dl, slot, wx, wy, avail_w, wave_h, prev_hover)
-  end
-  r.ImGui_Dummy(ctx, avail_w, wave_h)
-
-  local left_x, left_y = wx, wy + wave_h
-  r.ImGui_Dummy(ctx, avail_w, block_h)
-  if r.ImGui_PopStyleVar then
-    r.ImGui_PopStyleVar(ctx, 1)
-  end
-
-  if dl then
-    pcall(seq_layering_draw_triangle, dl, slot, "transient", left_x, left_y, col_w, block_h)
-    pcall(seq_layering_draw_triangle, dl, slot, "sustain", left_x + col_w + SEQ_LAYER_LINK_W, left_y, col_w, block_h)
-    if sample_drag_active() then
-      seq_layering_resolve_drop_vert()
-      seq_layering_draw_vert_drop_cues(dl)
-    end
-  end
-
-  local link_sz = 28.0
-  local bias_w, bias_h = 80.0, 18.0
-  local link_x = left_x + col_w + (SEQ_LAYER_LINK_W - link_sz) * 0.5
-  local cluster_h = link_sz + 22 + bias_h + 14
-  local link_y = left_y + math.max(8.0, (block_h - cluster_h) * 0.5)
-  r.ImGui_SetCursorScreenPos(ctx, link_x, link_y)
-  if draw_ui_button("seq_layer_link_" .. slot.id, nil, link_sz, link_sz, {
-    icon = "link",
-    style = linked and "accent" or "default",
-    selected = linked,
-  }) then
-    seq_layering_set_linked(slot, not linked)
-    save_config()
-    seq_layering_sync_arrange(slot)
-  end
-  if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
-    r.ImGui_SetTooltip(ctx, linked
-      and "Unlink transient and sustain"
-      or "Link transient and sustain — use whole samples, no split")
-  end
-  local link_caption = linked and "LINKED" or "LINK"
-  local cap_w = select(1, r.ImGui_CalcTextSize(ctx, link_caption)) or 28
-  if dl then
-    r.ImGui_DrawList_AddText(dl, left_x + col_w + (SEQ_LAYER_LINK_W - cap_w) * 0.5, link_y + link_sz + 4,
-      linked and UI_THEME.accent or UI_THEME.text_dim, link_caption)
-  end
-
-  local bias_x = left_x + col_w + (SEQ_LAYER_LINK_W - bias_w) * 0.5
-  local bias_y = link_y + link_sz + 22
-  if dl then
-    seq_layering_draw_bias(dl, slot, bias_x, bias_y, bias_w, bias_h, linked)
-  end
 end
