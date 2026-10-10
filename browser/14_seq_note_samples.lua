@@ -78,16 +78,18 @@ function swap_seq_track_sample_neighbor(slot, direction)
   local neighbor = find_map_neighbor_sample(current, direction, slot.sample_tag)
   if not neighbor then
     if slot.sample_tag and seq_trim_text(slot.sample_tag) ~= "" then
-      log("No more samples with tag '" .. slot.sample_tag .. "' " .. (direction < 0 and "to the left" or "to the right") .. " on the map")
+      sm_notify("No more samples with tag '" .. slot.sample_tag .. "' " .. (direction < 0 and "to the left" or "to the right") .. " on the map", "info")
     else
-      log("No similar sample " .. (direction < 0 and "to the left" or "to the right") .. " on the map")
+      sm_notify("No similar sample " .. (direction < 0 and "to the left" or "to the right") .. " on the map", "info")
     end
     return false
   end
 
   local persist = not seq_slot_in_swap_mode(slot)
   local own = persist and seq_undo_own_begin("Swap sequencer sample")
-  seq_assign_sample_for_context(slot, neighbor, persist)
+  -- Arrow-key browsing auditions neighbours; it doesn't save into the
+  -- selected candidate square.
+  seq_without_candidate_save(seq_assign_sample_for_context, slot, neighbor, persist)
   preview_seq_track_sample(slot)
   if own then
     end_seq_undo("Swap sequencer sample")
@@ -837,9 +839,9 @@ function seq_begin_note_sample_pick()
   local targets = seq_collect_note_sample_pick_targets()
   if #targets == 0 then
     if seq_has_razors() then
-      log("No notes in the razor to swap")
+      sm_notify("No notes in the razor to swap", "info")
     else
-      log("Hover a sequencer note or draw a razor, then Shift+V to pick a sample")
+      sm_notify("Hover a sequencer note or draw a razor, then Shift+V to pick a sample", "info")
     end
     return false
   end

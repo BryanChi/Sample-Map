@@ -676,7 +676,7 @@ function render_seq_track_sample_candidates(dl, slot, layout)
           r.ImGui_SetTooltip(ctx, "Click to remove")
         elseif seq_candidate_entry_taken(entry) then
           r.ImGui_SetTooltip(ctx, (entry.name or "Sample")
-            .. (is_active and "\nSelected — sample changes save here" or "\nClick to recall")
+            .. (is_active and "\nSelected — samples you pick or drop save here" or "\nClick to recall")
             .. "\nDrag to drop · Alt-click to remove")
         else
           r.ImGui_SetTooltip(ctx, "Click to copy the current sample here")
