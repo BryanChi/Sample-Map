@@ -285,20 +285,43 @@ function seq_note_edit_mode_tooltip(def)
   )
 end
 
-function seq_segmented_bar_metrics(items, h)
+SEQ_SEG_ICON_W = 16
+SEQ_SEG_SEP_W = 9
+SEQ_SEG_LEAD_W = 22
+
+-- Per-cell widths. Cells size to their own content (icon + label) unless
+-- opts.uniform is set, so long labels don't inflate every cell in the bar.
+-- An item with sep_before starts a sub-group: a wider gap with a rule in it.
+function seq_segmented_bar_metrics(items, h, opts)
   h = h or 26
+  opts = opts or {}
   local rounding = 7.0
-  local max_tw = 0
-  for _, it in ipairs(items or {}) do
-    local tw = select(1, r.ImGui_CalcTextSize(ctx, it.label or "")) or 0
-    if tw > max_tw then
-      max_tw = tw
+  local widths = {}
+  local max_w = 0
+  for i, it in ipairs(items or {}) do
+    local w
+    if it.icon_only then
+      w = math.max(24, h - 2)
+    else
+      local tw = select(1, r.ImGui_CalcTextSize(ctx, it.label or "")) or 0
+      w = tw + 14 + (it.icon and SEQ_SEG_ICON_W or 0)
+      w = math.max(30, math.floor(w + 0.5))
+    end
+    widths[i] = w
+    if w > max_w then max_w = w end
+  end
+  if opts.uniform then
+    for i = 1, #widths do widths[i] = max_w end
+  end
+  local side = 3
+  local total = side * 2 + (opts.lead_icon and SEQ_SEG_LEAD_W or 0)
+  for i, it in ipairs(items or {}) do
+    total = total + widths[i]
+    if it.sep_before and i > 1 then
+      total = total + SEQ_SEG_SEP_W
     end
   end
-  local cell_w = math.max(30, math.floor(max_tw + 12 + 0.5))
-  local n = #(items or {})
-  local side = math.max(math.floor(rounding + 0.5), 6)
-  return side * 2 + cell_w * n, cell_w, side, h, rounding
+  return total, widths, side, h, rounding
 end
 
 function seq_draw_segmented_bar(bar_id, items, h, opts)
@@ -309,7 +332,7 @@ function seq_draw_segmented_bar(bar_id, items, h, opts)
   if n == 0 then
     return nil
   end
-  local group_w, cell_w, side, _, rounding = seq_segmented_bar_metrics(items, h)
+  local group_w, widths, side, _, rounding = seq_segmented_bar_metrics(items, h, opts)
   if not opts.first then
     imgui_same_line_if_fits(group_w, opts.gap or 8)
   end
@@ -318,7 +341,6 @@ function seq_draw_segmented_bar(bar_id, items, h, opts)
   gx, gy = math.floor(gx + 0.5), math.floor(gy + 0.5)
   local x1, y1 = gx + group_w, gy + h
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  local content_x0 = gx + side
   local inner_y0 = gy + 2
   local inner_y1 = y1 - 2
 
@@ -329,8 +351,19 @@ function seq_draw_segmented_bar(bar_id, items, h, opts)
   r.ImGui_DrawList_AddRect(dl, gx + 0.5, gy + 0.5, x1 - 0.5, y1 - 0.5, UI_THEME.border, rounding, 0, 1.0)
 
   local clicked_item = nil
+  local sx0 = gx + side
+  if opts.lead_icon then
+    -- Non-interactive caption glyph naming what the bar controls.
+    ui_button_draw_icon(dl, opts.lead_icon, sx0 + SEQ_SEG_LEAD_W * 0.5, gy + h * 0.5, math.min(h, 24), UI_THEME.text_mute)
+    sx0 = sx0 + SEQ_SEG_LEAD_W
+  end
   for i, it in ipairs(items) do
-    local sx0 = content_x0 + (i - 1) * cell_w
+    if it.sep_before and i > 1 then
+      local lx = sx0 + SEQ_SEG_SEP_W * 0.5
+      r.ImGui_DrawList_AddLine(dl, lx, inner_y0 + 4, lx, inner_y1 - 4, UI_THEME.border_hvr, 1.0)
+      sx0 = sx0 + SEQ_SEG_SEP_W
+    end
+    local cell_w = widths[i]
     local sx1 = sx0 + cell_w
     r.ImGui_SetCursorScreenPos(ctx, sx0, inner_y0)
     r.ImGui_InvisibleButton(ctx, "##" .. tostring(bar_id) .. "_" .. tostring(it.id), cell_w, inner_y1 - inner_y0)
@@ -370,22 +403,28 @@ function seq_draw_segmented_bar(bar_id, items, h, opts)
 
     if i < n then
       local nxt = items[i + 1]
-      if not it.selected and not (nxt and nxt.selected) then
+      if not it.selected and not (nxt and (nxt.selected or nxt.sep_before)) then
         r.ImGui_DrawList_AddLine(dl, sx1, inner_y0 + 5, sx1, inner_y1 - 5, 0xFFFFFF14, 1.0)
       end
     end
 
-    local label = it.label or ""
-    local tw, th = r.ImGui_CalcTextSize(ctx, label)
-    local text_col = it.selected and 0xF7FFF9FF or (hovered and UI_THEME.text or UI_THEME.text_dim)
     local press = (pressed and not it.selected) and 1.0 or 0.0
-    r.ImGui_DrawList_AddText(
-      dl,
-      sx0 + (cell_w - tw) * 0.5,
-      inner_y0 + ((inner_y1 - inner_y0) - th) * 0.5 + press,
-      text_col,
-      label
-    )
+    local text_col = it.selected and 0xF7FFF9FF or (hovered and UI_THEME.text or UI_THEME.text_dim)
+    local mid_y = inner_y0 + (inner_y1 - inner_y0) * 0.5 + press
+    -- Selected icons take the cell's accent so the active mode reads at a glance.
+    local icon_col = it.selected and accent or text_col
+    if it.icon_only then
+      ui_button_draw_icon(dl, it.icon, sx0 + cell_w * 0.5, mid_y, h, icon_col)
+    else
+      local label = it.label or ""
+      local tw, th = r.ImGui_CalcTextSize(ctx, label)
+      local icon_w = it.icon and SEQ_SEG_ICON_W or 0
+      local content_x = sx0 + (cell_w - tw - icon_w) * 0.5
+      if it.icon then
+        ui_button_draw_icon(dl, it.icon, content_x + icon_w * 0.5 - 1, mid_y, math.min(h, 24), icon_col)
+      end
+      r.ImGui_DrawList_AddText(dl, content_x + icon_w, mid_y - th * 0.5, text_col, label)
+    end
 
     if hovered and it.tooltip then
       r.ImGui_SetTooltip(ctx, it.tooltip)
@@ -393,6 +432,7 @@ function seq_draw_segmented_bar(bar_id, items, h, opts)
     if clicked then
       clicked_item = it
     end
+    sx0 = sx1
   end
 
   r.ImGui_SetCursorScreenPos(ctx, gx + group_w, gy)
@@ -434,6 +474,29 @@ function seq_draw_razor_badge(btn_h)
   end
 end
 
+-- Toolbar order for the note edit modes, in sub-groups: level/placement,
+-- sample playback, rhythm, sample choice, protection. Modes missing here are
+-- appended at the end so new lanes still show up.
+SEQ_EDIT_MODE_GROUPS = {
+  { "volume", "pan", "pitch" },
+  { "start", "stretch", "decay" },
+  { "stutter" },
+  { "sample_vary", "vary_filter" },
+  { "locked" },
+}
+SEQ_EDIT_MODE_ICONS = {
+  volume = "gain",
+  pan = "pan",
+  pitch = "pitch",
+  start = "start",
+  stretch = "stretch",
+  decay = "decay",
+  stutter = "stutter",
+  sample_vary = "vary",
+  vary_filter = "filter",
+  locked = "lock",
+}
+
 function render_seq_note_edit_mode_bar(btn_h)
   btn_h = btn_h or 26
   local active_def = get_seq_note_edit_mode_def()
@@ -441,20 +504,50 @@ function render_seq_note_edit_mode_bar(btn_h)
     {
       id = "notes",
       label = "Notes",
+      icon = "note",
+      icon_only = active_def ~= nil,
       selected = not active_def,
       accent = seq_edit_mode_accent(nil),
       tooltip = seq_note_edit_mode_tooltip(nil),
     },
   }
+  local by_key, placed = {}, {}
   for _, def in ipairs(seq_note_edit_mode_defs()) do
+    by_key[def.key] = def
+  end
+  local function add(def, sep_before)
+    placed[def.key] = true
+    local selected = active_def and active_def.key == def.key
+    local icon = SEQ_EDIT_MODE_ICONS[def.key]
     items[#items + 1] = {
       id = def.key,
       key = def.key,
       label = def.label,
-      selected = active_def and active_def.key == def.key,
+      icon = icon,
+      -- Only the active mode spells out its name; the rest stay icon-only
+      -- (name + hotkey in the tooltip) so the bar stays compact.
+      icon_only = icon ~= nil and not selected,
+      sep_before = sep_before,
+      selected = selected,
       accent = seq_edit_mode_accent(def.key),
       tooltip = seq_note_edit_mode_tooltip(def),
     }
+  end
+  for _, group in ipairs(SEQ_EDIT_MODE_GROUPS) do
+    local first = true
+    for _, key in ipairs(group) do
+      if by_key[key] then
+        add(by_key[key], first)
+        first = false
+      end
+    end
+  end
+  local first_extra = true
+  for _, def in ipairs(seq_note_edit_mode_defs()) do
+    if not placed[def.key] then
+      add(def, first_extra)
+      first_extra = false
+    end
   end
   local clicked = seq_draw_segmented_bar("seq_edit_mode", items, btn_h, { gap = 6 })
   if clicked then
@@ -474,14 +567,6 @@ function render_seq_top_toolbar()
   local inner_h = btn_h - 6
   local pocket_pad = 4
   local inner_gap = 3
-  local grids = {
-    { "1/4", 1.0, "seq_grid_4" },
-    { "1/8", 0.5, "seq_grid_8" },
-    { "1/16", 0.25, "seq_grid_16" },
-    { "1/32", 0.125, "seq_grid_32" },
-    { "1/8T", 1.0 / 3.0, "seq_grid_8t" },
-    { "1/16T", 1.0 / 6.0, "seq_grid_16t" },
-  }
 
   local function toolbar_button(id, label, opts, tooltip)
     opts = opts or {}
@@ -503,24 +588,9 @@ function render_seq_top_toolbar()
     r.ImGui_DrawList_AddLine(dl, x, y0 + 5, x, y0 + btn_h - 5, UI_THEME.border, 1.0)
   end
 
-  local grid_items = {}
-  for _, grid in ipairs(grids) do
-    grid_items[#grid_items + 1] = {
-      id = grid[3],
-      label = grid[1],
-      selected = math.abs((state.seq_grid_qn or 0.25) - grid[2]) < 0.0001,
-      accent = UI_THEME.accent,
-      tooltip = "Grid " .. grid[1],
-      qn = grid[2],
-    }
-  end
-  local grid_clicked = seq_draw_segmented_bar("seq_grid", grid_items, btn_h, { first = true, gap = 8 })
-  if grid_clicked then
-    state.seq_grid_qn = grid_clicked.qn
-    save_config()
-  end
-
-  toolbar_divider()
+  -- Layout, left to right:
+  --   [region | pattern | groove] [kit]  |  [grid | T]  |  [edit modes] [razor]  ...  [sync peek]
+  -- Content (what plays) first, then editing, with view toggles pinned right.
   local focus_region = get_selected_seq_region()
   if state.seq_region_rename and focus_region and state.seq_region_rename.region_id ~= focus_region.id then
     seq_commit_region_rename()
@@ -545,11 +615,10 @@ function render_seq_top_toolbar()
     local tw = select(1, r.ImGui_CalcTextSize(ctx, measure)) or 0
     name_w = math.max(150, tw + 28)
   end
-  local pat_w = calc_compact_chip_width(pat_btn_label)
-  local grv_w = calc_compact_chip_width(groove_label)
+  local pat_w = calc_compact_chip_width(pat_btn_label) + 16
+  local grv_w = calc_compact_chip_width(groove_label) + 16
   local pocket_w = pocket_pad + pat_w + inner_gap + grv_w + pocket_pad
   local group_w = name_w + pocket_w
-  imgui_same_line_if_fits(group_w, 8)
   do
     local gx, gy = r.ImGui_GetCursorScreenPos(ctx)
     local dl = r.ImGui_GetWindowDrawList(ctx)
@@ -677,6 +746,7 @@ function render_seq_top_toolbar()
     r.ImGui_SetCursorScreenPos(ctx, gx + name_w + pocket_pad, inner_y)
     if draw_ui_button("seq_pattern_popup_open", pat_btn_label, nil, inner_h, {
       compact = true,
+      lead_icon = "steps",
       style = drop_beacon and "accent" or "primary",
       selected = drop_beacon or state.seq_pattern_window_open,
     }) then
@@ -695,6 +765,7 @@ function render_seq_top_toolbar()
     r.ImGui_SameLine(ctx, 0, inner_gap)
     if draw_ui_button("seq_groove_popup_open", groove_label, nil, inner_h, {
       compact = true,
+      lead_icon = "groove",
       style = "primary",
       selected = groove_active,
     }) then
@@ -709,16 +780,114 @@ function render_seq_top_toolbar()
   end
   render_seq_groove_popup()
 
-  toolbar_divider()
-  imgui_same_line_if_fits(calc_compact_chip_width("Kit"), 4)
-  if toolbar_button("seq_kit_random_popup_open", "Kit", { style = "primary" }, "Randomize Kit") then
+  imgui_same_line_if_fits(calc_compact_chip_width("Kit") + 16, 6)
+  if toolbar_button("seq_kit_random_popup_open", "Kit", { style = "primary", lead_icon = "dice5" }, "Randomize Kit") then
     open_seq_kit_random_popup()
   end
   render_seq_kit_random_popup()
 
-  imgui_same_line_if_fits(calc_compact_chip_width("Sync"), 4)
+  toolbar_divider()
+  render_seq_grid_bar(btn_h)
+
+  toolbar_divider()
+  render_seq_note_edit_mode_bar(btn_h)
+
+  render_seq_view_toggles(btn_h)
+end
+
+-- Grid: straight values plus a triplet toggle, so 1/4T and 1/32T are reachable
+-- without doubling the number of cells.
+SEQ_GRID_STRAIGHT = {
+  { "1/4", 1.0 },
+  { "1/8", 0.5 },
+  { "1/16", 0.25 },
+  { "1/32", 0.125 },
+}
+
+function seq_grid_split(qn)
+  qn = qn or 0.25
+  for _, g in ipairs(SEQ_GRID_STRAIGHT) do
+    if math.abs(qn - g[2]) < 0.0001 then
+      return g[2], false
+    end
+    if math.abs(qn - g[2] * 2.0 / 3.0) < 0.0001 then
+      return g[2], true
+    end
+  end
+  return nil, false
+end
+
+function render_seq_grid_bar(btn_h)
+  local base, triplet = seq_grid_split(state.seq_grid_qn)
+  local items = {}
+  for _, g in ipairs(SEQ_GRID_STRAIGHT) do
+    items[#items + 1] = {
+      id = "seq_grid_" .. g[1],
+      label = g[1],
+      qn = g[2],
+      selected = base ~= nil and math.abs(base - g[2]) < 0.0001,
+      accent = UI_THEME.accent,
+      tooltip = "Grid " .. g[1] .. (triplet and " triplet" or ""),
+    }
+  end
+  items[#items + 1] = {
+    id = "seq_grid_triplet",
+    label = "T",
+    triplet_toggle = true,
+    sep_before = true,
+    selected = triplet,
+    accent = 0xFFC861FF,
+    tooltip = triplet and "Triplet grid on (click for straight)" or "Triplet grid",
+  }
+  local clicked = seq_draw_segmented_bar("seq_grid", items, btn_h, { gap = 6, lead_icon = "grid" })
+  if clicked then
+    local cur_base = base or 0.25
+    if clicked.triplet_toggle then
+      state.seq_grid_qn = triplet and cur_base or (cur_base * 2.0 / 3.0)
+    else
+      state.seq_grid_qn = triplet and (clicked.qn * 2.0 / 3.0) or clicked.qn
+    end
+    save_config()
+  end
+end
+
+-- View toggles sit at the right edge when the row has room for them.
+function render_seq_view_toggles(btn_h)
   local sync_on = state.seq_follow_arrange == true
-  if toolbar_button("seq_sync", "Sync", { style = sync_on and "accent" or "default", selected = sync_on }, "Sync to Arrange") then
+  local peek_on = state.seq_follow_hovered_item == true
+  local items = {
+    {
+      id = "sync",
+      label = "Sync",
+      icon = "link",
+      icon_only = true,
+      selected = sync_on,
+      accent = UI_THEME.accent,
+      tooltip = sync_on and "Sync to Arrange: on\nThe sequencer view follows the arrange view." or "Sync to Arrange: off\nClick to make the sequencer view follow the arrange view.",
+    },
+    {
+      id = "peek",
+      label = "Peek",
+      icon = "eye",
+      icon_only = true,
+      selected = peek_on,
+      accent = UI_THEME.accent,
+      tooltip = peek_on and "Peek: on\nFollows the notes you hover in the arrange." or "Peek: off\nClick to follow the notes you hover in the arrange.",
+    },
+  }
+  local w = seq_segmented_bar_metrics(items, btn_h)
+  local right = imgui_window_right_x()
+  local last_x2 = r.ImGui_GetItemRectMax(ctx)
+  if last_x2 + 16 + w <= right then
+    r.ImGui_SameLine(ctx, 0, 0)
+    local _, cy = r.ImGui_GetCursorScreenPos(ctx)
+    r.ImGui_SetCursorScreenPos(ctx, right - w, cy)
+  end
+  local clicked = seq_draw_segmented_bar("seq_view", items, btn_h, { first = true })
+  if not clicked then
+    return
+  end
+  if clicked.id == "sync" then
     state.seq_follow_arrange = not sync_on
     seq_timeline_scroll_stop()
     if state.seq_follow_arrange then
@@ -728,18 +897,10 @@ function render_seq_top_toolbar()
       state.seq_view_start_qn = arrange_start_qn
       state.seq_view_span_qn = math.max(state.seq_grid_qn or 0.25, arrange_end_qn - arrange_start_qn)
     end
-    save_config()
-  end
-
-  imgui_same_line_if_fits(calc_compact_chip_width("Peek"), 4)
-  local peek_on = state.seq_follow_hovered_item == true
-  if toolbar_button("seq_peek_item", "Peek", { style = peek_on and "accent" or "default", selected = peek_on }, "Follow hovered notes in the arrange") then
+  else
     state.seq_follow_hovered_item = not peek_on
-    save_config()
   end
-
-  toolbar_divider()
-  render_seq_note_edit_mode_bar(btn_h)
+  save_config()
 end
 
 function seq_param_value_from_y(def, y, y0, y1, step_qn)
