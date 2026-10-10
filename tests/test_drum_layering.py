@@ -193,7 +193,7 @@ function tri(side_key)
   local avail = 776
   local col_w = seq_layering_col_w(avail)
   local x = 52 + (side_key == "sustain" and (col_w + SEQ_LAYER_LINK_W) or 0)
-  local y = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H
+  local y = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H + seq_layering_lanes_h(SLOT)
   local ax, ay, bx, by, cx, cy = seq_layering_tri_geom(x, y, col_w, seq_layering_card_h(col_w))
   return { ax, ay, bx, by, cx, cy }
 end
@@ -690,7 +690,7 @@ def test_xfade_pill_drag_and_reset():
     _render_ok(L, 1)
     got = L.execute(r'''
       local col_w = seq_layering_col_w(776)
-      local y = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H
+      local y = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H + seq_layering_lanes_h(SLOT)
       local card_h = seq_layering_card_h(col_w)
       local link_sz, bias_h = 30.0, 16.0
       local cluster_h = link_sz + 22.0 + (bias_h + 40.0) * 2.0
@@ -1053,7 +1053,7 @@ def test_gain_fader_drag_in_the_card_header():
     _render_ok(L, 1)
     got = L.execute(r'''
       local col_w = seq_layering_col_w(776)
-      local x, y = 52, 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H
+      local x, y = 52, 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H + seq_layering_lanes_h(SLOT)
       local bx = x + col_w - 8.0 - 20.0 - 2 * 24.0  -- dice
       local bar_x1 = bx - 10.0
       MOUSE.x, MOUSE.y = bar_x1 - 20, y + SEQ_LAYER_CARD_HEAD_H * 0.5
@@ -1114,6 +1114,11 @@ def _fake_render(L):
       end
       SCANS = {}
       start_scan = function(folder) SCANS[#SCANS + 1] = folder end
+      enqueue_scan = start_scan
+      reaper.PCM_Source_CreateFromFile = function() return {} end
+      reaper.GetMediaSourceLength = function() return 0.6, false end
+      LAYOUTS = 0
+      layout_samples = function() LAYOUTS = LAYOUTS + 1 end
       state.folders = { RES .. "/lib" }
     ''')
 
@@ -1178,7 +1183,7 @@ def test_commit_glues_starts_a_fresh_stack_and_keeps_versions():
       local folder = seq_layering_render_folder()
       local entry = seq_layering_commit_glue(SLOT)
       local first = {
-        folder = folder, scanned = SCANS[1], file_ok = io.open(entry.path, "rb") ~= nil,
+        folder = folder, scans = #SCANS, file_ok = io.open(entry.path, "rb") ~= nil,
         track = SLOT.sample_path, fresh = not seq_layering_geometry_active(SLOT),
         top = SLOT.layers.transient.verts[1].path, stack_b = entry.stack.layers.transient.verts[2].path,
         stack_sample = entry.stack.sample_path,
@@ -1200,7 +1205,7 @@ def test_commit_glues_starts_a_fresh_stack_and_keeps_versions():
     ''')
     first, refused, n, chained, on_g1, sample, b, c, cur = got
     assert first.folder.endswith("/lib/Layered Renders")
-    assert first.scanned == first.folder and first.file_ok
+    assert first.scans == 0 and first.file_ok
     assert first.track.startswith(first.folder) and first.top == first.track and first.fresh
     assert first.stack_b == "/s/click.wav" and first.stack_sample == "/s/kick.wav"
     assert refused and n == 2 and chained and on_g1
@@ -1263,3 +1268,90 @@ def test_render_folder_setting():
     assert got[0] == "/lib/drums/Layered Renders"
     assert got[1] == "/elsewhere/glues"
     assert got[2] == "/lib/drums/Layered Renders"
+
+
+
+def test_glue_joins_the_library_quietly():
+    L = _runtime()
+    _fake_render(L)
+    got = L.execute(r'''
+      A.x, A.y = 0.3, 0.6
+      local n0 = #state.samples
+      local entry = seq_layering_commit_glue(SLOT)
+      local s = find_sample_by_path(entry.path)
+      local has_kick = false
+      for _, t in ipairs(s and s.tags or {}) do if t == "kick" then has_kick = true end end
+      local queued = false
+      for _, p in ipairs(state.analyzer_queue) do if p == s.path then queued = true end end
+      local pending = sm_quiet_analysis_pending()
+      -- A worker takes the job off the queue, then its result lands.
+      for i = #state.analyzer_queue, 1, -1 do
+        if state.analyzer_queue[i] == s.path then table.remove(state.analyzer_queue, i) end
+      end
+      sm_quiet_analysis_landed(s.path)
+      return #state.samples - n0, has_kick, math.abs(s.x - 0.3) < 0.01 and math.abs(s.y - 0.6) < 0.01,
+        queued, pending, LAYOUTS, sm_quiet_analysis_pending(), #SCANS, state.scan_session == nil
+    ''')
+    added, has_kick, near, queued, pending, layouts, still, scans, no_session = got
+    assert added == 1 and has_kick and near
+    assert queued and pending is True
+    assert layouts == 1 and still is False
+    assert scans == 0 and no_session
+
+
+def test_corner_lanes_in_the_window_set_length_and_fade():
+    L = _runtime()
+    _render_ok(L, 1)
+    got = L.execute(r'''
+      local lanes = seq_layering_lanes(SLOT)
+      local k, lane
+      for i, l in ipairs(lanes) do
+        if l.owners[1].side == "sustain" and #l.owners == 1 then k, lane = i, l end
+      end
+      local ix, iw = 62, 776 - 20
+      local _, dur = seq_layering_mix_peaks(SLOT, math.floor(iw))
+      local y0 = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H - 4.0
+      local ly = y0 + (k - 1) * (SEQ_LAYER_LANE_H + SEQ_LAYER_LANE_GAP)
+      local t_end = lane.t_off + lane.len
+      MOUSE.x, MOUSE.y = ix + t_end / dur * iw, ly + 3 + 14
+      frame()
+      local hint = state.seq_layering_hint
+      MOUSE.down, MOUSE.clicked = true, true
+      frame()
+      MOUSE.x = ix + 0.2 / dur * iw
+      frame()
+      local syncs0 = SYNCS
+      MOUSE.down = false
+      frame()
+      local v = SLOT.layers[lane.owners[1].side].verts[lane.owners[1].idx]
+      local len = v.len
+      -- Fade grip on top, at the (new) end: drag 50 ms left.
+      local ex = ix + 0.2 / dur * iw
+      MOUSE.x, MOUSE.y = ex - 7, ly + 3 + 2
+      frame()
+      MOUSE.down, MOUSE.clicked = true, true
+      frame()
+      MOUSE.x = ix + 0.15 / dur * iw
+      frame()
+      MOUSE.down = false
+      frame()
+      return #lanes, hint, len, SYNCS > syncs0, v.fade
+    ''')
+    n, hint, length, synced, fade = got
+    assert n >= 3
+    assert hint and "length" in hint
+    assert length and abs(length - 0.2) < 0.01 and synced
+    assert fade and abs(fade - 0.05) < 0.01
+
+
+def test_plain_track_has_one_lane_for_its_sample():
+    L = _runtime()
+    got = L.execute(r'''
+      local plain = { id = 91, sample_path = A.path, sample_name = A.name }
+      seq_layering_seed_from_track(plain)
+      local lanes = seq_layering_lanes(plain)
+      seq_layering_set_lane_cut(plain, lanes[1], 0.2, 0.05)
+      return #lanes, lanes[1].key, seq_layering_geometry_active(plain), seq_layering_mix_duration(plain)
+    ''')
+    assert got[0] == 1 and got[1] == "t1+s1" and got[2] is True
+    assert abs(got[3] - 0.2) < 1e-9

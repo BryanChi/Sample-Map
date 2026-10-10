@@ -1483,7 +1483,8 @@ function process_analyzer_queue()
     end
   end
 
-  if state.scan_running then
+  -- Quiet single-file analysis (a drum layering glue) runs workers without a scan.
+  if state.scan_running or (sm_quiet_analysis_pending and sm_quiet_analysis_pending()) then
     for _, w in ipairs(workers) do
       if not w.path and #state.analyzer_queue > 0 then
         local path = table.remove(state.analyzer_queue, 1)

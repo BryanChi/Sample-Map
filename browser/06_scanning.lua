@@ -836,6 +836,40 @@ function refresh_sample_file_meta(sample, path)
   end
 end
 
+-- Quiet analysis: single files added outside a scan (a drum layering glue).
+-- Their analyzer jobs run without a scan session or its "scan finished"
+-- window; when the last one lands, the map lays them out once.
+function sm_quiet_analysis_add(path)
+  state.analyzer_quiet = state.analyzer_quiet or {}
+  state.analyzer_quiet[normalize_path(path)] = r.time_precise()
+end
+
+function sm_quiet_analysis_pending()
+  local q = state.analyzer_quiet
+  if not q or not next(q) then return false end
+  local now = r.time_precise()
+  for p, t in pairs(q) do
+    -- Give up on a job that never finishes (analyzer missing or stuck).
+    if now - t > 180.0 then q[p] = nil end
+  end
+  return next(q) ~= nil
+end
+
+function sm_quiet_analysis_landed(path)
+  local q = state.analyzer_quiet
+  if not q or not q[path] then return end
+  for _, p in ipairs(state.analyzer_queue) do
+    if p == path then return end  -- a follow-up pass (transients) is queued
+  end
+  q[path] = nil
+  if not next(q) and not state.scan_running then
+    layout_samples()
+    rebuild_tag_index()
+    state._pending_layout = nil
+    state.scan_unsaved_results = true
+  end
+end
+
 function process_scan_slice(max_ms)
   max_ms = max_ms or 12.0
 
@@ -855,7 +889,7 @@ function process_scan_slice(max_ms)
   end
 
   if not state.scan_running then
-    if not workers_busy and not next(state.analyzer_results or {}) then
+    if not workers_busy and not next(state.analyzer_results or {}) and not sm_quiet_analysis_pending() then
       return
     end
   elseif state.scan_started <= 0 and #state.scan_queue == 0 and analyzer_complete
@@ -958,6 +992,7 @@ function process_scan_slice(max_ms)
       if wrote then
         merged_count = merged_count + 1
       end
+      sm_quiet_analysis_landed(path)
       if sample_analysis_incomplete(sample) then
         local missing = sample_analysis_missing_fields(sample)
         sample._analyze_fail = "partial result: missing " .. table.concat(missing, ", ")

@@ -384,8 +384,18 @@ function seq_layering_col_w(content_w)
   return math.max(190.0, (content_w - SEQ_LAYER_LINK_W) * 0.5)
 end
 
-function seq_layering_ideal_content_h(content_w)
-  return SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H
+SEQ_LAYER_LANE_H = 22.0
+SEQ_LAYER_LANE_GAP = 3.0
+
+-- Height of the corner lanes under the waveforms (0 when there are none).
+function seq_layering_lanes_h(slot)
+  local n = slot and #seq_layering_lanes(slot) or 0
+  if n == 0 then return 0.0 end
+  return n * (SEQ_LAYER_LANE_H + SEQ_LAYER_LANE_GAP) + 6.0
+end
+
+function seq_layering_ideal_content_h(content_w, slot)
+  return SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H + seq_layering_lanes_h(slot)
       + seq_layering_card_h(seq_layering_col_w(content_w)) + SEQ_LAYER_FOOTER_H
 end
 
@@ -703,13 +713,27 @@ local function cut_handles(id, ix, iy, iw, ih, dur, end_t, fade)
   local ex = t2x(end_t)
   local fx = math.min(ex - 7.0, t2x(end_t - (fade or 0.0)))
   local res = {}
-  r.ImGui_SetCursorScreenPos(ctx, fx - 6.0, iy - 3.0)
-  r.ImGui_InvisibleButton(ctx, "##" .. id .. "_fade", 12.0, 12.0)
-  local f_hov, f_act = r.ImGui_IsItemHovered(ctx), r.ImGui_IsItemActive(ctx)
+  -- Only a hovered grip, or the one being dragged, can be active: skip the
+  -- query for the rest (there are many of these a frame).
+  local function grip(suffix, gx, gy, gw, gh)
+    local gid = "##" .. id .. suffix
+    r.ImGui_SetCursorScreenPos(ctx, gx, gy)
+    r.ImGui_InvisibleButton(ctx, gid, gw, gh)
+    local hov = r.ImGui_IsItemHovered(ctx)
+    local act = false
+    if hov or state.seq_layering_cut_active == gid then
+      act = r.ImGui_IsItemActive(ctx)
+      if act then
+        state.seq_layering_cut_active = gid
+      elseif state.seq_layering_cut_active == gid then
+        state.seq_layering_cut_active = nil
+      end
+    end
+    return hov, act
+  end
+  local f_hov, f_act = grip("_fade", fx - 6.0, iy - 3.0, 12.0, 12.0)
   res.fade_dbl = f_hov and dbl_clicked()
-  r.ImGui_SetCursorScreenPos(ctx, ex - 6.0, iy + 10.0)
-  r.ImGui_InvisibleButton(ctx, "##" .. id .. "_end", 12.0, math.max(8.0, ih - 8.0))
-  local e_hov, e_act = r.ImGui_IsItemHovered(ctx), r.ImGui_IsItemActive(ctx)
+  local e_hov, e_act = grip("_end", ex - 6.0, iy + 10.0, 12.0, math.max(8.0, ih - 8.0))
   res.end_dbl = e_hov and dbl_clicked()
   res.end_hot, res.fade_hot = e_hov or e_act, f_hov or f_act
   res.end_active, res.fade_active = e_act, f_act
@@ -739,6 +763,13 @@ local function draw_cut_overlay(dl, ix, iy, iw, ih, dur, end_t, fade, natural, c
     r.ImGui_DrawList_AddLine(dl, fx0, iy, ex, iy + ih, seq_layer_col_alpha(col, 0.9), 1.4)
   end
   local active = cut or (fade and fade > 0)
+  if not active and not hs.hot then
+    -- Idle: just the grips, quietly.
+    local idle = seq_layer_col_alpha(col, 0.45)
+    r.ImGui_DrawList_AddRectFilled(dl, ex - 1.0, iy + 8.0, ex + 1.0, iy + ih, idle, 1.0)
+    r.ImGui_DrawList_AddRectFilled(dl, fx - 3.5, iy - 1.0, fx + 3.5, iy + 6.0, idle, 2.0)
+    return
+  end
   local line_col = hs.end_hot and 0xFFFFFFFF or seq_layer_col_alpha(col, active and 0.95 or 0.45)
   r.ImGui_DrawList_AddLine(dl, ex, iy + 8.0, ex, iy + ih, line_col, hs.end_hot and 2.4 or 1.6)
   r.ImGui_DrawList_AddTriangleFilled(dl, ex - 4.0, iy + ih, ex, iy + ih - 6.0, ex, iy + ih, line_col)
@@ -785,6 +816,65 @@ local function draw_tail_handles(slot, ix, iy, iw, ih, dur)
       (L.tail_fade or 0) * 1000.0))
   end
   return hs.hot, { hs = hs, natural = natural }
+end
+
+-- Corner lanes: each sound in the hit on the layered pane's time line, with
+-- its own length (end line) and fade (grip) handles.
+function seq_layering_draw_lanes(dl, slot, x, y, w)
+  local lanes = seq_layering_lanes(slot)
+  if #lanes == 0 then return end
+  local ix, iw = x + 10.0, w - 20.0
+  local _, dur = seq_layering_mix_peaks(slot, math.floor(iw))
+  dur = tonumber(dur) or 0
+  if dur <= 0 then return end
+  local labels = { "top", "left", "right" }
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w,
+    y + #lanes * (SEQ_LAYER_LANE_H + SEQ_LAYER_LANE_GAP) - SEQ_LAYER_LANE_GAP, UI_THEME.bg_panel, 5.0)
+  for k, lane in ipairs(lanes) do
+    local ly = y + (k - 1) * (SEQ_LAYER_LANE_H + SEQ_LAYER_LANE_GAP)
+    local lh = SEQ_LAYER_LANE_H
+    local v = lane.vert
+    local col = get_sample_dot_color(lane.sample or { path = lane.path })
+    local peaks = seq_layering_lane_peaks(lane, math.max(32, math.floor(iw / 2)), dur)
+    seq_layering_draw_wave(dl, "lane_" .. lane.key, ix, ly + 3.0, iw, lh - 6.0, peaks,
+      seq_layer_col_alpha(col, 0.6), nil)
+    local t_end = lane.t_off + lane.len
+    local end_t = v.len and math.min(v.len, t_end) or t_end
+    local hs = cut_handles("seq_layer_lane_" .. tostring(slot.id) .. "_" .. lane.key, ix, ly + 3.0, iw, lh - 6.0, dur, end_t, v.fade)
+    local new_len, new_fade, set = v.len, v.fade, false
+    if hs.end_dbl then
+      new_len, set = nil, true
+    elseif hs.fade_dbl then
+      new_fade, set = nil, true
+    elseif hs.end_active and hs.t then
+      new_len = (hs.t < t_end - 0.001) and math.max(lane.t_off + 0.005, hs.t) or nil
+      if new_fade then new_fade = math.min(new_fade, (new_len or t_end) - lane.t_off) end
+      set = true
+    elseif hs.fade_active and hs.t then
+      new_fade = math.max(0.0, math.min(end_t - lane.t_off, end_t - hs.t))
+      set = true
+    end
+    if set and seq_layering_set_lane_cut(slot, lane, new_len, new_fade) then
+      state.seq_layering_bias_drag = true
+    end
+    end_t = v.len and math.min(v.len, t_end) or t_end
+    draw_cut_overlay(dl, ix, ly + 3.0, iw, lh - 6.0, dur, end_t, v.fade, t_end, col, hs)
+    -- Label: side and corner, sample name.
+    local o = lane.owners[1]
+    local tag = (#lane.owners > 1 and "T+S" or (o.side == "transient" and "T" or "S")) .. " " .. labels[o.idx]
+    local name = truncate(basename(lane.path), 150.0)
+    local text = tag .. "  " .. name
+    local tw = text_w(text)
+    local lx = ix + math.max(0.0, math.min(iw - tw - 12.0, lane.t_off / dur * iw)) + 4.0
+    local side_col = SEQ_LAYER_SIDE_COLORS[o.side] or UI_THEME.accent
+    r.ImGui_DrawList_AddText(dl, lx, ly + lh * 0.5 - 7.0,
+      (v.len or v.fade) and 0xFFFFFFFF or seq_layer_col_mix(side_col, 0xFFFFFFFF, 0.55), text)
+    if hs.end_hot then
+      tooltip(string.format("%s %s length %.0f ms: drag the end to cut it shorter  ·  Double-click: full length", tag, name, end_t * 1000.0))
+    elseif hs.fade_hot then
+      tooltip(string.format("%s %s fade-out %.0f ms: drag the grip  ·  Double-click: no fade", tag, name, (v.fade or 0) * 1000.0))
+    end
+  end
 end
 
 function seq_layering_draw_wave_pane(dl, slot, x, y, w, h, kind, hover_side)
@@ -853,7 +943,7 @@ function seq_layering_draw_wave_pane(dl, slot, x, y, w, h, kind, hover_side)
   end
   local right_x = x + w - 10.0
   if dur > 0 then
-    local shown = (not is_orig and slot.layers.tail_end) or dur
+    local shown = (not is_orig and seq_layering_mix_duration(slot)) or dur
     local dtext = string.format("%.0f ms", shown * 1000.0)
     local dw = text_w(dtext)
     right_x = right_x - dw
@@ -2544,7 +2634,7 @@ function render_seq_layering_window()
   local pad_x, pad_y = 12.0, 10.0
   local stored_w = tonumber(state.seq_layering_win_w) or 800
   stored_w = math.max(SEQ_LAYER_MIN_W, math.min(1240, stored_w))
-  local ideal_h = seq_layering_ideal_content_h(stored_w - pad_x * 2.0) + pad_y * 2.0
+  local ideal_h = seq_layering_ideal_content_h(stored_w - pad_x * 2.0, slot) + pad_y * 2.0
   if r.ImGui_SetNextWindowSizeConstraints then
     r.ImGui_SetNextWindowSizeConstraints(ctx, SEQ_LAYER_MIN_W, 360.0, 1240.0, 1400.0)
   end
@@ -2667,6 +2757,11 @@ function seq_layering_render_body(slot)
   seq_layering_draw_wave_pane(dl, slot, wx, y, avail_w, SEQ_LAYER_PANE_H, "original", prev_hover)
   seq_layering_draw_wave_pane(dl, slot, wx, y + SEQ_LAYER_PANE_H + SEQ_LAYER_WAVE_GAP, avail_w, SEQ_LAYER_PANE_H, "layered", prev_hover)
   y = y + SEQ_LAYER_WAVE_H
+  local lanes_h = seq_layering_lanes_h(slot)
+  if lanes_h > 0 then
+    seq_layering_draw_lanes(dl, slot, wx, y - 4.0, avail_w)
+    y = y + lanes_h
+  end
 
   -- Triangle cards with the link / split column between them.
   local col_w = seq_layering_col_w(avail_w)

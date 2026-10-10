@@ -1071,13 +1071,14 @@ local function piece_end_at(p, end_t, fade_from)
 end
 
 -- opts.no_tail: ignore the whole-hit tail; opts.no_corner_cut: ignore corner
--- lengths and fades (both for drawing what a cut takes away).
+-- lengths and fades (both for drawing what a cut takes away); opts.all: build
+-- them even when the stack only plays the original sample.
 function seq_layering_build_pieces(slot, opts)
   seq_normalize_slot_layers(slot)
-  if not seq_layering_geometry_active(slot) then
+  opts = opts or {}
+  if not opts.all and not seq_layering_geometry_active(slot) then
     return {}
   end
-  opts = opts or {}
   local pieces = {}
   local function add(path, v, weight, fields, owners)
     local p = {
@@ -1238,6 +1239,79 @@ function seq_layering_corner_span(slot, side_key, idx)
     end
   end
   return t0, t1
+end
+
+-- One lane per sound in the hit, for its length / fade handles: the corner(s)
+-- it belongs to, its sample and where it sits (seconds, uncut).
+function seq_layering_lanes(slot)
+  seq_normalize_slot_layers(slot)
+  local lanes = {}
+  for _, p in ipairs(seq_layering_build_pieces(slot, { no_tail = true, no_corner_cut = true, all = true })) do
+    local owners = p.owners or {}
+    if slot.layers.linked then
+      owners = { owners[1] }  -- the sustain mirrors the transient
+    end
+    local o = owners[1]
+    if o then
+      local keys = {}
+      for _, ow in ipairs(owners) do keys[#keys + 1] = ow.side:sub(1, 1) .. ow.idx end
+      local sample, pd, startoffs, t_off, len = seq_layering_piece_span(p)
+      lanes[#lanes + 1] = {
+        key = table.concat(keys, "+"),
+        owners = owners,
+        path = p.path,
+        sample = sample,
+        pdur = pd,
+        startoffs = startoffs,
+        t_off = t_off,
+        len = len,
+        vert = slot.layers[o.side].verts[o.idx],
+      }
+    end
+  end
+  return lanes
+end
+
+-- Peaks of a lane on the hit's time line [0, dur] (normalized to the lane),
+-- cached per lane, width and time line.
+seq_layer_lane_peak_cache = {}
+function seq_layering_lane_peaks(lane, bins, dur)
+  local key = string.format("%s|%s|%.5f|%.5f|%.5f|%d|%.5f", lane.key, lane.path, lane.startoffs, lane.t_off, lane.len, bins, dur)
+  local hit = seq_layer_lane_peak_cache[key]
+  if hit then return hit end
+  if seq_layer_lane_peak_cache_n and seq_layer_lane_peak_cache_n > 64 then
+    seq_layer_lane_peak_cache = {}
+    seq_layer_lane_peak_cache_n = 0
+  end
+  local out = {}
+  local src = lane.sample and seq_env_get_wave_peaks(lane.sample, math.max(64, bins))
+  local n = src and #src or 0
+  local max_v = 0.0
+  for b = 1, bins do
+    local t = (b - 0.5) / bins * dur
+    local v = 0.0
+    if n > 0 and lane.pdur > 0 and t >= lane.t_off and t <= lane.t_off + lane.len then
+      local si = math.floor(((lane.startoffs + t - lane.t_off) / lane.pdur) * n) + 1
+      if si >= 1 and si <= n then v = src[si] or 0 end
+    end
+    out[b] = v
+    if v > max_v then max_v = v end
+  end
+  if max_v > 0.0001 then
+    for b = 1, bins do out[b] = out[b] / max_v end
+  end
+  seq_layer_lane_peak_cache[key] = out
+  seq_layer_lane_peak_cache_n = (seq_layer_lane_peak_cache_n or 0) + 1
+  return out
+end
+
+-- Sets length / fade on every corner a lane belongs to.
+function seq_layering_set_lane_cut(slot, lane, len, fade)
+  local changed = false
+  for _, o in ipairs(lane.owners) do
+    if seq_layering_set_corner_cut(slot, o.side, o.idx, len, fade) then changed = true end
+  end
+  return changed
 end
 
 -- End of the hit before the tail cuts it (seconds).
@@ -1489,11 +1563,12 @@ function seq_layering_mix_peaks(slot, width)
       pdur = pdur,
     }
   end
-  -- The axis runs to where the hit would end without the tail cut, so the
-  -- cut part stays in view (and its handle can be dragged back out).
-  if slot.layers.tail_end then
-    local natural = seq_layering_natural_end(slot)
-    if natural and natural > dur then dur = natural end
+  -- The axis runs to where the hit would end without the tail or corner
+  -- cuts, so the cut part stays in view (and its handle can be dragged back).
+  -- Corner cuts too: the axis is the hit with nothing cut.
+  for _, p in ipairs(seq_layering_build_pieces(slot, { no_tail = true, no_corner_cut = true })) do
+    local _, _, _, t_off, len = seq_layering_piece_span(p)
+    if t_off + len > dur then dur = t_off + len end
   end
   if dur <= 0.001 then dur = 0.2 end
   local out, best, best_v = {}, {}, {}
@@ -1858,6 +1933,39 @@ local function render_file_name(slot)
   return string.format("%s layered %s.wav", base, os.date("%Y%m%d-%H%M%S"))
 end
 
+-- Adds one rendered file to the library without a scan: indexed now, placed
+-- next to the sample it was layered from (tags included), and analyzed
+-- quietly in the background (no scan window); the map lays it out when the
+-- analysis lands. Returns the sample.
+function seq_layering_add_to_library(path, source)
+  local hit = find_sample_by_path(path)
+  if hit then return hit end
+  local ok, sample = pcall(analyze_file, path)  -- also queues the analyzer
+  if not ok or type(sample) ~= "table" then return nil end
+  if source then
+    sample.tags = sample.tags or {}
+    local have = {}
+    for _, t in ipairs(sample.tags) do have[tostring(t):lower()] = true end
+    for _, t in ipairs(source.tags or {}) do
+      if not have[tostring(t):lower()] then
+        sample.tags[#sample.tags + 1] = t
+        have[tostring(t):lower()] = true
+      end
+    end
+    if type(source.x) == "number" and type(source.y) == "number" then
+      sample.x = math.max(0.0, math.min(1.0, source.x + (math.random() - 0.5) * 0.01))
+      sample.y = math.max(0.0, math.min(1.0, source.y + (math.random() - 0.5) * 0.01))
+    end
+  end
+  state.samples[#state.samples + 1] = sample
+  samples_by_path[sample.path] = sample
+  if explorer_index_sample then pcall(explorer_index_sample, sample) end
+  if sm_quiet_analysis_add then sm_quiet_analysis_add(sample.path) end
+  state.scan_unsaved_results = true
+  if rebuild_tag_index then pcall(rebuild_tag_index) end
+  return sample
+end
+
 -- A sample record for a file the library may not have indexed yet.
 function seq_layering_sample_for_path(path, name)
   if not path then return nil end
@@ -1911,10 +2019,10 @@ function seq_layering_commit_glue(slot)
   }
   versions.glues[#versions.glues + 1] = entry
   versions.current = #versions.glues
-  -- Into the library (indexed, analyzed and placed on the map by a scan of
-  -- the render folder), then onto the track as the new stack's sample A.
-  if start_scan then pcall(start_scan, folder) end
-  start_fresh_stack(slot, seq_layering_sample_for_path(entry.path, entry.name))
+  -- Into the library (just this file), then onto the track as the new
+  -- stack's sample A.
+  local added = seq_layering_add_to_library(entry.path, find_sample_by_path(entry.stack.sample_path))
+  start_fresh_stack(slot, added or seq_layering_sample_for_path(entry.path, entry.name))
   seq_layering_sync_arrange(slot, { force_rebuild = true })
   save_config()
   return entry
