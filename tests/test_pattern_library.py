@@ -185,3 +185,59 @@ def test_favorites_persist_and_filter():
       return table.concat(keys, ",")
     ''')
     assert shown == "bossa"
+
+
+def test_map_preview_lanes_and_two_bar_width():
+    L = _runtime()
+    out = L.execute(r'''
+      local d = seq_pattern_preview_from_map({ snare = {4, 12}, kick = {0, 20}, hat = {} })
+      local roles = {}
+      for _, lane in ipairs(d.lanes) do roles[#roles + 1] = lane.role end
+      return table.concat(roles, ",") .. "|" .. d.cols .. "|" .. tostring(seq_pattern_preview_from_map({ kick = {0} }) ~= nil)
+    ''')
+    assert out == "kick,snare|32|true"
+
+
+def test_collect_preview_positions_keeps_first_bars():
+    L = _runtime()
+    out = L.execute(r'''
+      state.seq_grid_qn = 0.25
+      state.seq_tracks = { { id = 1, sample_path = "/k.wav" }, { id = 2, sample_path = "/s.wav" } }
+      infer_seq_track_role = function(slot) return slot.id == 1 and "kick" or "snare" end
+      get_seq_pattern = function() return { notes = {
+        ["1"] = { ["0"] = { step = 0 }, ["18"] = { step = 18 }, ["40"] = { step = 40 } },
+        ["2"] = { ["4"] = { step = 4 }, ["6"] = { step = 6, enabled = false } },
+      } } end
+      local m = seq_collect_preview_positions({ pattern_id = 1 }, 2)
+      return table.concat(m.kick, ",") .. "|" .. table.concat(m.snare, ",")
+    ''')
+    assert out == "0,18|4"
+
+
+def test_child_rows_and_variation_popup_render():
+    L = _runtime()
+    err = L.execute(r'''
+      reaper.ImGui_BeginPopup = function() return true end
+      seq_truncate_text_to_width = function(s) return s end
+      get_seq_region_display_name = function() return "Region 1" end
+      local region = { id = 1, pattern_id = 1 }
+      HOVER = true
+      local child = { label = "Funk 1", item = { id = "d1/s1/1", bpm = 96, drummer = "drummer1",
+        preview = { kick = {0, 10}, snare = {4, 12}, hat = {0, 2, 4, 6} }, preview_bar = 1 } }
+      local old = { label = "Funk 2", item = { id = "d1/s1/2", bpm = 100 } }
+      state.seq_pattern_variations = { house = { counter = 2, entries = {
+        { id = 1, strength = 3, seed = 9, preview = { kick = {0, 4, 8, 12} } },
+        { id = 2, ai = true, ai_variation = 0.5, ai_pattern = { kick = {0}, clap = {4, 12} } },
+      } } }
+      state.seq_pattern_variations_open_key = "house"
+      for _, f in ipairs({
+        function() render_seq_gmd_pattern_row(region, child, "g") end,
+        function() render_seq_gmd_pattern_row(region, old, "g") end,
+        function() render_seq_pattern_variations_popup(region) end,
+      }) do
+        local ok, e = xpcall(f, debug.traceback)
+        if not ok then return tostring(e) end
+      end
+      return ""
+    ''')
+    assert err == ""

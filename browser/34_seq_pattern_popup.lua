@@ -100,7 +100,7 @@ function seq_pattern_variation_count(style_key)
   return #store.entries
 end
 
-function seq_record_pattern_variation(style_key, strength, seed)
+function seq_record_pattern_variation(style_key, strength, seed, preview)
   local store = seq_pattern_variation_store(style_key)
   store.counter = store.counter + 1
   local entry = {
@@ -108,6 +108,7 @@ function seq_record_pattern_variation(style_key, strength, seed)
     name = get_seq_gen_style_label(style_key) .. " #" .. tostring(store.counter),
     seed = seed,
     strength = strength,
+    preview = preview, -- role -> {16th positions} of the result, for the list
   }
   store.entries[#store.entries + 1] = entry
   return entry
@@ -230,7 +231,8 @@ function run_seq_pattern_preset(region, style_key, strength)
     local seed = seq_new_seed()
     generate_seq_pattern(region, style, { random_strength = strength, random_seed = seed })
     if strength then
-      seq_record_pattern_variation(style, strength, seed)
+      local bars = seq_template_cycle_bars(SEQ_GEN_TEMPLATES[style])
+      seq_record_pattern_variation(style, strength, seed, seq_collect_preview_positions(region, bars))
     end
   end
   end_seq_undo(label)
@@ -356,6 +358,44 @@ function seq_collect_current_role_positions(region)
       table.sort(arr)
       map[role] = arr
     end
+  end
+  return map
+end
+
+-- The first `bars` bars of the region as role -> {16th positions}, positions
+-- running 0..16*bars-1 (for list previews of generated variations).
+function seq_collect_preview_positions(region, bars)
+  bars = math.max(1, bars or 1)
+  local map = {}
+  local pattern = region and get_seq_pattern(region.pattern_id, false)
+  local notes_by_track = pattern and pattern.notes or nil
+  if not notes_by_track then return map end
+  local grid_qn = (type(state.seq_grid_qn) == "number" and state.seq_grid_qn > 0) and state.seq_grid_qn or 0.25
+  local steps_per_bar = math.max(1, math.floor((4.0 / grid_qn) + 0.5))
+  local sets = {}
+  for _, slot in ipairs(state.seq_tracks or {}) do
+    local notes = slot.sample_path and notes_by_track[tostring(slot.id)] or nil
+    if notes then
+      local role = infer_seq_track_role(slot)
+      local set = sets[role] or {}
+      sets[role] = set
+      for step_key, note in pairs(notes) do
+        if note and note.enabled ~= false then
+          local step_idx = tonumber(note.step) or tonumber(step_key) or 0
+          local bar = math.floor(step_idx / steps_per_bar)
+          if bar >= 0 and bar < bars then
+            local within = step_idx % steps_per_bar
+            set[bar * 16 + math.floor((within * 16.0 / steps_per_bar) + 0.5)] = true
+          end
+        end
+      end
+    end
+  end
+  for role, set in pairs(sets) do
+    local arr = {}
+    for p in pairs(set) do arr[#arr + 1] = p end
+    table.sort(arr)
+    if #arr > 0 then map[role] = arr end
   end
   return map
 end
@@ -1037,6 +1077,7 @@ function seq_gmd_refresh_list(force)
     beat_type = state.seq_gmd_beat_type or "beat",
     limit = 0, -- 0 = return every matching groove
     offset = 0,
+    preview = true, -- one bar of hits per groove for the list's step preview
   }, 60)
   if not job then
     state.seq_gmd_status_msg = tostring(err)
@@ -1174,13 +1215,16 @@ function seq_gmd_apply_result(region, result)
   return hits > 0
 end
 
-function run_seq_gmd_load_id(region, entry_id)
+-- bar_offset picks the bar to load (the one shown in the list preview);
+-- without it the sidecar picks a random bar.
+function run_seq_gmd_load_id(region, entry_id, bar_offset)
   if not region or not entry_id then return false end
   if not seq_gmd_ensure(false) then return false end
   local result, err = seq_call_gmd({
     action = "get",
     id = entry_id,
     bars = 1,
+    bar_offset = tonumber(bar_offset),
     seed = seq_new_seed(),
   })
   if not result then
@@ -1319,16 +1363,43 @@ function seq_pattern_preview_data(style_key)
   return data
 end
 
+-- Same lane data built from a role -> {16th positions} map (Groove MIDI grooves,
+-- saved variations). Cached weakly per map table.
+SEQ_PATTERN_MAP_PREVIEW = setmetatable({}, { __mode = "k" })
+function seq_pattern_preview_from_map(map)
+  if type(map) ~= "table" then return nil end
+  local data = SEQ_PATTERN_MAP_PREVIEW[map]
+  if data then return data end
+  local max_step = 0
+  data = { lanes = {} }
+  for _, role in ipairs(SEQ_ROLE_ORDER) do
+    local steps = map[role]
+    if type(steps) == "table" and #steps > 0 then
+      local on = {}
+      for _, s in ipairs(steps) do
+        local n = math.floor(tonumber(s) or 0)
+        on[#on + 1] = n
+        if n > max_step then max_step = n end
+      end
+      data.lanes[#data.lanes + 1] = { role = role, steps = on, color = SEQ_PATTERN_ROLE_COLORS[role] or UI_THEME.text_dim }
+    end
+  end
+  data.cols = 16 * (math.floor(max_step / 16) + 1)
+  SEQ_PATTERN_MAP_PREVIEW[map] = data
+  return data
+end
+
 local function seq_pattern_scale_alpha(col, f)
   if f >= 1 then return col end
   return (col & 0xFFFFFF00) | math.floor((col & 0xFF) * f + 0.5)
 end
 
 -- Mini step grid: one thin lane per role, beats shaded in alternating bands.
-function seq_pattern_draw_step_preview(dl, x0, y0, x1, y1, style_key, alpha)
+-- src: a style key, or lane data from seq_pattern_preview_from_map.
+function seq_pattern_draw_step_preview(dl, x0, y0, x1, y1, src, alpha)
   alpha = alpha or 1.0
-  local data = seq_pattern_preview_data(style_key)
-  local n = #data.lanes
+  local data = type(src) == "table" and src or seq_pattern_preview_data(src)
+  local n = data and #data.lanes or 0
   if n == 0 or x1 <= x0 then
     return
   end
@@ -1712,7 +1783,7 @@ function render_seq_gmd_preset_row(region, group)
         expanded = state.seq_gmd_expanded[group.name] == true
       elseif region and item_count > 0 then
         state.seq_pattern_source = "gmd"
-        run_seq_gmd_load_id(region, group.items[1].id)
+        run_seq_gmd_load_id(region, group.items[1].id, group.items[1].preview_bar)
       end
     end
   end
@@ -1728,12 +1799,13 @@ end
 -- One recorded groove under an expanded Groove MIDI genre.
 function render_seq_gmd_pattern_row(region, child, parent_id_safe)
   if type(child) ~= "table" or type(child.item) ~= "table" then return end
-  local row_h = 26.0
+  local item = child.item
+  local preview = seq_pattern_preview_from_map(item.preview)
+  local row_h = preview and 36.0 or 26.0
   if not seq_pattern_list_item_visible(row_h + 2.0) then
     r.ImGui_Dummy(ctx, 0, row_h)
     return
   end
-  local item = child.item
   local indent = 18.0
   local row_w = math.max(1.0, (r.ImGui_GetContentRegionAvail(ctx)) - indent)
   local id = tostring(item.id or child.index or "")
@@ -1753,22 +1825,40 @@ function render_seq_gmd_pattern_row(region, child, parent_id_safe)
 
   local cy = (y0 + y1) * 0.5
   local bpm = tonumber(item.bpm)
-  local right = x1 - 10.0
-  if bpm then
-    local bpm_text = tostring(bpm) .. " BPM"
-    local bw, bh = r.ImGui_CalcTextSize(ctx, bpm_text)
-    r.ImGui_DrawList_AddText(dl, right - bw, cy - bh * 0.5, UI_THEME.text_mute, bpm_text)
-    right = right - bw - 10.0
+  local bpm_text = bpm and (tostring(bpm) .. " BPM") or nil
+  local label_col = selected and 0xFFFFFFFF or UI_THEME.text
+  if preview then
+    -- Name over BPM on the left, one bar of the groove on the right.
+    local grid_w = math.floor(math.min(130.0, row_w * 0.42))
+    local grid_x1 = x1 - 9.0
+    local grid_x0 = grid_x1 - grid_w
+    local text_w = grid_x0 - (x0 + 10.0) - 10.0
+    r.ImGui_DrawList_AddText(dl, x0 + 10.0, y0 + 3.0, label_col, seq_truncate_text_to_width(child.label or "Groove", text_w))
+    if bpm_text then
+      r.ImGui_DrawList_AddText(dl, x0 + 10.0, y0 + 19.0, UI_THEME.text_mute, seq_truncate_text_to_width(bpm_text, text_w))
+    end
+    seq_pattern_draw_step_preview(dl, grid_x0, y0 + 6.0, grid_x1, y1 - 6.0, preview, 1.0)
+  else
+    local right = x1 - 10.0
+    if bpm_text then
+      local bw, bh = r.ImGui_CalcTextSize(ctx, bpm_text)
+      r.ImGui_DrawList_AddText(dl, right - bw, cy - bh * 0.5, UI_THEME.text_mute, bpm_text)
+      right = right - bw - 10.0
+    end
+    local label = seq_truncate_text_to_width(child.label or "Groove", right - (x0 + 10.0))
+    local _, lh = r.ImGui_CalcTextSize(ctx, label)
+    r.ImGui_DrawList_AddText(dl, x0 + 10.0, cy - lh * 0.5, label_col, label)
   end
-  local label = seq_truncate_text_to_width(child.label or "Groove", right - (x0 + 10.0))
-  local _, lh = r.ImGui_CalcTextSize(ctx, label)
-  r.ImGui_DrawList_AddText(dl, x0 + 10.0, cy - lh * 0.5, selected and 0xFFFFFFFF or UI_THEME.text, label)
 
-  if hovered and item.drummer and r.ImGui_SetTooltip then
-    r.ImGui_SetTooltip(ctx, "Drummer " .. tostring(item.drummer) .. "\nClick: load into " .. get_seq_region_display_name(region))
+  if hovered and r.ImGui_SetTooltip then
+    local tip = {}
+    if item.drummer then tip[#tip + 1] = "Drummer " .. tostring(item.drummer) end
+    if preview and item.preview_bar then tip[#tip + 1] = "Preview shows bar " .. tostring(math.floor(item.preview_bar) + 1) end
+    tip[#tip + 1] = "Click: load " .. (preview and "this bar " or "") .. "into " .. get_seq_region_display_name(region)
+    r.ImGui_SetTooltip(ctx, table.concat(tip, "\n"))
   end
   if clicked and region then
-    run_seq_gmd_load_id(region, id)
+    run_seq_gmd_load_id(region, id, item.preview_bar)
   end
   r.ImGui_SetCursorScreenPos(ctx, x_base, y1 + 2.0)
   r.ImGui_Dummy(ctx, 0, 0)
@@ -1971,71 +2061,45 @@ function render_seq_pattern_popup(region)
   end_window(visible, true)
 end
 
+-- One saved dice / AI roll: icon, number and strength on the left, the
+-- resulting pattern as a step preview on the right.
 function render_seq_pattern_variation_row(region, style_key, entry)
   local row_w = math.max(1.0, (r.ImGui_GetContentRegionAvail(ctx)))
-  local row_h = 30.0
+  local preview = seq_pattern_preview_from_map(entry.ai_pattern or entry.preview)
+  local row_h = 36.0
   r.ImGui_InvisibleButton(ctx, "##seq_var_" .. tostring(entry.id), row_w, row_h)
   local x0, y0 = r.ImGui_GetItemRectMin(ctx)
-  local x1, y1 = r.ImGui_GetItemRectMax(ctx)
-  row_w = x1 - x0
+  local x1, y1 = x0 + row_w, y0 + row_h
   local hovered = r.ImGui_IsItemHovered(ctx)
   local clicked = r.ImGui_IsItemClicked(ctx, 0)
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  local cy = (y0 + y1) * 0.5
+  seq_pattern_row_panel(dl, x0, y0, x1, y1, false, hovered, 5.0)
+
+  local icon = entry.ai and "vary" or ("dice" .. tostring(math.max(1, math.min(6, entry.strength or 1))))
+  ui_button_draw_icon(dl, icon, x0 + 16.0, (y0 + y1) * 0.5, 20.0, entry.ai and UI_THEME.success or UI_THEME.text_dim)
+
+  local grid_w = preview and math.floor(math.min(140.0, row_w * 0.48)) or 0
+  local grid_x1 = x1 - 9.0
+  local grid_x0 = grid_x1 - grid_w
+  local text_x = x0 + 32.0
+  local text_w = (preview and grid_x0 or x1) - text_x - 10.0
+  local title = "#" .. tostring(entry.id)
+  r.ImGui_DrawList_AddText(dl, text_x, y0 + 3.0, UI_THEME.text, title)
+  r.ImGui_DrawList_AddText(dl, text_x + 0.5, y0 + 3.0, UI_THEME.text, title)
+  local meta
+  if entry.ai then
+    meta = string.format("AI \xC2\xB7 %d%%", math.floor((entry.ai_variation or 0.5) * 100.0 + 0.5))
+  else
+    meta = "Dice " .. tostring(entry.strength or 1)
+  end
+  r.ImGui_DrawList_AddText(dl, text_x, y0 + 19.0, UI_THEME.text_mute, seq_truncate_text_to_width(meta, text_w))
+  if preview then
+    seq_pattern_draw_step_preview(dl, grid_x0, y0 + 6.0, grid_x1, y1 - 6.0, preview, 1.0)
+  end
 
   if hovered then
-    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, 0x174A24AA, 4.0)
-    r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, UI_THEME.accent, 4.0, 0, 1.0)
+    r.ImGui_SetTooltip(ctx, "Click: apply this variation again")
   end
-
-  local x = x0 + 6.0
-  local base_name = get_seq_gen_style_label(style_key)
-  local _, name_h = r.ImGui_CalcTextSize(ctx, base_name)
-  r.ImGui_DrawList_AddText(dl, x, cy - name_h * 0.5, UI_THEME.text, base_name)
-  x = x + select(1, r.ImGui_CalcTextSize(ctx, base_name)) + 8.0
-
-  local num_text = "#" .. tostring(entry.id)
-  local pill_w = draw_ui_pill_label(dl, x, cy, num_text, {
-    bg = UI_THEME.accent_fill,
-    border = UI_THEME.accent,
-    text_col = 0xF0F8FFFF,
-    pad_x = 7.0,
-    pad_y = 2.0,
-    rounding = 6.0,
-  })
-  x = x + pill_w + 6.0
-
-  if entry.ai then
-    draw_ui_pill_label(dl, x, cy, "AI", {
-      bg = 0x243A2EFF,
-      border = 0x66CC88FF,
-      text_col = 0xCFF5DDFF,
-      pad_x = 7.0,
-      pad_y = 2.0,
-      rounding = 5.0,
-    })
-    local pct = math.floor((entry.ai_variation or 0.5) * 100.0 + 0.5)
-    x = x + select(1, r.ImGui_CalcTextSize(ctx, "AI")) + 14.0 + 6.0
-    draw_ui_pill_label(dl, x, cy, pct .. "%", {
-      bg = UI_THEME.surface,
-      border = UI_THEME.border,
-      text_col = UI_THEME.text_dim,
-      pad_x = 6.0,
-      pad_y = 2.0,
-      rounding = 5.0,
-    })
-  else
-    local dice_text = "dice " .. tostring(entry.strength or 1)
-    draw_ui_pill_label(dl, x, cy, dice_text, {
-      bg = UI_THEME.surface,
-      border = UI_THEME.border,
-      text_col = UI_THEME.text_dim,
-      pad_x = 6.0,
-      pad_y = 2.0,
-      rounding = 5.0,
-    })
-  end
-
   if clicked then
     seq_apply_pattern_variation(region, style_key, entry)
     r.ImGui_CloseCurrentPopup(ctx)
@@ -2048,7 +2112,7 @@ function render_seq_pattern_variations_popup(region)
     return
   end
   if r.ImGui_SetNextWindowSizeConstraints then
-    r.ImGui_SetNextWindowSizeConstraints(ctx, 280.0, 80.0, 280.0, 520.0)
+    r.ImGui_SetNextWindowSizeConstraints(ctx, 340.0, 80.0, 340.0, 560.0)
   end
   if not r.ImGui_BeginPopup(ctx, "seq_pattern_variations_popup") then
     return
