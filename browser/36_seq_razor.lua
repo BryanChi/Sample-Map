@@ -656,6 +656,20 @@ function handle_seq_razor_keys()
     seq_delete_notes_in_razors()
     return true
   end
+  -- No razors: Delete removes the region last clicked in the region lane.
+  local target = delete_pressed and state.seq_region_key_target
+    and get_seq_region_by_id(state.seq_region_key_target)
+  if target then
+    if r.ImGui_SetNextFrameWantCaptureKeyboard then
+      r.ImGui_SetNextFrameWantCaptureKeyboard(ctx, true)
+    end
+    state.seq_region_key_target = nil
+    local label = begin_seq_undo("Delete sequencer region")
+    seq_delete_region_by_id(target.id)
+    end_seq_undo(label)
+    sm_notify("Deleted region " .. tostring(target.name or "") .. " (" .. shortcut_display("undo") .. " to undo)", "info")
+    return true
+  end
   return false
 end
 

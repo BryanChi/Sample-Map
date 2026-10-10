@@ -528,14 +528,26 @@ function render_sequencer_map()
           r.ImGui_SetTooltip(ctx, "Shift+click to split region")
         end
       end
-    elseif hover_hit and hover_hit.region and seq_region_is_linked(hover_hit.region) then
+    elseif hover_hit and hover_hit.region and (hover_hit.part == "left_edge" or hover_hit.part == "right_edge") then
+      if r.ImGui_SetMouseCursor and r.ImGui_MouseCursor_ResizeEW then
+        r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_ResizeEW())
+      end
       if r.ImGui_SetTooltip then
-        local names = seq_linked_region_names(hover_hit.region)
-        if #names > 0 then
-          r.ImGui_SetTooltip(ctx, "Linked with " .. table.concat(names, ", "))
-        else
-          r.ImGui_SetTooltip(ctx, "Linked region")
+        r.ImGui_SetTooltip(ctx, "Drag to resize region\nShift+click to insert a region here")
+      end
+    elseif hover_hit and hover_hit.region then
+      if r.ImGui_SetTooltip then
+        local tip = "Drag to move · Ctrl+drag for a linked copy · Shift+click to split\n"
+          .. "Double-click to rename · Alt+click or Delete to delete"
+        if seq_region_is_linked(hover_hit.region) then
+          local names = seq_linked_region_names(hover_hit.region)
+          if #names > 0 then
+            tip = "Linked with " .. table.concat(names, ", ") .. "\n" .. tip
+          else
+            tip = "Linked region\n" .. tip
+          end
         end
+        r.ImGui_SetTooltip(ctx, tip)
       end
     elseif not hover_hit then
       local hover_qn = seq_snap_qn_for_region_drag(seq_x_to_qn(mx, timeline_x0, timeline_w, view_start_qn, qn_span), step_qn)
@@ -557,6 +569,9 @@ function render_sequencer_map()
 
   if left_clicked and not hovered then
     state.seq_random_popup_pending = nil
+  end
+  if r.ImGui_IsMouseClicked(ctx, 0) then
+    state.seq_region_key_target = nil
   end
 
   if hovered and left_clicked and mx >= timeline_x0 and mx <= timeline_x0 + timeline_w and not over_random_flyout then
@@ -587,6 +602,9 @@ function render_sequencer_map()
         region = hit.region
       else
         state.seq_random_popup_pending = nil
+        -- Delete removes the region last clicked in this lane (see
+        -- handle_seq_razor_keys); any other click disarms it.
+        state.seq_region_key_target = (hit and hit.region and not is_alt_down()) and hit.region.id or nil
         if hit then
           if hit.part == "link" then
           local label = begin_seq_undo("Unlink sequencer region")
@@ -643,9 +661,12 @@ function render_sequencer_map()
           }
         elseif hit.part == "body" then
           if r.ImGui_IsMouseDoubleClicked(ctx, 0) then
+            -- Double-click renames (the toolbar chip shows the field);
+            -- clicking the toolbar chip zooms to the region.
             state.seq_region_drag = nil
-            state.selected_seq_region_id = hit.region.id
-            seq_zoom_to_region(hit.region)
+            state.seq_region_key_target = nil
+            seq_select_region(hit.region)
+            seq_begin_region_rename(hit.region)
             region = hit.region
           else
             seq_select_region(hit.region)
