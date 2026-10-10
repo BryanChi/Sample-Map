@@ -1498,7 +1498,9 @@ function render_sequencer_map()
       local src_key = tostring(picked.key)
       local src_note = get_seq_note(src_region, hovered_slot.id, src_key) or picked.note
       local src_abs = seq_note_abs_qn(src_region, src_note, src_key, step_qn)
-      local baked = seq_clone_note_keeping_sample(src_note, src_region, hovered_slot.id, src_key, hovered_slot)
+      -- Plain clone: the note keeps following the track sample unless it
+      -- was already pinned (an existing frozen sample stays in the copy).
+      local baked = clone_table_deep(src_note)
       local label = begin_seq_undo("Copy sequencer note")
       state.selected_seq_note = { region_id = src_region.id, track_id = hovered_slot.id, step_key = src_key }
       state.seq_note_drag = {
@@ -1527,7 +1529,9 @@ function render_sequencer_map()
       local src_key = tostring(picked.key)
       local src_note = get_seq_note(src_region, hovered_slot.id, src_key) or picked.note
       local src_abs = seq_note_abs_qn(src_region, src_note, src_key, step_qn)
-      local baked = seq_clone_note_keeping_sample(src_note, src_region, hovered_slot.id, src_key, hovered_slot)
+      -- Plain clone: the note keeps following the track sample unless it
+      -- was already pinned (an existing frozen sample stays in the copy).
+      local baked = clone_table_deep(src_note)
       local label = begin_seq_undo("Move sequencer note")
       state.selected_seq_note = { region_id = src_region.id, track_id = hovered_slot.id, step_key = src_key }
       state.seq_note_drag = {
