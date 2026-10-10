@@ -685,7 +685,7 @@ function seq_hit_test_region_at(mx, my, y0, region_lane_h, timeline_x0, timeline
         end
       end
       local _, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after = seq_collect_region_random_entries(reg)
-      if has_prob or has_human or has_vel or has_vary or has_stut or has_ghost then
+      if has_prob or has_human or has_vel or has_vary or has_stut or has_ghost or has_grace or has_after then
         local vis_x0 = rx0
         if seq_region_is_linked(reg) and (rx1 - rx0) >= (SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD * 2 + 8) then
           vis_x0 = rx0 + SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD + 8
