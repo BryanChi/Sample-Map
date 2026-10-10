@@ -1360,6 +1360,18 @@ function render_sequencer_map()
   if hovered_slot and hovered_qn ~= nil and hovered_row and not state.seq_region_drag
       and not over_lane_random_controls and not over_lane_mix_controls
       and not state.seq_over_lane_resize and not state.seq_track_reorder_drag and not seq_razor_blocks_grid_edit() then
+    -- A click on a note lane inside another region selects that region and
+    -- edits there in the same click.
+    if hovered_row.row.type == "note" and left_clicked and mx >= timeline_x0
+        and not (hovered_qn >= region.start_qn and hovered_qn < region.start_qn + get_seq_region_length_qn(region)) then
+      local hover_reg = seq_region_at_qn(hovered_qn)
+      if hover_reg and hover_reg.id ~= region.id then
+        seq_select_region(hover_reg)
+        region = hover_reg
+        selected_region_id = region.id
+        pattern = get_seq_pattern(region.pattern_id, true)
+      end
+    end
     local step_idx = math.floor(((hovered_qn - region.start_qn) / step_qn) + 1e-9)
     local in_region = hovered_qn >= region.start_qn and hovered_qn < region.start_qn + get_seq_region_length_qn(region)
     local step_key = tostring(step_idx)
@@ -1487,12 +1499,7 @@ function render_sequencer_map()
       r.ImGui_DrawList_AddLine(dl, cell_x0, body_y0, cell_x0, body_y1, line_col, 2.0)
       r.ImGui_DrawList_AddTriangleFilled(dl, cell_x0 - 5, body_y0, cell_x0 + 5, body_y0, cell_x0, body_y0 + 7, line_col)
     elseif hovered_row.row.type == "note" and not in_region and left_clicked and mx >= timeline_x0 then
-      local hover_reg = seq_region_at_qn(hovered_qn)
-      if hover_reg then
-        seq_select_region(hover_reg)
-        region = hover_reg
-        selected_region_id = region.id
-      end
+      -- Gap between regions: nothing to edit.
     elseif hovered_row.row.type == "note" and in_region and left_clicked and mx >= timeline_x0
         and is_alt_down() and not edit_def
         and not (r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0)) then
@@ -2287,6 +2294,9 @@ function render_sequencer_map()
         if random_edit_region and random_edit_pattern then
           local random_settings = get_seq_track_settings(random_edit_pattern, row.slot.id, true)
           if random_settings then
+            -- Values before this frame's edit, so the undo snapshot taken
+            -- on the first change still holds the old value.
+            local pre_edit = (not seq_undo_is_open()) and clone_table_deep(random_settings) or nil
             local changed, active_key, overlay_text, panel_x1, reseeded = seq_render_lane_random_controls(dl, row_pos, row.slot.id, random_settings, random_focus_effective, timeline_x0, header_y1, body_viewport_y1)
             if active_key then
               random_focus_next = active_key
@@ -2299,7 +2309,18 @@ function render_sequencer_map()
               seq_queue_random_sync(random_edit_region.pattern_id, row.slot.id)
             end
             if changed then
-              begin_seq_undo("Edit sequencer random")
+              if pre_edit and not seq_undo_is_open() then
+                local post_edit = clone_table_deep(random_settings)
+                local function fill(dst, src)
+                  for k in pairs(dst) do dst[k] = nil end
+                  for k, v in pairs(src) do dst[k] = v end
+                end
+                fill(random_settings, pre_edit)
+                begin_seq_undo("Edit sequencer random")
+                fill(random_settings, post_edit)
+              else
+                begin_seq_undo("Edit sequencer random")
+              end
               seq_undo_commit_on_release = true
             end
           end
