@@ -2,6 +2,24 @@
 -- Loaded in order by "Sample Map Browser.lua"; shares globals with the other modules.
 local r = reaper
 
+-- Hit strength (detector weight) to note volume. The imported note plays a
+-- slice of the stem, which already carries the dynamics, so this is only
+-- applied once the slice is released for another sample (see
+-- seq_note_release_stem_velocity). sqrt keeps mid hits close to full; the
+-- floor keeps ghost notes audible.
+SEQ_STEM_VELOCITY_FLOOR = 0.3
+
+function seq_stem_weight_to_volume(weight, max_weight)
+  local w = tonumber(weight)
+  local m = tonumber(max_weight)
+  if not w or not m or m <= 0 then
+    return 1.0
+  end
+  local t = math.max(0.0, math.min(1.0, w / m))
+  local floor = SEQ_STEM_VELOCITY_FLOOR or 0.3
+  return floor + (1.0 - floor) * math.sqrt(t)
+end
+
 function seq_stem_import_write_notes(region, slot, rec, place_time)
   if not region or not slot or not rec or not rec.onsets then
     return 0
@@ -10,6 +28,13 @@ function seq_stem_import_write_notes(region, slot, rec, place_time)
   local src_dur = rec.duration or 0.0
   local region_start = region.start_qn or 0.0
   local grid_qn = state.seq_grid_qn or 0.25
+  local max_weight = 0.0
+  for i = 1, #onsets do
+    local w = tonumber(onsets[i].weight) or 0.0
+    if w > max_weight then
+      max_weight = w
+    end
+  end
   local n = 0
   for i = 1, #onsets do
     local t = onsets[i].time or 0.0
@@ -55,6 +80,7 @@ function seq_stem_import_write_notes(region, slot, rec, place_time)
         sample_vary = 0.0,
         stutter = 1,
         decay_qn = decay_qn,
+        stem_velocity = seq_stem_weight_to_volume(onsets[i].weight, max_weight),
       })
       n = n + 1
     end
@@ -62,16 +88,14 @@ function seq_stem_import_write_notes(region, slot, rec, place_time)
   return n
 end
 
+-- Owns the UI-refresh lock, the undo block and the hidden temp track, and
+-- releases all three even when placement throws.
+-- Returns ok, placed_or_error, warnings (list of strings).
 function seq_stem_import_place(job, info)
   local SM = SampleMapStemImport
   if not SM or not job or not info then
     return false, "Stem import backend missing."
   end
-  local place_time = job.place_time or 0.0
-  local drums_path = info.stems and info.stems.drums
-  local drum_stems = info.drum_stems or {}
-  state._stem_dbg_n = 0
-
   if r.PreventUIRefresh then r.PreventUIRefresh(1) end
   local own = seq_undo_own_begin("Import drums from audio")
 
@@ -84,11 +108,46 @@ function seq_stem_import_place(job, info)
     r.SetMediaTrackInfo_Value(temp, "B_SHOWINTCP", 0)
   end
 
+  local res = table.pack(xpcall(seq_stem_import_place_body, function(e)
+    return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e)
+  end, job, info, temp))
+
+  if temp and (not r.ValidatePtr2 or r.ValidatePtr2(0, temp, "MediaTrack*")) then
+    r.DeleteTrack(temp)
+  end
+  if own then
+    end_seq_undo("Import drums from audio")
+  end
+  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+  r.UpdateArrange()
+  if not res[1] then
+    error(res[2], 0)
+  end
+  return table.unpack(res, 2, res.n)
+end
+
+function seq_stem_import_place_body(job, info, temp)
+  local SM = SampleMapStemImport
+  local place_time = job.place_time or 0.0
+  local drums_path = info.stems and info.stems.drums
+  local drum_stems = info.drum_stems or {}
+  local warnings = {}
+  if info.warning and info.warning ~= "" then
+    warnings[#warnings + 1] = info.warning
+  end
+  local detect_err = nil
+  state._stem_dbg_n = 0
+
   local drums_item, drums_len = nil, 0.0
   if temp and drums_path then
     drums_item, drums_len = SM.insert_wav(temp, drums_path, place_time)
     if drums_item and job.tempo_map ~= false then
-      SM.tempo_map(drums_item)
+      local tm_ok, tm_a, tm_b = pcall(SM.tempo_map, drums_item)
+      if not tm_ok then
+        warnings[#warnings + 1] = "Tempo map failed: " .. tostring(tm_a)
+      elseif tm_a == false then
+        warnings[#warnings + 1] = "Tempo map failed: " .. tostring(tm_b or "unknown error")
+      end
     end
   end
 
@@ -106,6 +165,8 @@ function seq_stem_import_place(job, info)
           local onsets, stats = SM.detect_hits(item, detect_opts)
           if type(stats) == "table" then
             kit_stats[key] = stats
+          elseif not onsets and type(stats) == "string" and stats ~= "" then
+            detect_err = detect_err or stats
           end
           if onsets and #onsets > 0 then
             if seq_stem_filter_weak_hits then
@@ -138,7 +199,10 @@ function seq_stem_import_place(job, info)
     end
   end
   if not next(hits_by_key) and drums_path and drums_item then
-    local onsets = SM.detect_hits(drums_item)
+    local onsets, extra = SM.detect_hits(drums_item)
+    if not onsets and type(extra) == "string" and extra ~= "" then
+      detect_err = detect_err or extra
+    end
     if onsets and #onsets > 0 then
       if seq_stem_merge_close_hits then
         onsets = seq_stem_merge_close_hits(onsets, "drums")
@@ -150,10 +214,6 @@ function seq_stem_import_place(job, info)
         duration = duration,
       }
     end
-  end
-
-  if temp then
-    r.DeleteTrack(temp)
   end
 
   local source_item = nil
@@ -175,13 +235,11 @@ function seq_stem_import_place(job, info)
   end
 
   if not have_hits then
-    if own then end_seq_undo("Import drums from audio") end
-    if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
-    r.UpdateArrange()
+    local why = detect_err and ("Hit detection failed: " .. detect_err) or "No drum hits detected on the split stems."
     if n_stems > 0 then
-      return false, "No drum hits detected. Instrument stems were still placed."
+      why = why .. "\nInstrument stems were still placed."
     end
-    return false, "No drum hits detected on the split stems."
+    return false, why, warnings
   end
 
   local end_time = place_time + math.max(duration, 0.25)
@@ -216,7 +274,8 @@ function seq_stem_import_place(job, info)
           if region and slot.sample_path and slot.sample_path ~= "" and slot.sample_path ~= sample.path then
             seq_assign_region_track_sample(region, slot, sample, false)
           else
-            assign_sample_to_seq_track(slot, sample, false)
+            -- The stem is not a pick: leave the selected candidate square alone.
+            seq_without_candidate_save(assign_sample_to_seq_track, slot, sample, false)
           end
         end
         if region then
@@ -233,16 +292,21 @@ function seq_stem_import_place(job, info)
   if save_seq_project_state then
     save_seq_project_state()
   end
-  if own then
-    end_seq_undo("Import drums from audio")
-  end
-  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
-  r.UpdateArrange()
-  if info.warning and info.warning ~= "" then
-    return true, placed, info.warning
-  end
-  return true, placed
+  return true, placed, warnings
 end
+
+-- Why stem import can't run on this machine, or nil.
+function seq_stem_import_unavailable_reason()
+  if not SampleMapStemImport or not SampleMapStemImport.start_split then
+    return "Stem import backend failed to load (SampleMapStemImport.lua)."
+  end
+  if SampleMapStemImport.unavailable_reason then
+    return SampleMapStemImport.unavailable_reason()
+  end
+  return nil
+end
+
+SEQ_STEM_IMPORT_DROP_LABEL_OK = "Drop here to dissect drum pattern"
 
 function seq_stem_import_file_drag_active()
   if state.seq_stem_import then
@@ -251,7 +315,15 @@ function seq_stem_import_file_drag_active()
   if sample_drag_active and sample_drag_active() then
     return false
   end
-  return state.seq_stem_import_hover == true
+  local active = state.seq_stem_import_hover == true
+  if active then
+    -- The pattern chip shows this label while a file hovers; say up front
+    -- when the drop can't work instead of after Start.
+    SEQ_STEM_IMPORT_DROP_LABEL = seq_stem_import_unavailable_reason()
+      and "Stem import unavailable here (see details on drop)"
+      or SEQ_STEM_IMPORT_DROP_LABEL_OK
+  end
+  return active
 end
 
 function seq_stem_import_classify_path(path)
@@ -274,7 +346,7 @@ function seq_stem_import_classify_path(path)
   return kind or "auto", dur
 end
 
-SEQ_STEM_IMPORT_DROP_LABEL = "Drop here to dissect drum pattern"
+SEQ_STEM_IMPORT_DROP_LABEL = SEQ_STEM_IMPORT_DROP_LABEL_OK
 
 function seq_stem_import_help_mark(id, tip)
   r.ImGui_SameLine(ctx, 0, 8)
@@ -394,8 +466,58 @@ function seq_stem_import_commit_dialog()
   return seq_stem_import_begin(dlg.path, opts)
 end
 
+function seq_stem_import_cancel()
+  local job = state.seq_stem_import
+  if not job or job.phase ~= "split" then
+    return false
+  end
+  local killed = SampleMapStemImport and SampleMapStemImport.cancel
+    and SampleMapStemImport.cancel(job.backend)
+  state.seq_stem_import = nil
+  if killed then
+    sm_notify("Stem split cancelled", "info")
+  else
+    sm_notify("Stem split cancelled here; the Python process could not be stopped and may still finish in the background.", "warn")
+  end
+  return true
+end
+
+-- Small floating window while the split runs: progress plus Cancel.
+function seq_stem_import_render_running()
+  local job = state.seq_stem_import
+  if not job or job.phase ~= "split" or not ctx then
+    return
+  end
+  if r.ImGui_SetNextWindowPos and state.main_window_rect then
+    local rect = state.main_window_rect
+    local cond = r.ImGui_Cond_Appearing and r.ImGui_Cond_Appearing() or 0
+    r.ImGui_SetNextWindowPos(ctx, rect.x + (rect.w or 0) * 0.5, rect.y + (rect.h or 0) - 60, cond, 0.5, 1.0)
+  end
+  local flags = 0
+  for _, f in ipairs({ "AlwaysAutoResize", "NoCollapse", "NoDocking" }) do
+    local fn = r["ImGui_WindowFlags_" .. f]
+    if fn then
+      flags = flags | fn()
+    end
+  end
+  local visible = r.ImGui_Begin(ctx, "Stem split##stem_running", nil, flags)
+  if visible then
+    r.ImGui_Text(ctx, string.format("%s  %d%%", tostring(job.msg or "Splitting stems…"),
+      math.floor(tonumber(job.pct) or 0)))
+    r.ImGui_Spacing(ctx)
+    if draw_ui_button("stem_running_cancel", "Cancel", 100, 26, { compact = true }) then
+      seq_stem_import_cancel()
+    end
+  end
+  end_window(visible, true)
+end
+
 function seq_stem_import_render_dialog()
   local dlg = state.seq_stem_import_dialog
+  if not dlg and state.seq_stem_import then
+    seq_stem_import_render_running()
+    return
+  end
   if not dlg or not ctx then
     return
   end
@@ -428,6 +550,13 @@ function seq_stem_import_render_dialog()
       file_name = tostring(dlg.path or ""):match("([^/\\]+)$") or dlg.path or ""
     end
     r.ImGui_TextColored(ctx, UI_THEME.text_dim or 0xFF8A93A3, file_name)
+    local unavailable = seq_stem_import_unavailable_reason()
+    if unavailable then
+      r.ImGui_Spacing(ctx)
+      if r.ImGui_PushTextWrapPos then r.ImGui_PushTextWrapPos(ctx, 410) end
+      r.ImGui_TextColored(ctx, UI_THEME.danger or 0xFF6B6BFF, unavailable)
+      if r.ImGui_PopTextWrapPos then r.ImGui_PopTextWrapPos(ctx) end
+    end
     r.ImGui_Spacing(ctx)
 
     r.ImGui_Text(ctx, "Model")
@@ -523,8 +652,15 @@ function seq_stem_import_render_dialog()
       seq_stem_import_close_dialog()
     end
     r.ImGui_SameLine(ctx)
-    if draw_ui_button("stem_opts_go", "Start", 120, 28, { compact = true, style = "primary" }) then
+    if unavailable and r.ImGui_BeginDisabled then
+      r.ImGui_BeginDisabled(ctx)
+    end
+    if draw_ui_button("stem_opts_go", "Start", 120, 28, { compact = true, style = "primary" })
+        and not unavailable then
       seq_stem_import_commit_dialog()
+    end
+    if unavailable and r.ImGui_EndDisabled then
+      r.ImGui_EndDisabled(ctx)
     end
   end
   end_window(visible, true)
@@ -665,14 +801,25 @@ function seq_stem_import_tick()
     return
   end
   if job.phase == "place" then
-    local ok, a, b = pcall(seq_stem_import_place, job, job.info)
+    local ok, a, b, c = pcall(seq_stem_import_place, job, job.info)
     state.seq_stem_import = nil
+    local warn_text = (type(c) == "table" and #c > 0) and table.concat(c, "\n") or nil
     if not ok then
       r.ShowMessageBox("Stem import failed:\n" .. tostring(a), "Sequencer stem import", 0)
     elseif a == false then
-      r.ShowMessageBox(tostring(b or "Import produced no drum hits."), "Sequencer stem import", 0)
-    elseif type(b) == "string" and b ~= "" then
-      -- warning from drum split; still succeeded
+      local msg = tostring(b or "Import produced no drum hits.")
+      if warn_text then
+        msg = msg .. "\n\n" .. warn_text
+      end
+      r.ShowMessageBox(msg, "Sequencer stem import", 0)
+    else
+      local n = tonumber(b) or 0
+      local msg = string.format("Imported %d drum hit%s", n, n == 1 and "" or "s")
+      if warn_text then
+        sm_notify(msg .. ". " .. warn_text:gsub("\n", " · "), "warn")
+      else
+        sm_notify(msg, "info")
+      end
     end
     return
   end

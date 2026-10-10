@@ -295,10 +295,65 @@ local function read_done(path)
   return tonumber(s:match("%-?%d+"))
 end
 
-local function spawn_detached(cmd)
-  local line = "/bin/sh -c " .. shell_quote(cmd .. " >/dev/null 2>&1") .. " &"
-  local rc = os.execute(line)
+-- cmd must already redirect its own output. A plain backgrounded command
+-- (no subshell) makes $! the Python process itself, so Cancel can kill it
+-- and poll() can tell when it died without writing the done flag.
+local function spawn_detached(cmd, pid_file)
+  local inner = cmd .. " </dev/null &"
+  if pid_file and pid_file ~= "" then
+    inner = inner .. " echo $! > " .. shell_quote(pid_file)
+  end
+  local rc = os.execute("/bin/sh -c " .. shell_quote(inner))
   return rc == true or rc == 0 or rc == nil
+end
+
+local function read_pid(path)
+  local f = io.open(path, "r")
+  if not f then
+    return nil
+  end
+  local s = f:read("*a") or ""
+  f:close()
+  local pid = tonumber(s:match("%d+"))
+  if pid and pid > 1 then
+    return pid
+  end
+  return nil
+end
+
+local function pid_alive(pid)
+  if not pid then
+    return nil
+  end
+  local rc = os.execute("kill -0 " .. tostring(pid) .. " 2>/dev/null")
+  return rc == true or rc == 0
+end
+
+-- Why stem import can't run here, or nil when it can. Cached for a few
+-- seconds because the drop target asks every frame while a file hovers.
+local availability_cache = { t = -1e9, reason = nil }
+
+function SampleMapStemImport.unavailable_reason(force)
+  local now = r.time_precise and r.time_precise() or os.clock()
+  if not force and now - availability_cache.t < 5.0 then
+    return availability_cache.reason
+  end
+  local reason = nil
+  if (r.GetOS() or ""):match("Win") then
+    reason = "Stem split uses Demucs-MLX and is Mac / Apple Silicon only."
+  else
+    local sidecar, py, tempo = SampleMapStemImport.find_backend()
+    if not sidecar then
+      reason = "Stem Split is not installed (StemSplit.py not found in REAPER's Scripts folder)."
+    elseif not py then
+      reason = "Stem Split's Python environment (.venv-stems) was not found next to StemSplit.py."
+    elseif not tempo then
+      reason = "Stem Split's \"Tempo map from drum stem.lua\" was not found (needed for hit detection)."
+    end
+  end
+  availability_cache.t = now
+  availability_cache.reason = reason
+  return reason
 end
 
 function SampleMapStemImport.job_paths(input_path)
@@ -313,6 +368,7 @@ function SampleMapStemImport.job_paths(input_path)
     progress = join_path(out_dir, "_progress.txt"),
     done = join_path(out_dir, "_done.txt"),
     log = join_path(out_dir, "_run.log"),
+    pid = join_path(out_dir, "_pid.txt"),
   }
 end
 
@@ -346,6 +402,7 @@ function SampleMapStemImport.start_split(input_path, opts)
   local paths = SampleMapStemImport.job_paths(input_path)
   pcall(os.remove, paths.done)
   pcall(os.remove, paths.progress)
+  pcall(os.remove, paths.pid)
   if r.RecursiveCreateDirectory then
     r.RecursiveCreateDirectory(paths.out_dir, 0)
   end
@@ -385,7 +442,7 @@ function SampleMapStemImport.start_split(input_path, opts)
     parts[#parts + 1] = "--auto-skip-mix"
   end
   local cmd = table.concat(parts, " ") .. " > " .. shell_quote(paths.log) .. " 2>&1"
-  if not spawn_detached(cmd) then
+  if not spawn_detached(cmd, paths.pid) then
     return nil, "Could not start StemSplit.py."
   end
 
@@ -406,27 +463,59 @@ function SampleMapStemImport.start_split(input_path, opts)
   }
 end
 
+local function log_tail(job)
+  local log = ""
+  local lf = io.open(job.paths.log, "r")
+  if lf then
+    log = lf:read("*a") or ""
+    lf:close()
+  end
+  return log ~= "" and log:sub(-2000) or ("See log:\n" .. job.paths.log)
+end
+
+-- Stop a running split. Returns true when a process was signalled.
+function SampleMapStemImport.cancel(job)
+  if not job or not job.paths then
+    return false
+  end
+  local pid = job.pid or read_pid(job.paths.pid)
+  if not pid then
+    return false
+  end
+  -- Children first (Demucs workers), then the sidecar itself.
+  os.execute("pkill -TERM -P " .. tostring(pid) .. " 2>/dev/null; kill -TERM " .. tostring(pid) .. " 2>/dev/null")
+  return true
+end
+
 function SampleMapStemImport.poll(job)
   if not job or not job.paths then
     return "error", "No stem-split job."
   end
-  if r.time_precise() - (job.t0 or 0) > (job.max_wait or 1200) then
+  local now = r.time_precise()
+  if now - (job.t0 or 0) > (job.max_wait or 1200) then
     return "error", "Stem split timed out. The Python process may still be running."
   end
   local code = read_done(job.paths.done)
+  if code == nil then
+    -- Liveness check every few seconds: a crashed sidecar never writes the
+    -- done flag, so without this the overlay would wait for max_wait.
+    if now - (job.alive_checked or 0) >= 3.0 then
+      job.alive_checked = now
+      job.pid = job.pid or read_pid(job.paths.pid)
+      if job.pid and pid_alive(job.pid) == false then
+        code = read_done(job.paths.done)
+        if code == nil then
+          return "error", "Stem split stopped before it finished.\n\n" .. log_tail(job)
+        end
+      end
+    end
+  end
   if code == nil then
     local pct, msg = read_progress(job.paths.progress)
     return "running", pct, msg
   end
   if code ~= 0 then
-    local log = ""
-    local lf = io.open(job.paths.log, "r")
-    if lf then
-      log = lf:read("*a") or ""
-      lf:close()
-    end
-    local tail = log ~= "" and log:sub(-2000) or ("See log:\n" .. job.paths.log)
-    return "error", "Stem split failed (exit " .. tostring(code) .. ").\n\n" .. tail
+    return "error", "Stem split failed (exit " .. tostring(code) .. ").\n\n" .. log_tail(job)
   end
   local info, err = SampleMapStemImport.parse_manifest(job.paths.manifest)
   if not info or not info.ok then
