@@ -237,3 +237,89 @@ def test_region_length_cache_and_sample_miss_cache():
       return table.concat(out, "\n")
     ''')
     assert bad == ""
+
+
+# The encoder json_encode replaced, kept here as the reference.
+OLD_JSON_ENCODE = r'''
+function old_json_encode(val)
+  if type(val) == "table" then
+    local parts = {}
+    local is_array = true
+    local max_idx = 0
+    for k, v in pairs(val) do
+      if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then
+        is_array = false
+        break
+      end
+      max_idx = math.max(max_idx, k)
+    end
+    if is_array then
+      for i = 1, max_idx do
+        table.insert(parts, old_json_encode(val[i]))
+      end
+      return "[" .. table.concat(parts, ",") .. "]"
+    else
+      for k, v in pairs(val) do
+        table.insert(parts, json_encode_string(tostring(k)) .. ":" .. old_json_encode(v))
+      end
+      return "{" .. table.concat(parts, ",") .. "}"
+    end
+  elseif type(val) == "string" then
+    return json_encode_string(val)
+  elseif type(val) == "number" then
+    if val ~= val or val == math.huge or val == -math.huge then
+      return "null"
+    end
+    return tostring(val)
+  elseif type(val) == "boolean" then
+    return val and "true" or "false"
+  else
+    return "null"
+  end
+end
+'''
+
+
+def test_json_encode_matches_old_encoder():
+    L = _runtime()
+    bad = L.execute(OLD_JSON_ENCODE + r'''
+      math.randomseed(23)
+      local chars = { "a", "b", "\"", "\\", "\n", "\t", "\1", "z", "é", "/" }
+      local function rstr()
+        local s = ""
+        for i = 1, math.random(0, 6) do s = s .. chars[math.random(1, #chars)] end
+        return s
+      end
+      local function rval(depth)
+        local p = math.random()
+        if depth > 3 or p < 0.3 then
+          local q = math.random(1, 7)
+          if q == 1 then return math.random(-1000, 1000) end
+          if q == 2 then return (math.random() - 0.5) * 1e6 end
+          if q == 3 then return rstr() end
+          if q == 4 then return math.random() < 0.5 end
+          if q == 5 then return ({ 0.0, -0.0, 1.0, 0.25, 0/0, math.huge, -math.huge })[math.random(1, 7)] end
+          if q == 6 then return math.random(0, 3) end
+          return 1e-7 * math.random()
+        end
+        local t = {}
+        if math.random() < 0.5 then
+          for i = 1, math.random(0, 5) do t[i] = rval(depth + 1) end
+          if math.random() < 0.2 then t[math.random(7, 9)] = rval(depth + 1) end
+        else
+          for i = 1, math.random(0, 5) do
+            local k = math.random() < 0.7 and rstr() or math.random(-3, 40)
+            t[k] = rval(depth + 1)
+          end
+        end
+        return t
+      end
+      for trial = 1, 400 do
+        local v = rval(0)
+        local a, b = json_encode(v), old_json_encode(v)
+        -- Key order follows pairs() in both, so the text must match exactly.
+        if a ~= b then return ("trial %d:\n%s\n%s"):format(trial, a, b) end
+      end
+      return ""
+    ''')
+    assert bad == ""

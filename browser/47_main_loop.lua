@@ -13,6 +13,7 @@ function loop()
     sm_report_error("main loop", err)
     state.sm_imgui_recover_pending = true
   end
+  sm_pcall("sm_flush_config_save", sm_flush_config_save)
   -- After all of this frame's writes, before REAPER handles more user input.
   sm_pcall("seq_sync_frame_end", seq_sync_frame_end)
   if SampleMapInstance.shutdown_done then

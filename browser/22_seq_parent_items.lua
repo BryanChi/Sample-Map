@@ -650,7 +650,9 @@ function seq_sync_region_parent_item(region)
   end
   if not already then
     item = seq_apply_parent_item_props(item, region) or item
-    seq_mark_self_arrange_write()
+    -- Parent markers are not fingerprinted; naming the track keeps the
+    -- baseline refresh from re-reading every track.
+    seq_mark_self_arrange_write(item and r.GetMediaItemTrack and r.GetMediaItemTrack(item) or nil, region.id)
   else
     seq_parent_sync_native_midi_pool(item, region)
   end
@@ -685,7 +687,7 @@ function seq_remove_region_parent_item(region)
   local tr = r.GetMediaItemTrack and r.GetMediaItemTrack(item)
   if tr and r.DeleteTrackMediaItem(tr, item) then
     region.parent_item_guid = nil
-    seq_mark_self_arrange_write()
+    seq_mark_self_arrange_write(tr, region.id)
     return true
   end
   return false

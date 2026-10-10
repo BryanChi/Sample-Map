@@ -55,6 +55,7 @@ function remove_seq_rendered_items(region)
   local tr_count = r.CountTracks(0)
   for tr_idx = 0, tr_count - 1 do
     local tr = r.GetTrack(0, tr_idx)
+    local removed_here = removed
     for item_idx = r.CountTrackMediaItems(tr) - 1, 0, -1 do
       local item = r.GetTrackMediaItem(tr, item_idx)
       if item and seq_item_is_owned(item, region_id) then
@@ -63,9 +64,9 @@ function remove_seq_rendered_items(region)
         end
       end
     end
-  end
-  if removed > 0 then
-    seq_mark_self_arrange_write()
+    if removed > removed_here then
+      seq_mark_self_arrange_write(tr, region_id)
+    end
   end
   return removed
 end
@@ -85,13 +86,11 @@ function remove_seq_rendered_items_by_ids(id_set)
         if rid and id_set[rid] then
           if r.DeleteTrackMediaItem(tr, item) then
             removed = removed + 1
+            seq_mark_self_arrange_write(tr, rid)
           end
         end
       end
     end
-  end
-  if removed > 0 then
-    seq_mark_self_arrange_write()
   end
   return removed
 end

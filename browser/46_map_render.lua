@@ -1391,7 +1391,7 @@ function shutdown_script(reason)
   end
   ctx = nil
   pcall(seq_destroy_arrange_overlay_ctx)
-  pcall(save_config)
+  pcall(save_config_now)
 end
 
 -- After a UI error left the ImGui stack unbalanced, ReaImGui may invalidate

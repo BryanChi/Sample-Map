@@ -562,9 +562,12 @@ state = {
   _save_library_after_load = false, -- write cache after deferred load completes
   _enqueue_scan_after_load = false, -- start folder scan after cache miss
   seq_last_proj_change = nil,       -- GetProjectStateChangeCount snapshot
+  _config_save_due = nil,           -- time a coalesced save_config() request is written
   seq_skip_ingest = false,          -- true after script writes arrange items
   seq_self_write_count = nil,       -- change-count at the end of the last frame that wrote arrange
   seq_arrange_fp = nil,             -- region_id -> arrange item fingerprint after the last sync
+  seq_arrange_fp_meta = nil,        -- per-slot parts behind seq_arrange_fp (incremental refresh)
+  seq_fp_touched = nil,             -- tracks the script wrote since the baseline; false = unknown
   seq_ingest_rescan = nil,          -- true: run a full ingest pass next frame
   seq_fp_refresh_at = nil,          -- time to refresh seq_arrange_fp after a streak of script writes
   seq_self_write_at = nil,          -- time the last script-only change was consumed

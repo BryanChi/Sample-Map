@@ -8,8 +8,35 @@ function sync_all_seq_regions()
   end
 end
 
-function seq_mark_self_arrange_write()
+-- tr/region_id: what the write touched, when the caller knows. The baseline
+-- refresh after our own writes then re-reads only the items of those regions
+-- on those tracks. No region means the whole track; no track means every
+-- track. tr == false: no item writes beyond those already marked.
+function seq_mark_self_arrange_write(tr, region_id)
   state.seq_skip_ingest = true
+  local touched = state.seq_fp_touched
+  if tr == false then
+    -- Nothing to add.
+  elseif tr == nil then
+    state.seq_fp_touched = false
+  elseif touched ~= false then
+    if not touched then
+      touched = {}
+      state.seq_fp_touched = touched
+    end
+    -- Keyed by the pointer's text so lookups never depend on userdata identity.
+    local key = tostring(tr)
+    if region_id == nil then
+      touched[key] = true
+    elseif touched[key] ~= true then
+      local rids = touched[key]
+      if not rids then
+        rids = {}
+        touched[key] = rids
+      end
+      rids[region_id] = true
+    end
+  end
   if r.GetProjectStateChangeCount then
     local count = r.GetProjectStateChangeCount(0)
     state.seq_self_write_count = count
@@ -58,24 +85,32 @@ end
 -- now sit in. Diffing against the fingerprint taken after the last sync shows
 -- which regions the user touched anywhere in the project (deletes, edits on
 -- unselected items, REAPER undo), not only the selected one.
-function seq_arrange_fingerprints()
-  local spans = seq_region_span_index()
-  local parts = {}
-  local function add(rid, s)
-    local list = parts[rid]
-    if not list then
-      list = {}
-      parts[rid] = list
-    end
-    list[#list + 1] = s
-  end
-  for _, slot in ipairs(state.seq_tracks or {}) do
-    local tr = seq_ingest_slot_track(slot)
-    if tr then
-      for i = 0, r.CountTrackMediaItems(tr) - 1 do
-        local item = r.GetTrackMediaItem(tr, i)
-        if item and not seq_item_is_parent_marker(item) then
-          local pos = r.GetMediaItemInfo_Value(item, "D_POSITION") or 0.0
+--
+-- Reads one slot track's items in track order as entries
+-- { pos, qn, tagged, line } (line: what the fingerprint records, nil for
+-- items it never records). Returns the ordered entries and item -> entry.
+-- With prev_items, an item whose position is unchanged and that is not
+-- tagged to a region in written_rids keeps its previous entry instead of
+-- being read again; only valid when nothing but those regions' items
+-- changed since prev_items was read.
+function seq_arrange_fp_read_slot(slot, tr, spans, prev_items, written_rids)
+  local order, items = {}, {}
+  local slot_key = tostring(slot.id)
+  for i = 0, r.CountTrackMediaItems(tr) - 1 do
+    local item = r.GetTrackMediaItem(tr, i)
+    if item then
+      local pos = r.GetMediaItemInfo_Value(item, "D_POSITION") or 0.0
+      local e = prev_items and prev_items[item]
+      if e and (e.pos ~= pos or (e.tagged and written_rids[e.tagged])
+          or (not e.line and not e.parent and e.qn and seq_region_span_lookup(spans, e.qn))) then
+        -- Moved, written, or now inside a region without a recorded line.
+        e = nil
+      end
+      if not e then
+        e = { pos = pos }
+        if seq_item_is_parent_marker(item) then
+          e.parent = true
+        else
           local qn = time_to_qn(pos)
           local tagged = nil
           local step, track_tag = "", ""
@@ -84,15 +119,17 @@ function seq_arrange_fingerprints()
             step = get_item_ext(item, SEQ_EXT_STEP) or ""
             track_tag = get_item_ext(item, SEQ_EXT_TRACK) or ""
           end
+          e.qn = qn
+          e.tagged = tagged
           local here = qn and seq_region_span_lookup(spans, qn) or nil
           if tagged or here then
             local take = r.GetActiveTake(item)
-            local s = string.format("%s|%s|%s|%s|%.6f|%.6f|%.5f",
-              tostring(slot.id), tostring(tagged), step, track_tag,
+            local line = string.format("%s|%s|%s|%s|%.6f|%.6f|%.5f",
+              slot_key, tostring(tagged), step, track_tag,
               pos, r.GetMediaItemInfo_Value(item, "D_LENGTH") or 0.0,
               r.GetMediaItemInfo_Value(item, "D_VOL") or 1.0)
             if take then
-              s = s .. string.format("|%.5f|%.5f|%.5f|%.5f|%.6f|%s",
+              line = line .. string.format("|%.5f|%.5f|%.5f|%.5f|%.6f|%s",
                 r.GetMediaItemTakeInfo_Value(take, "D_VOL") or 1.0,
                 r.GetMediaItemTakeInfo_Value(take, "D_PAN") or 0.0,
                 r.GetMediaItemTakeInfo_Value(take, "D_PITCH") or 0.0,
@@ -100,27 +137,170 @@ function seq_arrange_fingerprints()
                 r.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS") or 0.0,
                 tostring(r.GetMediaItemTake_Source(take)))
             end
-            if tagged then
-              add(tagged, s)
-            end
-            if here and here ~= tagged then
-              add(here, s)
-            end
+            e.line = line
           end
         end
       end
+      items[item] = e
+      order[#order + 1] = e
     end
   end
-  local out = {}
-  for rid, list in pairs(parts) do
-    out[rid] = table.concat(list, "\n")
-  end
-  return out
+  return order, items
 end
 
-function seq_arrange_fp_refresh(fp)
-  state.seq_arrange_fp = fp or seq_arrange_fingerprints()
+-- Files a slot's entries under the region each is tagged to and the region
+-- it sits in: region_id -> lines joined by "\n".
+function seq_arrange_fp_bucket(order, spans)
+  local lists = {}
+  for i = 1, #order do
+    local e = order[i]
+    local line = e.line
+    if line then
+      local tagged = e.tagged
+      local here = e.qn and seq_region_span_lookup(spans, e.qn) or nil
+      if tagged then
+        local list = lists[tagged]
+        if not list then
+          list = {}
+          lists[tagged] = list
+        end
+        list[#list + 1] = line
+      end
+      if here and here ~= tagged then
+        local list = lists[here]
+        if not list then
+          list = {}
+          lists[here] = list
+        end
+        list[#list + 1] = line
+      end
+    end
+  end
+  local part = {}
+  for rid, list in pairs(lists) do
+    part[rid] = table.concat(list, "\n")
+  end
+  return part
+end
+
+function seq_arrange_fp_spans_key(spans)
+  local buf = {}
+  for i = 1, #spans do
+    local s = spans[i]
+    buf[#buf + 1] = string.format("%s:%.9f:%.9f", tostring(s[3]), s[1], s[2])
+  end
+  return table.concat(buf, ";")
+end
+
+function seq_arrange_fp_slots_key(tracks)
+  local buf = {}
+  local slots = state.seq_tracks or {}
+  for i = 1, #slots do
+    buf[#buf + 1] = tostring(slots[i].id) .. "=" .. tostring(tracks[i])
+  end
+  return table.concat(buf, ";")
+end
+
+-- Returns region_id -> fingerprint, plus what it was built from (per-slot
+-- entries and parts) for the next incremental pass.
+-- only_tracks (tostring(track) -> true for the whole track, or a set of
+-- region ids):
+-- re-read only the items of those regions on those tracks and reuse the last
+-- baseline's entries for everything else. Only valid when nothing but those
+-- items changed since the baseline was taken (region moves are fine: entries
+-- are re-filed against the new region spans). Falls back to a full pass when
+-- the slot tracks changed or there is no baseline.
+function seq_arrange_fingerprints(only_tracks)
+  local spans = seq_region_span_index()
+  local slots = state.seq_tracks or {}
+  local tracks = {}
+  for i, slot in ipairs(slots) do
+    tracks[i] = seq_ingest_slot_track(slot) or false
+  end
+  local slots_key = seq_arrange_fp_slots_key(tracks)
+  local spans_key = seq_arrange_fp_spans_key(spans)
+  local base = state.seq_arrange_fp_meta
+  local reuse = only_tracks and base and base.fp == state.seq_arrange_fp
+    and type(state.seq_arrange_fp) == "table" and base.slots_key == slots_key
+  local spans_same = reuse and base.spans_key == spans_key
+  local parts, orders, item_maps = {}, {}, {}
+  local affected = {}
+  for i, slot in ipairs(slots) do
+    local tr = tracks[i]
+    local written = reuse and tr and only_tracks[tostring(tr)]
+    if reuse and not written and not spans_same and tr then
+      -- Regions moved: an item never recorded (outside every region) may now
+      -- sit inside one. Re-read just those items.
+      local order = base.orders[i] or {}
+      for j = 1, #order do
+        local e = order[j]
+        if not e.line and not e.parent and e.qn and seq_region_span_lookup(spans, e.qn) then
+          written = {}
+          break
+        end
+      end
+    end
+    if reuse and not written then
+      orders[i], item_maps[i] = base.orders[i] or {}, base.items[i] or {}
+      parts[i] = spans_same and base.parts[i] or seq_arrange_fp_bucket(orders[i], spans)
+    else
+      if tr then
+        local prev_items = (reuse and type(written) == "table") and base.items[i] or nil
+        orders[i], item_maps[i] = seq_arrange_fp_read_slot(slot, tr, spans, prev_items, written)
+      else
+        orders[i], item_maps[i] = {}, {}
+      end
+      parts[i] = seq_arrange_fp_bucket(orders[i], spans)
+      if spans_same then
+        for rid in pairs(base.parts[i] or {}) do affected[rid] = true end
+        for rid in pairs(parts[i]) do affected[rid] = true end
+      end
+    end
+  end
+  local function build(rid)
+    local chunks = {}
+    for i = 1, #slots do
+      local chunk = parts[i][rid]
+      if chunk then
+        chunks[#chunks + 1] = chunk
+      end
+    end
+    return #chunks > 0 and table.concat(chunks, "\n") or nil
+  end
+  local out = {}
+  if spans_same then
+    for rid, fp in pairs(state.seq_arrange_fp) do
+      out[rid] = fp
+    end
+  else
+    for i = 1, #slots do
+      for rid in pairs(parts[i]) do affected[rid] = true end
+    end
+  end
+  for rid in pairs(affected) do
+    out[rid] = build(rid)
+  end
+  return out, {
+    slots_key = slots_key, spans_key = spans_key,
+    parts = parts, orders = orders, items = item_maps,
+  }
+end
+
+-- fp/meta: fingerprints from a full pass this frame. Without them, take a new
+-- one; incremental reuses the last baseline for tracks the script did not
+-- write, so pass it only when nothing but our own writes happened since.
+function seq_arrange_fp_refresh(fp, meta, incremental)
+  if not fp then
+    local touched = incremental and state.seq_fp_touched or nil
+    fp, meta = seq_arrange_fingerprints(touched or nil)
+  end
+  state.seq_arrange_fp = fp
+  if meta then
+    meta.fp = fp
+  end
+  state.seq_arrange_fp_meta = meta
   state.seq_fp_refresh_at = nil
+  state.seq_fp_touched = nil
 end
 
 -- Baseline refresh deferred while the script keeps writing (a header drag
@@ -128,7 +308,7 @@ end
 function seq_arrange_fp_refresh_if_due(now)
   local due = state.seq_fp_refresh_at
   if due and now >= due then
-    seq_arrange_fp_refresh()
+    seq_arrange_fp_refresh(nil, nil, true)
   end
 end
 
@@ -137,9 +317,9 @@ end
 -- Also returns the fresh fingerprints.
 function seq_arrange_fp_dirty()
   local base = state.seq_arrange_fp
-  local now = seq_arrange_fingerprints()
+  local now, meta = seq_arrange_fingerprints()
   if type(base) ~= "table" then
-    return nil, now
+    return nil, now, meta
   end
   local dirty = {}
   for rid, s in pairs(now) do
@@ -152,7 +332,7 @@ function seq_arrange_fp_dirty()
       dirty[rid] = true
     end
   end
-  return dirty, now
+  return dirty, now, meta
 end
 
 -- REAPER's track faders are the truth for slot mix. Read them back so the
@@ -1774,7 +1954,7 @@ function ingest_seq_from_arrange()
       if streak then
         state.seq_fp_refresh_at = now + 0.2
       else
-        seq_arrange_fp_refresh()
+        seq_arrange_fp_refresh(nil, nil, true)
       end
       return
     end
@@ -1844,7 +2024,7 @@ function ingest_seq_from_arrange()
   if seq_ingest_fold_pooled_strays() then
     count = r.GetProjectStateChangeCount(0)
   end
-  local dirty, fp_now = seq_arrange_fp_dirty()
+  local dirty, fp_now, fp_meta = seq_arrange_fp_dirty()
 
   seq_sync_track_order_from_arrange(true)
   seq_ingest_slot_mix_from_arrange()
@@ -1863,7 +2043,8 @@ function ingest_seq_from_arrange()
   end
 
   if not state.seq_tracks or #state.seq_tracks == 0 or not state.seq_regions or #state.seq_regions == 0 then
-    seq_arrange_fp_refresh(r.GetProjectStateChangeCount(0) == count and fp_now or nil)
+    local unchanged = r.GetProjectStateChangeCount(0) == count
+    seq_arrange_fp_refresh(unchanged and fp_now or nil, unchanged and fp_meta or nil)
     return
   end
 
@@ -1891,7 +2072,8 @@ function ingest_seq_from_arrange()
   -- Arrange and sequencer agree again: this is the new baseline, and the
   -- retags/linked rebuilds above are ours, not edits to read back. Reuse the
   -- fingerprints taken at the start when this pass wrote nothing.
-  seq_arrange_fp_refresh(r.GetProjectStateChangeCount(0) == count and fp_now or nil)
+  local unchanged = r.GetProjectStateChangeCount(0) == count
+  seq_arrange_fp_refresh(unchanged and fp_now or nil, unchanged and fp_meta or nil)
   state.seq_skip_ingest = false
   state.seq_self_write_count = nil
   state.seq_last_proj_change = r.GetProjectStateChangeCount(0)

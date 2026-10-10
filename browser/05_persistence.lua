@@ -120,6 +120,8 @@ function reset_seq_project_state()
   state.seq_skip_ingest = false
   state.seq_self_write_count = nil
   state.seq_arrange_fp = nil
+  state.seq_arrange_fp_meta = nil
+  state.seq_fp_touched = nil
   state.seq_fp_refresh_at = nil
   state.seq_self_write_at = nil
   state.seq_ingest_rescan = nil
@@ -279,9 +281,16 @@ function save_seq_project_state(proj)
   end
   local ok, serialized = pcall(json_encode, build_seq_project_state_payload())
   if ok and type(serialized) == "string" then
+    -- If the change count is where ingest last left it, whatever this write
+    -- moves it by is ours, not an arrange edit to scan for.
+    local count_before = r.GetProjectStateChangeCount and proj == get_current_project()
+      and r.GetProjectStateChangeCount(0)
     local set_ok = pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER, serialized)
     if set_ok then
       state.seq_last_ext_state = serialized
+      if count_before and state.seq_last_proj_change == count_before then
+        state.seq_last_proj_change = r.GetProjectStateChangeCount(0)
+      end
     end
   end
 end
@@ -337,6 +346,12 @@ function sync_project_state_if_needed()
   end
   local token = tostring(proj) .. "|" .. proj_fn
   if loaded_project_token ~= token then
+    -- A pending save belongs to the old project; the code below decides
+    -- whether that project may still be written. Keep only the config file.
+    if state._config_save_due then
+      state._config_save_due = nil
+      save_config_file()
+    end
     local same_pointer = loaded_project ~= nil and tostring(loaded_project) == tostring(proj)
     if same_pointer and r.GetProjExtState then
       -- Same pointer, new path: either "Save As" of this project, or another
@@ -743,7 +758,35 @@ function sm_save_tag_presets(presets)
   return ok
 end
 
+-- Edits call save_config() often, several times per click, and each call
+-- wrote the config file and re-encoded the whole sequencer state. Requests
+-- are now coalesced and written once, shortly after the last one
+-- (sm_flush_config_save runs every frame). Shutdown writes immediately.
+SM_CONFIG_SAVE_DELAY = 0.35
+
 function save_config()
+  state._config_save_due = (r.time_precise and r.time_precise() or os.clock()) + SM_CONFIG_SAVE_DELAY
+end
+
+function sm_flush_config_save(force)
+  local due = state._config_save_due
+  if not due then
+    return false
+  end
+  if not force and (r.time_precise and r.time_precise() or os.clock()) < due then
+    return false
+  end
+  save_config_now()
+  return true
+end
+
+function save_config_now()
+  state._config_save_due = nil
+  save_config_file()
+  save_seq_project_state(loaded_project or get_current_project())
+end
+
+function save_config_file()
   if snapshot_active_map_tab then
     snapshot_active_map_tab()
   end
@@ -799,7 +842,6 @@ function save_config()
   else
     log("Failed to save config file: " .. tostring(save_err))
   end
-  save_seq_project_state(loaded_project or get_current_project())
 end
 
 

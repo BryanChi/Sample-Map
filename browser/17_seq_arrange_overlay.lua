@@ -508,6 +508,9 @@ end
 -- state (ProjExtState is not in the undo history), so Sample Map keeps its
 -- own snapshot stack. Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z drive it.
 SEQ_UNDO_MAX = 80
+-- The latest snapshot taken, kept so the next one can share its unchanged
+-- sections even when the undo stack is empty.
+seq_undo_base_snapshot = nil
 seq_undo_stack = {}
 seq_redo_stack = {}
 seq_undo_session = nil
@@ -520,6 +523,7 @@ end
 
 function seq_undo_clear_history()
   state.seq_pattern_confirm = nil
+  seq_undo_base_snapshot = nil
   seq_undo_stack = {}
   seq_redo_stack = {}
   -- Close a REAPER undo block still open from an interrupted session.
@@ -531,50 +535,114 @@ function seq_undo_clear_history()
   seq_undo_commit_on_release = false
 end
 
+local function seq_undo_numbers_equal(a, b)
+  if a ~= a or b ~= b then
+    return a ~= a and b ~= b
+  end
+  return math.abs(a - b) < 0.000000001
+end
+
+-- Deep equality, numbers within 1e-9. Leaf values are compared inline: this
+-- runs over the whole sequencer document on every undoable edit.
 function seq_undo_values_equal(a, b)
   if a == b then
     return true
   end
-  if type(a) ~= type(b) then
+  local ta = type(a)
+  if ta ~= type(b) then
     return false
   end
-  if type(a) ~= "table" then
-    if type(a) == "number" and type(b) == "number" then
-      if a ~= a or b ~= b then
-        return a ~= a and b ~= b
-      end
-      return math.abs(a - b) < 0.000000001
-    end
-    return a == b
+  if ta == "number" then
+    return seq_undo_numbers_equal(a, b)
+  end
+  if ta ~= "table" then
+    return false
   end
   for k, v in pairs(a) do
-    if not seq_undo_values_equal(v, b[k]) then
-      return false
+    local w = b[k]
+    if v ~= w then
+      local tv = type(v)
+      if tv == "table" then
+        if type(w) ~= "table" or not seq_undo_values_equal(v, w) then
+          return false
+        end
+      elseif tv ~= "number" or type(w) ~= "number" or not seq_undo_numbers_equal(v, w) then
+        return false
+      end
     end
   end
-  for k, v in pairs(b) do
-    if a[k] == nil and v ~= nil then
+  for k in pairs(b) do
+    if a[k] == nil then
       return false
     end
   end
   return true
 end
 
-function capture_seq_document_snapshot()
-  return {
-    seq_tracks = clone_table_deep(state.seq_tracks),
-    selected_seq_track = state.selected_seq_track,
-    seq_track_next_id = state.seq_track_next_id,
-    seq_regions = clone_table_deep(state.seq_regions),
-    seq_patterns = clone_table_deep(state.seq_patterns),
-    seq_region_next_id = state.seq_region_next_id,
-    seq_pattern_next_id = state.seq_pattern_next_id,
-    seq_pool_next_id = state.seq_pool_next_id,
-    selected_seq_region_id = state.selected_seq_region_id,
-    seq_kit_history = clone_table_deep(state.seq_kit_history),
-    seq_kit_history_next_id = state.seq_kit_history_next_id,
-    seq_razors = clone_table_deep(state.seq_razors) or {},
-  }
+SEQ_UNDO_SNAPSHOT_TABLES = { "seq_tracks", "seq_regions", "seq_kit_history", "seq_razors" }
+SEQ_UNDO_SNAPSHOT_SCALARS = {
+  "selected_seq_track", "seq_track_next_id", "seq_region_next_id", "seq_pattern_next_id",
+  "seq_pool_next_id", "selected_seq_region_id", "seq_kit_history_next_id",
+}
+
+-- Deep copy of the sequencer document. Snapshots are never mutated after
+-- capture, so with base (an earlier snapshot) every section, and every
+-- pattern, that still equals the live one is shared with base instead of
+-- cloned again. Returns base itself when nothing changed.
+function capture_seq_document_snapshot(base)
+  if type(base) ~= "table" then
+    base = nil
+  end
+  local snap = {}
+  local same = base ~= nil
+  for _, key in ipairs(SEQ_UNDO_SNAPSHOT_TABLES) do
+    local live = state[key]
+    if key == "seq_razors" then
+      live = live or {}
+    end
+    local prev = base and base[key]
+    if prev ~= nil and seq_undo_values_equal(prev, live) then
+      snap[key] = prev
+    else
+      snap[key] = clone_table_deep(live)
+      same = false
+    end
+  end
+  local live_patterns = state.seq_patterns
+  local prev_patterns = base and base.seq_patterns
+  if type(live_patterns) == "table" and type(prev_patterns) == "table" then
+    local patterns = {}
+    local reused_all = true
+    for pid, pat in pairs(live_patterns) do
+      local prev = prev_patterns[pid]
+      if prev ~= nil and seq_undo_values_equal(prev, pat) then
+        patterns[pid] = prev
+      else
+        patterns[pid] = clone_table_deep(pat)
+        reused_all = false
+      end
+    end
+    for pid in pairs(prev_patterns) do
+      if live_patterns[pid] == nil then
+        reused_all = false
+      end
+    end
+    snap.seq_patterns = reused_all and prev_patterns or patterns
+    same = same and reused_all
+  else
+    snap.seq_patterns = clone_table_deep(live_patterns)
+    same = same and live_patterns == nil and prev_patterns == nil
+  end
+  for _, key in ipairs(SEQ_UNDO_SNAPSHOT_SCALARS) do
+    snap[key] = state[key]
+    if same and not seq_undo_values_equal(base[key], snap[key]) then
+      same = false
+    end
+  end
+  if same then
+    return base
+  end
+  return snap
 end
 
 function restore_seq_document_snapshot(snap)
@@ -586,7 +654,19 @@ function restore_seq_document_snapshot(snap)
   state.selected_seq_track = snap.selected_seq_track
   state.seq_track_next_id = snap.seq_track_next_id or 1
   state.seq_regions = clone_table_deep(snap.seq_regions) or {}
-  state.seq_patterns = clone_table_deep(snap.seq_patterns) or {}
+  -- Patterns that already match the snapshot stay as they are; cloning
+  -- every pattern made undo cost grow with the whole song.
+  local live_patterns = state.seq_patterns
+  local patterns = {}
+  for pid, pat in pairs(snap.seq_patterns or {}) do
+    local cur = type(live_patterns) == "table" and live_patterns[pid] or nil
+    if cur ~= nil and seq_undo_values_equal(cur, pat) then
+      patterns[pid] = cur
+    else
+      patterns[pid] = clone_table_deep(pat)
+    end
+  end
+  state.seq_patterns = patterns
   state.seq_region_next_id = snap.seq_region_next_id or 1
   state.seq_pattern_next_id = snap.seq_pattern_next_id or 1
   state.seq_pool_next_id = snap.seq_pool_next_id or 1
@@ -839,7 +919,8 @@ function seq_apply_undo_snapshot_body(snap, label, guard)
     save_seq_project_state()
   end
   if seq_mark_self_arrange_write then
-    seq_mark_self_arrange_write()
+    -- The item writes above already named their tracks and regions.
+    seq_mark_self_arrange_write(false)
   end
   if r.GetProjectStateChangeCount then
     state.seq_last_proj_change = r.GetProjectStateChangeCount(0)
@@ -900,31 +981,13 @@ function seq_undo_label_is_manual_note_edit(label)
     or l:find("cells", 1, true) ~= nil
 end
 
--- Snapshots are never mutated after capture (restore clones field-by-field),
--- so when nothing changed since the last committed edit, reuse its `after`
--- as this session's `before` instead of storing another deep clone.
+-- When nothing changed since the last committed edit this returns its
+-- `after` itself; otherwise unchanged sections are shared with it.
 function seq_undo_capture_before_snapshot()
   local last = seq_undo_stack[#seq_undo_stack]
-  if last and type(last.after) == "table" then
-    local live = {
-      seq_tracks = state.seq_tracks,
-      selected_seq_track = state.selected_seq_track,
-      seq_track_next_id = state.seq_track_next_id,
-      seq_regions = state.seq_regions,
-      seq_patterns = state.seq_patterns,
-      seq_region_next_id = state.seq_region_next_id,
-      seq_pattern_next_id = state.seq_pattern_next_id,
-      seq_pool_next_id = state.seq_pool_next_id,
-      selected_seq_region_id = state.selected_seq_region_id,
-      seq_kit_history = state.seq_kit_history,
-      seq_kit_history_next_id = state.seq_kit_history_next_id,
-      seq_razors = state.seq_razors or {},
-    }
-    if seq_undo_values_equal(last.after, live) then
-      return last.after
-    end
-  end
-  return capture_seq_document_snapshot()
+  local snap = capture_seq_document_snapshot((last and last.after) or seq_undo_base_snapshot)
+  seq_undo_base_snapshot = snap
+  return snap
 end
 
 function end_seq_undo(label)
@@ -938,8 +1001,9 @@ function end_seq_undo(label)
   if not lazy then
     seq_undo_end_reaper(label)
   end
-  local after = capture_seq_document_snapshot()
-  if seq_undo_values_equal(before, after) then
+  local after = capture_seq_document_snapshot(before)
+  seq_undo_base_snapshot = after
+  if after == before or seq_undo_values_equal(before, after) then
     return
   end
   if lazy and r.Undo_OnStateChange2 then
