@@ -629,6 +629,14 @@ function finish_scan_session(still_incomplete)
     end
   end
 
+  for _, row in ipairs(debug_samples) do
+    if tostring(row.why or ""):find("no audio decoder", 1, true) then
+      local hint = "No audio decoder found: install ffmpeg to analyze mp3, flac, ogg and m4a files, then rescan."
+      note = note and (note .. "\n" .. hint) or hint
+      break
+    end
+  end
+
   local error_tooltip = nil
   if #debug_lines > 0 then
     error_tooltip = table.concat(debug_lines, "\n")
@@ -688,10 +696,15 @@ function sample_row_is_unreadable(entry)
   if type(entry) ~= "table" then
     return false
   end
+  -- Only failures that point at the file itself. "no audio decoder found"
+  -- (ffmpeg/sox missing) and "empty analyzer output" (worker trouble) are not
+  -- the file's fault, so they are never offered for deletion.
   local why = tostring(entry.why or "")
+  if why:find("no audio decoder", 1, true) then
+    return false
+  end
   return why:find("could not decode", 1, true) ~= nil
     or why:find("file not found", 1, true) ~= nil
-    or why:find("empty analyzer", 1, true) ~= nil
 end
 
 function scan_complete_unreadable_paths(dlg)
@@ -812,7 +825,9 @@ function draw_scan_complete_sample_menu_items(path, name, why)
       r.ImGui_SetClipboardText(ctx, path or "")
     end
   end
-  if path and path ~= "" then
+  -- Deletion is only offered for files the analyzer could not read, which is
+  -- what the confirmation text promises.
+  if path and path ~= "" and sample_row_is_unreadable({ why = why }) then
     r.ImGui_Separator(ctx)
     if r.ImGui_MenuItem(ctx, "Delete this file…") then
       local dlg = state.scan_complete_dialog
