@@ -38,6 +38,72 @@ function sm_error_traceback(err)
 end
 
 -- Log every error; show the first one from each site in the REAPER console.
+-- Short on-screen message for actions that would otherwise do nothing
+-- visibly ("no matching samples", "track has no sample"...). Drawn by
+-- sm_draw_toast at the bottom of the main window; also kept in the log.
+-- kind: "info" (default), "warn" or "error".
+SM_TOAST_SECONDS = 3.2
+
+function sm_notify(msg, kind)
+  if msg == nil or msg == "" then
+    return
+  end
+  msg = tostring(msg)
+  log(msg)
+  local now = (r.time_precise and r.time_precise()) or os.clock()
+  local t = state.sm_toast
+  if t and t.text == msg and (now - (t.t or 0)) < SM_TOAST_SECONDS then
+    -- Same message again: keep it up instead of restarting the fade.
+    t.t = now
+    t.count = (t.count or 1) + 1
+    return
+  end
+  state.sm_toast = { text = msg, kind = kind or "info", t = now, count = 1 }
+end
+
+function sm_draw_toast()
+  local t = state.sm_toast
+  if not t or not ctx then
+    return
+  end
+  local now = r.time_precise()
+  local age = now - (t.t or 0)
+  if age >= SM_TOAST_SECONDS then
+    state.sm_toast = nil
+    return
+  end
+  local rect = state.main_window_rect
+  if not rect or not r.ImGui_GetForegroundDrawList then
+    return
+  end
+  local alpha = 1.0
+  if age > SM_TOAST_SECONDS - 0.6 then
+    alpha = math.max(0, (SM_TOAST_SECONDS - age) / 0.6)
+  end
+  local function fade(col)
+    local a = col & 0xFF
+    return (col & 0xFFFFFF00) | math.floor(a * alpha + 0.5)
+  end
+  local text = t.text
+  if (t.count or 1) > 1 then
+    text = text .. string.format("  (x%d)", t.count)
+  end
+  local tw, th = r.ImGui_CalcTextSize(ctx, text)
+  local pad_x, pad_y = 14, 8
+  local w, h = tw + pad_x * 2, th + pad_y * 2
+  local x0 = rect.x + math.max(8, (rect.w - w) * 0.5)
+  local y0 = rect.y + rect.h - h - 18
+  local dl = r.ImGui_GetForegroundDrawList(ctx)
+  local accent = (t.kind == "error" and UI_THEME.danger)
+    or (t.kind == "warn" and 0xFFB870FF)
+    or UI_THEME.accent
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0 + 2, x0 + w, y0 + h + 2, fade(0x00000080), 7)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, fade(UI_THEME.elevated), 7)
+  r.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h, fade(UI_THEME.border_hvr), 7, 0, 1)
+  r.ImGui_DrawList_AddRectFilled(dl, x0 + 5, y0 + 6, x0 + 8, y0 + h - 6, fade(accent), 1.5)
+  r.ImGui_DrawList_AddText(dl, x0 + pad_x, y0 + pad_y, fade(UI_THEME.text), text)
+end
+
 function sm_report_error(site, err)
   site = tostring(site or "?")
   log("[error] " .. site .. ": " .. tostring(err))
