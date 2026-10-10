@@ -338,52 +338,72 @@ function create_seq_track_from_popup(track_name, tag_name)
   return true
 end
 
+SEQ_ADD_TRACK_POPUP_W = 460.0
+-- Outline for chips that are already in use (tracks here, project genres in
+-- the kit popup).
+SEQ_USED_CHIP_RING = 0xFFB870AA
+
+-- Tag groups shown in the add-track popup, in display order.
+SEQ_ADD_TRACK_GROUPS = {
+  { key = "drum", label = "Drums" },
+  { key = "melodic", label = "Melodic" },
+  { key = "loop", label = "Loops" },
+  { key = "other", label = "Other" },
+  { key = "genre", label = "Genres" },
+}
+
 function seq_add_popup_tag_width(tag_label)
   local text_w = r.ImGui_CalcTextSize(ctx, tag_label)
   local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   return text_w + pad_x * 2
 end
 
-function seq_add_popup_count_rows(query_lower, content_w)
-  content_w = math.max(120.0, content_w or 480.0)
-  local rows = 0
-  local row_w = 0.0
-  local gap = 6.0
+function seq_add_popup_group_key(tag)
+  local cat = categorize_tags(tag)
+  if cat == "drum" or cat == "melodic" or cat == "loop" or cat == "genre" then
+    return cat
+  end
+  return "other"
+end
+
+-- Lowercased tags and names already used by sequencer tracks.
+function seq_add_popup_used_set()
+  local used = {}
+  for _, slot in ipairs(state.seq_tracks or {}) do
+    local tag = seq_trim_text(slot.sample_tag):lower()
+    if tag ~= "" then
+      used[tag] = true
+    end
+    local name = seq_trim_text(slot.name):lower()
+    if name ~= "" then
+      used[name] = true
+    end
+  end
+  return used
+end
+
+-- Library tags matching the query, grouped for display, plus the tag that
+-- matches the query exactly (if any).
+function seq_add_popup_matches(query_lower)
+  local groups, exact = {}, nil
   for _, entry in ipairs(state.tag_list or {}) do
     local tag = tostring(entry.tag or "")
-    if query_lower == "" or tag:lower():find(query_lower, 1, true) then
-      local tw = seq_add_popup_tag_width(tag)
-      if rows == 0 then
-        rows = 1
-        row_w = tw
-      elseif row_w + gap + tw > content_w then
-        rows = rows + 1
-        row_w = tw
-      else
-        row_w = row_w + gap + tw
+    if tag ~= "" and (query_lower == "" or tag:lower():find(query_lower, 1, true)) then
+      local key = seq_add_popup_group_key(tag)
+      groups[key] = groups[key] or {}
+      groups[key][#groups[key] + 1] = entry
+      if query_lower ~= "" and tag:lower() == query_lower then
+        exact = tag
       end
     end
   end
-  return math.max(1, rows)
-end
-
-function seq_add_popup_window_height(trimmed_query)
-  local popup_w = 520.0
-  local content_w = popup_w - 32.0
-  local query_lower = seq_trim_text(trimmed_query):lower()
-  local rows = seq_add_popup_count_rows(query_lower, content_w)
-  local tag_row_h = 28.0
-  return math.max(220.0, 118.0 + rows * tag_row_h + 12.0)
+  return groups, exact
 end
 
 function open_seq_add_track_popup()
   state.seq_new_track_query = ""
   if (not state.tag_list or #state.tag_list == 0) and #state.samples > 0 then
     rebuild_tag_index()
-  end
-  if r.ImGui_SetNextWindowSize then
-    local cond = r.ImGui_Cond_Appearing and r.ImGui_Cond_Appearing() or 0
-    r.ImGui_SetNextWindowSize(ctx, 520, seq_add_popup_window_height(""), cond)
   end
   r.ImGui_OpenPopup(ctx, "seq_add_track_popup")
 end
@@ -394,51 +414,59 @@ function render_seq_add_track_full_width_button(button_id, button_h)
   end
 end
 
-function render_seq_add_popup_tag_list(trimmed_query)
-  local wrap_w = r.ImGui_GetContentRegionAvail(ctx)
-  local query_lower = seq_trim_text(trimmed_query):lower()
-  local row_w = 0.0
-  local gap = 6.0
-  local shown_tags = 0
-  local first_tag = true
+function seq_add_track_and_close(name, tag)
+  if create_seq_track_from_popup(name, tag) then
+    state.seq_new_track_query = ""
+    r.ImGui_CloseCurrentPopup(ctx)
+    return true
+  end
+  return false
+end
 
-  for idx, entry in ipairs(state.tag_list or {}) do
-    local tag = tostring(entry.tag or "")
-    if query_lower == "" or tag:lower():find(query_lower, 1, true) then
-      local tw = seq_add_popup_tag_width(tag)
-      if not first_tag then
-        if row_w + gap + tw > wrap_w then
-          row_w = 0.0
-        else
-          r.ImGui_SameLine(ctx, 0, gap)
-          row_w = row_w + gap
-        end
+function render_seq_add_popup_tag_chip(entry, idx, used)
+  local tag = tostring(entry.tag or "")
+  local is_used = used[tag:lower()] == true
+  if draw_tag_button(ctx, tag, false, tag, "seq_add_popup_" .. tostring(idx) .. "_") then
+    seq_add_track_and_close(tag, tag)
+  end
+  if is_used then
+    ui_draw_chip_ring(SEQ_USED_CHIP_RING)
+  end
+  if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
+    local count = tonumber(entry.count) or 0
+    local tip = string.format("%d sample%s\nAdd a \"%s\" track with one of them", count, count == 1 and "" or "s", tag)
+    if is_used then
+      tip = tip .. "\nAlready in the sequencer"
+    end
+    r.ImGui_SetTooltip(ctx, tip)
+  end
+end
+
+function render_seq_add_popup_tag_list(groups)
+  local used = seq_add_popup_used_set()
+  local shown = 0
+  local idx = 0
+  for _, group in ipairs(SEQ_ADD_TRACK_GROUPS) do
+    local entries = groups[group.key]
+    if entries and #entries > 0 then
+      ui_group_caption(group.label)
+      local flow = ui_flow_begin(6.0)
+      for _, entry in ipairs(entries) do
+        idx = idx + 1
+        ui_flow_place(flow, seq_add_popup_tag_width(tostring(entry.tag or "")))
+        render_seq_add_popup_tag_chip(entry, idx, used)
+        shown = shown + 1
       end
-      first_tag = false
-      shown_tags = shown_tags + 1
-      if draw_tag_button(ctx, tag, false, tag, "seq_add_popup_" .. tostring(idx) .. "_") then
-        if create_seq_track_from_popup(tag, tag) then
-          state.seq_new_track_query = ""
-          r.ImGui_CloseCurrentPopup(ctx)
-        end
-      end
-      row_w = row_w + tw
+      r.ImGui_Dummy(ctx, 1, 4)
     end
   end
-
-  if shown_tags == 0 then
-    r.ImGui_TextColored(ctx, 0xFF888888, "No tags match filter")
-  end
-  return shown_tags
+  return shown
 end
 
 function render_seq_add_track_popup()
-  local trimmed_query = seq_trim_text(state.seq_new_track_query)
-  if r.ImGui_IsPopupOpen and r.ImGui_IsPopupOpen(ctx, "seq_add_track_popup") and r.ImGui_SetNextWindowSize then
-    local cond = r.ImGui_Cond_Always and r.ImGui_Cond_Always() or 0
-    r.ImGui_SetNextWindowSize(ctx, 520, seq_add_popup_window_height(trimmed_query), cond)
+  if r.ImGui_SetNextWindowSizeConstraints then
+    r.ImGui_SetNextWindowSizeConstraints(ctx, SEQ_ADD_TRACK_POPUP_W, 0, SEQ_ADD_TRACK_POPUP_W, 2000)
   end
-
   if not r.ImGui_BeginPopup(ctx, "seq_add_track_popup") then
     return
   end
@@ -447,26 +475,45 @@ function render_seq_add_track_popup()
     rebuild_tag_index()
   end
 
-  r.ImGui_Text(ctx, "Track Name / Tag Search")
-  local changed, query = r.ImGui_InputText(ctx, "##seq_new_track_query", state.seq_new_track_query or "", 128)
-  seq_mark_text_input_item()
-  if changed then
-    state.seq_new_track_query = query
-    trimmed_query = seq_trim_text(query)
+  local track_count = #(state.seq_tracks or {})
+  ui_popup_header("plus", "Add track",
+    string.format("%d track%s", track_count, track_count == 1 and "" or "s"))
+
+  local submitted, query = ui_popup_search("seq_new_track_query", "Name the track or search tags", state.seq_new_track_query)
+  state.seq_new_track_query = query
+  local trimmed_query = seq_trim_text(query)
+  local groups, exact_tag = seq_add_popup_matches(trimmed_query:lower())
+
+  local create_label = (trimmed_query ~= "") and ('Create "' .. trimmed_query .. '"') or "Create empty track"
+  local create_clicked = draw_ui_button("seq_create_custom", create_label, nil, 28,
+    { full_width = true, style = "primary", lead_icon = "plus" })
+  local hint
+  if exact_tag then
+    hint = "Loads a sample tagged \"" .. exact_tag .. "\""
+  elseif trimmed_query ~= "" then
+    hint = "No tag matches this name, so the track starts empty"
+  else
+    hint = "Or pick a tag below to get a track with a matching sample"
+  end
+  r.ImGui_TextColored(ctx, UI_THEME.text_dim, hint)
+  if create_clicked or (submitted and trimmed_query ~= "") then
+    seq_add_track_and_close(trimmed_query, exact_tag)
   end
 
-  local create_label = (trimmed_query ~= "") and ('Create "' .. trimmed_query .. '"') or "Create Track"
-  if draw_ui_button("seq_create_custom", create_label, nil, nil, { full_width = true, style = "primary" }) then
-    if create_seq_track_from_popup(trimmed_query, nil) then
-      state.seq_new_track_query = ""
-      r.ImGui_CloseCurrentPopup(ctx)
+  r.ImGui_Dummy(ctx, 1, 2)
+  local list_h = ui_fit_child_height("seq_add_track_tags", 48, 300)
+  local opened = ui_fit_child_begin("seq_add_track_tags", 0, list_h)
+  if opened then
+    local shown = render_seq_add_popup_tag_list(groups)
+    if shown == 0 then
+      local msg = (#(state.tag_list or {}) == 0) and "No tags in the library yet" or "No tags match"
+      r.ImGui_TextColored(ctx, UI_THEME.text_mute, msg)
     end
   end
+  ui_fit_child_end("seq_add_track_tags", opened)
 
-  r.ImGui_Separator(ctx)
-  r.ImGui_Text(ctx, "Available Tags")
-  r.ImGui_Dummy(ctx, 0, 4)
-  render_seq_add_popup_tag_list(trimmed_query)
+  ui_popup_footer("Enter: create   ·   Esc: close   ·   Outlined: already a track")
+  ui_popup_close_on_escape()
   r.ImGui_EndPopup(ctx)
 end
 
