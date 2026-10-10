@@ -3791,11 +3791,7 @@ function render_waveform()
       end
 
       if hovered and near_handle and not state.waveform_eff_drag then
-        r.ImGui_BeginTooltip(ctx)
-        r.ImGui_Text(ctx, "Effective length")
-        r.ImGui_Text(ctx, "Drag to crop trailing silence")
-        r.ImGui_TextColored(ctx, 0xAAAAAAFF, "Double-click to reset to full file")
-        r.ImGui_EndTooltip(ctx)
+        hint_tooltip("Effective length\nDrag to crop trailing silence\nDouble-click to reset to full file")
       end
 
       if hovered and near_handle and r.ImGui_IsMouseDoubleClicked(ctx, 0) then

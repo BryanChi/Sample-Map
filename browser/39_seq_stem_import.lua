@@ -290,19 +290,7 @@ function seq_stem_import_help_mark(id, tip)
   local qw, qh = r.ImGui_CalcTextSize(ctx, "?")
   r.ImGui_DrawList_AddText(dl, cx - qw * 0.5, cy - qh * 0.5 - 1, col, "?")
   if hovered and tip and tip ~= "" then
-    if r.ImGui_BeginTooltip then
-      r.ImGui_BeginTooltip(ctx)
-      if r.ImGui_PushTextWrapPos then
-        r.ImGui_PushTextWrapPos(ctx, 340)
-      end
-      r.ImGui_Text(ctx, tip)
-      if r.ImGui_PopTextWrapPos then
-        r.ImGui_PopTextWrapPos(ctx)
-      end
-      r.ImGui_EndTooltip(ctx)
-    elseif r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, tip)
-    end
+    hint_tooltip(tip)
   end
 end
 
