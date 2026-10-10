@@ -183,7 +183,7 @@ function corner_row(side_key, i)
   local label = seq_layering_rand_label(SLOT, side_key, i)
   local text = seq_truncate_text_to_width and seq_truncate_text_to_width(label, 74) or label
   local type_w = math.min(96, #text * 7 + 22)
-  local row_w = 18 * 3 + 3 * 3 + type_w
+  local row_w = 18 * 4 + 3 * 4 + type_w
   local row_x = math.max(card_x + 8.0, math.min(card_x + col_w - 8.0 - row_w, vx - row_w * 0.5))
   return row_x, vy + 26.0 + 13.0, type_w
 end
@@ -193,7 +193,7 @@ function tri(side_key)
   local avail = 776
   local col_w = seq_layering_col_w(avail)
   local x = 52 + (side_key == "sustain" and (col_w + SEQ_LAYER_LINK_W) or 0)
-  local y = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H + seq_layering_lanes_h(SLOT)
+  local y = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H
   local ax, ay, bx, by, cx, cy = seq_layering_tri_geom(x, y, col_w, seq_layering_card_h(col_w))
   return { ax, ay, bx, by, cx, cy }
 end
@@ -690,7 +690,7 @@ def test_xfade_pill_drag_and_reset():
     _render_ok(L, 1)
     got = L.execute(r'''
       local col_w = seq_layering_col_w(776)
-      local y = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H + seq_layering_lanes_h(SLOT)
+      local y = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H
       local card_h = seq_layering_card_h(col_w)
       local link_sz, bias_h = 30.0, 16.0
       local cluster_h = link_sz + 22.0 + (bias_h + 40.0) * 2.0
@@ -1053,7 +1053,7 @@ def test_gain_fader_drag_in_the_card_header():
     _render_ok(L, 1)
     got = L.execute(r'''
       local col_w = seq_layering_col_w(776)
-      local x, y = 52, 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H + seq_layering_lanes_h(SLOT)
+      local x, y = 52, 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H
       local bx = x + col_w - 8.0 - 20.0 - 2 * 24.0  -- dice
       local bar_x1 = bx - 10.0
       MOUSE.x, MOUSE.y = bar_x1 - 20, y + SEQ_LAYER_CARD_HEAD_H * 0.5
@@ -1073,35 +1073,6 @@ def test_gain_fader_drag_in_the_card_header():
     assert g > 1.5
     assert abs(b1 - 0.5) < 1e-9  # the blend point didn't move
 
-
-def test_corner_strip_in_the_picker_sets_length():
-    L = _runtime()
-    _render_ok(L, 1)
-    got = L.execute(r'''
-      SLOT.layers.sustain.blend = { 0.5, 0.5, 0.0 }
-      seq_layering_open_vert_chooser(SLOT, "sustain", 2)
-      frame_picker()
-      local x, y, w = 48, 48, SEQ_LAYER_PICKER_MAP
-      local chips_y = y + 24 + 8
-      local _, t1 = seq_layering_corner_span(SLOT, "sustain", 2)
-      -- Tag row height: find the strip by scanning for the end handle.
-      local tags_h = seq_layering_picker_header_h(state.seq_minimap_popup, SLOT, w) - (24 + 8 + 4 + SEQ_LAYER_CORNER_STRIP_H)
-      local sy = chips_y + tags_h + 2.0 + 20.0
-      MOUSE.x, MOUSE.y = x + w, sy + 20
-      frame_picker()
-      MOUSE.down, MOUSE.clicked = true, true
-      frame_picker()
-      MOUSE.x = x + 0.2 / t1 * w
-      frame_picker()
-      local during = SLOT.layers.sustain.verts[2].len
-      local syncs0 = SYNCS
-      MOUSE.down = false
-      frame_picker()
-      return during, SYNCS > syncs0
-    ''')
-    length, synced = got
-    assert length and abs(length - 0.2) < 0.01
-    assert synced
 
 
 def _fake_render(L):
@@ -1299,59 +1270,88 @@ def test_glue_joins_the_library_quietly():
     assert scans == 0 and no_session
 
 
-def test_corner_lanes_in_the_window_set_length_and_fade():
+def test_corner_env_button_opens_the_envelope_editor_on_that_corner():
     L = _runtime()
     _render_ok(L, 1)
     got = L.execute(r'''
-      local lanes = seq_layering_lanes(SLOT)
-      local k, lane
-      for i, l in ipairs(lanes) do
-        if l.owners[1].side == "sustain" and #l.owners == 1 then k, lane = i, l end
-      end
-      local ix, iw = 62, 776 - 20
-      local _, dur = seq_layering_mix_peaks(SLOT, math.floor(iw))
-      local y0 = 50 + SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H - 4.0
-      local ly = y0 + (k - 1) * (SEQ_LAYER_LANE_H + SEQ_LAYER_LANE_GAP)
-      local t_end = lane.t_off + lane.len
-      MOUSE.x, MOUSE.y = ix + t_end / dur * iw, ly + 3 + 14
+      local row_x, row_y, type_w = corner_row("sustain", 2)
+      -- dice, lock, type chip, volume, envelope
+      MOUSE.x, MOUSE.y = row_x + 2 * 21 + type_w + 3 + 21 + 9, row_y + 9
       frame()
       local hint = state.seq_layering_hint
       MOUSE.down, MOUSE.clicked = true, true
       frame()
-      MOUSE.x = ix + 0.2 / dur * iw
-      frame()
-      local syncs0 = SYNCS
       MOUSE.down = false
       frame()
-      local v = SLOT.layers[lane.owners[1].side].verts[lane.owners[1].idx]
-      local len = v.len
-      -- Fade grip on top, at the (new) end: drag 50 ms left.
-      local ex = ix + 0.2 / dur * iw
-      MOUSE.x, MOUSE.y = ex - 7, ly + 3 + 2
-      frame()
-      MOUSE.down, MOUSE.clicked = true, true
-      frame()
-      MOUSE.x = ix + 0.15 / dur * iw
-      frame()
-      MOUSE.down = false
-      frame()
-      return #lanes, hint, len, SYNCS > syncs0, v.fade
+      local t = state.seq_env_popup_target
+      local proxy = seq_env_popup_custom_target()
+      -- The editor writes the corner's envelope through the proxy.
+      proxy.env = { points = { { t = 0, amp = 1, curve = 0 }, { t = 0.1, amp = 1, curve = 0 }, { t = 0.12, amp = 0, curve = 0 }, { t = 0.5, amp = 0, curve = 0 } } }
+      local v = SLOT.layers.sustain.verts[2]
+      -- The editor card draws for the corner, beside the layering window.
+      state.seq_layering_rect = { x = 40, y = 40, w = 800, h = 600 }
+      state.main_window_rect = { x = 0, y = 0, w = 2000, h = 1200 }
+      reaper.ImGui_GetIO = function() return nil end  -- the stub has no IO object
+      local ok, err = pcall(render_seq_env_editor_popup)
+      local px, py = proxy.popup_anchor(300, 200)
+      seq_close_env_editor_popup()
+      return hint, t and (t.side .. ":" .. t.idx), proxy.sample_path, proxy.id, v.env ~= nil and #v.env.points,
+        ok, tostring(err), px, state.seq_env_popup_target == nil and state.seq_env_popup_slot_id == nil
     ''')
-    n, hint, length, synced, fade = got
-    assert n >= 3
-    assert hint and "length" in hint
-    assert length and abs(length - 0.2) < 0.01 and synced
-    assert fade and abs(fade - 0.05) < 0.01
+    hint, target, path, pid, npoints, ok, err, px, closed = got
+    assert hint and "envelope" in hint
+    assert target == "sustain:2" and path == "/s/sub.wav" and pid == "layer:77:sustain:2"
+    assert npoints == 4
+    assert ok, err
+    assert px == 40 + 800 + 10  # right of the window (sustain side)
+    assert closed
 
 
-def test_plain_track_has_one_lane_for_its_sample():
+def test_corner_env_shapes_pieces_preview_and_player():
     L = _runtime()
     got = L.execute(r'''
-      local plain = { id = 91, sample_path = A.path, sample_name = A.name }
-      seq_layering_seed_from_track(plain)
-      local lanes = seq_layering_lanes(plain)
-      seq_layering_set_lane_cut(plain, lanes[1], 0.2, 0.05)
-      return #lanes, lanes[1].key, seq_layering_geometry_active(plain), seq_layering_mix_duration(plain)
+      SLOT.layers.output = "layered"
+      SLOT.layers.sustain.blend = { 0.5, 0.5, 0.0 }
+      local v = SLOT.layers.sustain.verts[2]
+      local before = seq_layering_mix_peaks(SLOT, 200)
+      v.env = { points = {
+        { t = 0.0, amp = 1.0, curve = 0.0 }, { t = 0.2, amp = 1.0, curve = 0.0 },
+        { t = 0.25, amp = 0.0, curve = 0.0 }, { t = 0.5, amp = 0.0, curve = 0.0 } } }
+      local piece
+      for _, p in ipairs(seq_layering_build_pieces(SLOT)) do
+        if p.path == C.path and p.time_offset_sec > 0 then piece = p end
+      end
+      local _, _, startoffs, t_off, len = seq_layering_piece_span(piece)
+      local after = seq_layering_mix_peaks(SLOT, 200)
+      -- Track envelope (fade 1 -> 0.5 over 0.5 s) x corner envelope, in item time.
+      local tenv = { points = { { t = 0.0, amp = 1.0, curve = 0.0 }, { t = 0.5, amp = 0.5, curve = 0.0 } } }
+      local comp = seq_layering_piece_env(tenv, v.env, t_off, startoffs, len)
+      local function at(t) return seq_env_levels_at_norm(comp, t) end
+      local layers = seq_player_collect_layers(SLOT)
+      local fo = 0
+      for _, l in ipairs(layers) do if l.path == C.path and l.delay > 0 then fo = l.fade_out end end
+      return piece.env ~= nil, startoffs + len, before ~= after,
+        at(0.0), seq_env_levels_at_norm(tenv, t_off) * 1.0, at(len - 0.0001) < 0.05, fo
     ''')
-    assert got[0] == 1 and got[1] == "t1+s1" and got[2] is True
-    assert abs(got[3] - 0.2) < 1e-9
+    has_env, src_end, peaks_changed, a0, want0, silent_end, player_fade = got
+    assert has_env
+    assert abs(src_end - 0.25) < 1e-6  # the piece stops where the envelope goes silent
+    assert peaks_changed
+    assert abs(a0 - want0) < 1e-6
+    assert silent_end
+    assert abs(player_fade - 0.05) < 1e-6
+
+
+def test_corner_env_follows_link_and_copies():
+    L = _runtime()
+    got = L.execute(r'''
+      seq_layering_set_linked(SLOT, true)
+      SLOT.layers.transient.verts[3].env = { points = { { t = 0, amp = 0, curve = 0 }, { t = 0.01, amp = 1, curve = 0 }, { t = 0.5, amp = 1, curve = 0 } } }
+      seq_layering_sync_linked(SLOT, "transient")
+      local mirrored = SLOT.layers.sustain.verts[3].env and #SLOT.layers.sustain.verts[3].env.points
+      local other = { id = 92, sample_path = A.path }
+      seq_layering_copy_to_slot(other, SLOT)
+      return mirrored, other.layers.transient.verts[3].env ~= SLOT.layers.transient.verts[3].env,
+        #other.layers.transient.verts[3].env.points, seq_layering_geometry_active(SLOT)
+    ''')
+    assert got[0] == 3 and got[1] is True and got[2] == 3 and got[3] is True

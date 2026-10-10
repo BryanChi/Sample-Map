@@ -443,6 +443,9 @@ function seq_close_env_editor_popup()
   if seq_env_view_reset then
     seq_env_view_reset()
   end
+  if seq_env_popup_on_close then
+    seq_env_popup_on_close()
+  end
 end
 
 function render_seq_env_editor_popup()
@@ -450,7 +453,13 @@ function render_seq_env_editor_popup()
     return false
   end
 
-  local slot = seq_find_slot_by_id and seq_find_slot_by_id(state.seq_env_popup_slot_id)
+  -- Another target (a drum layering corner) may stand in for the track: a
+  -- table with id, name, env and sample_path, plus optional popup_anchor and
+  -- keep_open callbacks.
+  local slot = seq_env_popup_custom_target and seq_env_popup_custom_target() or nil
+  if not slot then
+    slot = seq_find_slot_by_id and seq_find_slot_by_id(state.seq_env_popup_slot_id)
+  end
   if not slot then
     for _, s in ipairs(state.seq_tracks or {}) do
       if s.id == state.seq_env_popup_slot_id then
@@ -466,7 +475,13 @@ function render_seq_env_editor_popup()
 
   local P = SEQ_ENV_POPUP
   local graph_w, graph_h = P.w, seq_env_popup_height()
-  local px, py = seq_env_popup_anchor_pos(graph_w, graph_h)
+  local px, py = nil, nil
+  if slot.popup_anchor then
+    px, py = slot.popup_anchor(graph_w, graph_h)
+  end
+  if not px then
+    px, py = seq_env_popup_anchor_pos(graph_w, graph_h)
+  end
   if not px or not py then
     return false
   end
@@ -627,7 +642,7 @@ function render_seq_env_editor_popup()
     local escape = r.ImGui_IsKeyPressed and r.ImGui_Key_Escape
       and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false)
     local clicked_outside = r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0)
-      and not win_hovered and not env_hot
+      and not win_hovered and not env_hot and not (slot.keep_open and slot.keep_open())
     if state.seq_env_popup_just_opened then
       state.seq_env_popup_just_opened = nil
     elseif escape or (clicked_outside and not dragging) then

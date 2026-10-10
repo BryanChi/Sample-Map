@@ -848,14 +848,22 @@ function seq_player_collect_layers(slot)
     local pieces = seq_layering_build_pieces(slot) or {}
     for i = 1, math.min(6, #pieces) do
       local p = pieces[i]
+      local fade_in, fade_out = p.fade_in or 0.0, p.fade_out or 0.0
+      -- The player has no per-layer envelope: a corner envelope's fades
+      -- stand in for it (its end already shortened the piece).
+      local e = p.env and seq_layering_env_edges and seq_layering_env_edges(p.env)
+      if e then
+        fade_in = math.max(fade_in, e.fade_in or 0.0)
+        fade_out = math.max(fade_out, e.fade_out or 0.0)
+      end
       layers[#layers + 1] = {
         path = p.path,
         vol = math.max(0.0, tonumber(p.weight) or 1.0),
         start = p.startoffs or 0.0,
         len = p.length_sec or 0.0,
         delay = p.time_offset_sec or 0.0,
-        fade_in = p.fade_in or 0.0,
-        fade_out = p.fade_out or 0.0,
+        fade_in = fade_in,
+        fade_out = fade_out,
       }
     end
   end

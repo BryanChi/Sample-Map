@@ -202,6 +202,7 @@ function seq_layering_copy_side(dst, src)
       dst.verts[i].vol = seq_layer_vert_vol(sv)
       dst.verts[i].len = seq_layer_clamp_len(sv.len)
       dst.verts[i].fade = seq_layer_clamp_fade(sv.fade)
+      dst.verts[i].env = type(sv.env) == "table" and clone_table_deep(sv.env) or nil
       if type(sv.rand) == "table" then
         local tags = {}
         for k, t in ipairs(sv.rand.tags or {}) do tags[k] = t end
@@ -817,7 +818,7 @@ function seq_layering_geometry_active(slot)
     end
     for i = 1, 3 do
       local v = side.verts[i]
-      if v.path and (v.len or v.fade) and (side.blend[i] or 0) >= 0.02 then
+      if v.path and (v.len or v.fade or seq_layer_corner_env(v)) and (side.blend[i] or 0) >= 0.02 then
         return true
       end
     end
@@ -970,6 +971,10 @@ function seq_layering_insert_mix_at_position(sample, time_pos, target_track)
               r.SetMediaItemTakeInfo_Value(take, "D_VOL", gain)
             end
             seq_item_apply_layer_fades(item, piece.fade_in, piece.fade_out)
+            if piece.env and seq_apply_take_volume_envelope then
+              seq_apply_take_volume_envelope(take, len,
+                seq_layering_piece_env(nil, piece.env, piece.time_offset_sec or 0.0, startoffs, len), 0.0)
+            end
             rebuild_peaks_for_item(item)
             any = true
             item_ok = true
@@ -1052,6 +1057,78 @@ function seq_layering_remap_piece_lanes(pieces)
   return pieces
 end
 
+-- A corner's own volume envelope (edited in the envelope editor), when it
+-- shapes anything; its times are the corner sample's own (from its start).
+function seq_layer_corner_env(v)
+  local env = v and v.env
+  if type(env) ~= "table" or not seq_env_shape_active then return nil end
+  if not seq_env_shape_active(env) then return nil end
+  return seq_normalize_track_env(env)
+end
+
+local function env_key(v)
+  local env = seq_layer_corner_env(v)
+  if not env then return "" end
+  local bits = {}
+  for _, p in ipairs(env.points) do
+    bits[#bits + 1] = string.format("%.4f:%.4f:%.3f", p.t or 0, p.amp or 1, p.curve or 0)
+  end
+  return table.concat(bits, ",")
+end
+seq_layer_corner_env_key = env_key
+
+-- Track envelope x corner envelope over an item of item_len seconds that
+-- starts t_off into the hit and startoffs into the corner's sample: points
+-- in item time, ready for the take's volume envelope (offset 0).
+function seq_layering_piece_env(track_env, corner_env, t_off, startoffs, item_len)
+  track_env = seq_normalize_track_env(track_env)
+  corner_env = seq_normalize_track_env(corner_env)
+  local times, seen = { 0.0, item_len }, {}
+  local function add(t)
+    if t > 0.0 and t < item_len then times[#times + 1] = t end
+  end
+  local function add_env(env, shift)
+    local pts = env.points or {}
+    for i, p in ipairs(pts) do
+      local t = (p.t or 0.0) - shift
+      add(t)
+      -- Curved segments: a few steps so the product follows the bend.
+      local q = pts[i + 1]
+      if q and math.abs(p.curve or 0.0) > 0.001 then
+        for k = 1, 5 do add(t + ((q.t or 0.0) - (p.t or 0.0)) * k / 6) end
+      end
+    end
+  end
+  add_env(track_env, t_off)
+  add_env(corner_env, startoffs)
+  table.sort(times)
+  local points = {}
+  for _, t in ipairs(times) do
+    local key = math.floor(t * 100000 + 0.5)
+    if not seen[key] then
+      seen[key] = true
+      points[#points + 1] = {
+        t = t,
+        amp = seq_env_levels_at_norm(track_env, t + t_off) * seq_env_levels_at_norm(corner_env, t + startoffs),
+        curve = 0.0,
+      }
+    end
+  end
+  return { points = points }
+end
+
+-- Where a corner envelope goes silent for good (seconds of the sample), the
+-- length of its fade-in and fade-out, for players without envelopes.
+function seq_layering_env_edges(env, len)
+  if not env or not seq_env_edges then return nil end
+  local e = seq_env_edges(env.points or {}, len or 1e9)
+  return {
+    end_t = e.k and e.end_t or nil,
+    fade_in = e.fi and e.fi_len or 0.0,
+    fade_out = e.fo_len or 0.0,
+  }
+end
+
 -- Cuts piece p at end_t (seconds from the hit) and fades it out so it reaches
 -- silence there, the fade starting at fade_from. A piece that ends earlier
 -- on its own still follows the fade.
@@ -1120,7 +1197,7 @@ function seq_layering_build_pieces(slot, opts)
       local tgain = tw * seq_layer_vert_vol(tv) * tside.gain
       local sgain = sw * seq_layer_vert_vol(sv) * sside.gain
       if tpath and spath and tpath == spath and math.abs(tgain - sgain) < 0.05
-          and tv.len == sv.len and tv.fade == sv.fade then
+          and tv.len == sv.len and tv.fade == sv.fade and env_key(tv) == env_key(sv) then
         -- Same sample at the same level on both sides: play it whole.
         add(tpath, tv, (tgain + sgain) * 0.5, { lane = i - 1 },
           { { side = "transient", idx = i }, { side = "sustain", idx = i } })
@@ -1164,8 +1241,18 @@ function seq_layering_build_pieces(slot, opts)
   end
   local kept = {}
   for _, p in ipairs(pieces) do
+    local o = p.owners[#p.owners]
+    local cv = layers[p.owners[1].side].verts[p.owners[1].idx]
+    p.env = seq_layer_corner_env(cv)
+    if p.env and not opts.no_corner_cut then
+      -- Silence after the envelope's end: the piece stops there.
+      local e = seq_layering_env_edges(p.env)
+      if e and e.end_t then
+        local _, _, startoffs, t_off = seq_layering_piece_span(p)
+        piece_end_at(p, t_off + math.max(0.001, e.end_t - startoffs), nil)
+      end
+    end
     if not opts.no_corner_cut then
-      local o = p.owners[#p.owners]
       local v = layers[o.side].verts[o.idx]
       if v.len or v.fade then
         local _, _, _, t_off, len = seq_layering_piece_span(p)
@@ -1239,79 +1326,6 @@ function seq_layering_corner_span(slot, side_key, idx)
     end
   end
   return t0, t1
-end
-
--- One lane per sound in the hit, for its length / fade handles: the corner(s)
--- it belongs to, its sample and where it sits (seconds, uncut).
-function seq_layering_lanes(slot)
-  seq_normalize_slot_layers(slot)
-  local lanes = {}
-  for _, p in ipairs(seq_layering_build_pieces(slot, { no_tail = true, no_corner_cut = true, all = true })) do
-    local owners = p.owners or {}
-    if slot.layers.linked then
-      owners = { owners[1] }  -- the sustain mirrors the transient
-    end
-    local o = owners[1]
-    if o then
-      local keys = {}
-      for _, ow in ipairs(owners) do keys[#keys + 1] = ow.side:sub(1, 1) .. ow.idx end
-      local sample, pd, startoffs, t_off, len = seq_layering_piece_span(p)
-      lanes[#lanes + 1] = {
-        key = table.concat(keys, "+"),
-        owners = owners,
-        path = p.path,
-        sample = sample,
-        pdur = pd,
-        startoffs = startoffs,
-        t_off = t_off,
-        len = len,
-        vert = slot.layers[o.side].verts[o.idx],
-      }
-    end
-  end
-  return lanes
-end
-
--- Peaks of a lane on the hit's time line [0, dur] (normalized to the lane),
--- cached per lane, width and time line.
-seq_layer_lane_peak_cache = {}
-function seq_layering_lane_peaks(lane, bins, dur)
-  local key = string.format("%s|%s|%.5f|%.5f|%.5f|%d|%.5f", lane.key, lane.path, lane.startoffs, lane.t_off, lane.len, bins, dur)
-  local hit = seq_layer_lane_peak_cache[key]
-  if hit then return hit end
-  if seq_layer_lane_peak_cache_n and seq_layer_lane_peak_cache_n > 64 then
-    seq_layer_lane_peak_cache = {}
-    seq_layer_lane_peak_cache_n = 0
-  end
-  local out = {}
-  local src = lane.sample and seq_env_get_wave_peaks(lane.sample, math.max(64, bins))
-  local n = src and #src or 0
-  local max_v = 0.0
-  for b = 1, bins do
-    local t = (b - 0.5) / bins * dur
-    local v = 0.0
-    if n > 0 and lane.pdur > 0 and t >= lane.t_off and t <= lane.t_off + lane.len then
-      local si = math.floor(((lane.startoffs + t - lane.t_off) / lane.pdur) * n) + 1
-      if si >= 1 and si <= n then v = src[si] or 0 end
-    end
-    out[b] = v
-    if v > max_v then max_v = v end
-  end
-  if max_v > 0.0001 then
-    for b = 1, bins do out[b] = out[b] / max_v end
-  end
-  seq_layer_lane_peak_cache[key] = out
-  seq_layer_lane_peak_cache_n = (seq_layer_lane_peak_cache_n or 0) + 1
-  return out
-end
-
--- Sets length / fade on every corner a lane belongs to.
-function seq_layering_set_lane_cut(slot, lane, len, fade)
-  local changed = false
-  for _, o in ipairs(lane.owners) do
-    if seq_layering_set_corner_cut(slot, o.side, o.idx, len, fade) then changed = true end
-  end
-  return changed
 end
 
 -- End of the hit before the tail cuts it (seconds).
@@ -1473,6 +1487,7 @@ function seq_layering_mix_fingerprint(slot)
       local v = side.verts[i]
       bits[#bits + 1] = (v and v.path) or ""
       bits[#bits + 1] = string.format("%.3f,%.4f,%.4f", seq_layer_vert_vol(v), v.len or -1, v.fade or -1)
+      bits[#bits + 1] = env_key(v)
     end
   end
   bits[#bits + 1] = string.format("%.4f,%.4f", slot.layers.tail_end or -1, slot.layers.tail_fade or -1)
@@ -1560,6 +1575,7 @@ function seq_layering_mix_peaks(slot, width)
       weight = p.weight or 1.0,
       fade_in = p.fade_in or 0.0,
       fade_out = p.fade_out or 0.0,
+      env = p.env,
       pdur = pdur,
     }
   end
@@ -1594,6 +1610,7 @@ function seq_layering_mix_peaks(slot, width)
             if si >= 1 and si <= n then
               local v = (peaks[si] or 0) * rp.weight
                   * seq_layering_piece_gain(t - rp.t_off, rp.len, rp.fade_in, rp.fade_out)
+              if rp.env then v = v * seq_env_levels_at_norm(rp.env, src_t) end
               out[b] = out[b] + v
               if v > best_v[b] then
                 best_v[b] = v
@@ -1683,6 +1700,9 @@ function seq_layering_voice_vol(v, t)
   elseif v.fade_in and v.fade_in > 0 and t < v.fade_in then
     g = math.max(0.0, t / v.fade_in)
   end
+  if v.env then
+    g = g * seq_env_levels_at_norm(v.env, (v.startoffs or 0.0) + t)
+  end
   return (state.preview_volume or 1.0) * (v.volume or 1.0) * g
 end
 
@@ -1722,7 +1742,7 @@ function seq_layering_update_mix_preview()
     end
     if v and v.started and v.stop_at and elapsed >= v.stop_at then
       seq_layering_stop_mix_voice(v)
-    elseif v and v.started and v.obj and ((v.fade_in or 0) > 0 or (v.fade_out or 0) > 0)
+    elseif v and v.started and v.obj and ((v.fade_in or 0) > 0 or (v.fade_out or 0) > 0 or v.env)
         and r.CF_Preview_SetValue then
       -- Fades ride the preview volume, one step per frame.
       pcall(r.CF_Preview_SetValue, v.obj, "D_VOLUME",
@@ -1765,6 +1785,7 @@ function seq_layering_preview_layered(slot, start_time)
       len = len,
       fade_in = piece.fade_in or 0.0,
       fade_out = piece.fade_out or 0.0,
+      env = piece.env,
       started = false,
     }
   end

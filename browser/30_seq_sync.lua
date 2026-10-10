@@ -245,7 +245,13 @@ function insert_seq_note_hit(tr, region, track_id, step_key, note, resolved_path
     local slot = find_seq_track_by_id(track_id)
     if slot then
       seq_normalize_slot_mix(slot)
-      seq_apply_take_volume_envelope(take, item_len, slot.env, opts.time_offset_sec or 0.0)
+      if opts.layer_env and seq_layering_piece_env then
+        -- A drum layer with its own envelope: track envelope x corner envelope.
+        seq_apply_take_volume_envelope(take, item_len,
+          seq_layering_piece_env(slot.env, opts.layer_env, opts.time_offset_sec or 0.0, startoffs or 0.0, item_len), 0.0)
+      else
+        seq_apply_take_volume_envelope(take, item_len, slot.env, opts.time_offset_sec or 0.0)
+      end
     end
   end
   -- Volume last: item stays at 1, take is note velocity * blend.
@@ -450,6 +456,7 @@ function insert_seq_note_item(region, slot, track_id, step_key, note)
               time_offset_sec = piece.time_offset_sec or 0.0,
               fade_in = piece.fade_in or 0.0,
               fade_out = piece.fade_out or 0.0,
+              layer_env = piece.env,
               note_fade_in = apply_fade_in and (p == 1),
               note_fade_out = apply_fade_out and (p == #pieces),
               hit_idx = hit_idx,

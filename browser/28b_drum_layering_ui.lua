@@ -302,7 +302,9 @@ function seq_layering_icon_button(id, dl, x, y, w, h, kind, active, opts)
   r.ImGui_SetCursorScreenPos(ctx, x, y)
   local clicked = r.ImGui_InvisibleButton(ctx, id, w, h)
   local hovered = r.ImGui_IsItemHovered(ctx)
-  local pressed = r.ImGui_IsItemActive(ctx)
+  -- Pressed only shows under the mouse; skip the query otherwise (many of
+  -- these buttons a frame).
+  local pressed = hovered and r.ImGui_IsItemActive(ctx)
   local bg, _, text_col, border = ui_button_colors(opts.style or "default", hovered, pressed, active)
   ui_draw_panel(dl, x, y, x + w, y + h, opts.rounding or 5.0, bg, border, hovered, pressed)
   local col = opts.color or ((hovered or pressed) and 0xFFFFFFFF or text_col)
@@ -384,18 +386,8 @@ function seq_layering_col_w(content_w)
   return math.max(190.0, (content_w - SEQ_LAYER_LINK_W) * 0.5)
 end
 
-SEQ_LAYER_LANE_H = 22.0
-SEQ_LAYER_LANE_GAP = 3.0
-
--- Height of the corner lanes under the waveforms (0 when there are none).
-function seq_layering_lanes_h(slot)
-  local n = slot and #seq_layering_lanes(slot) or 0
-  if n == 0 then return 0.0 end
-  return n * (SEQ_LAYER_LANE_H + SEQ_LAYER_LANE_GAP) + 6.0
-end
-
-function seq_layering_ideal_content_h(content_w, slot)
-  return SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H + seq_layering_lanes_h(slot)
+function seq_layering_ideal_content_h(content_w)
+  return SEQ_LAYER_HEADER_H + 8.0 + SEQ_LAYER_WAVE_H
       + seq_layering_card_h(seq_layering_col_w(content_w)) + SEQ_LAYER_FOOTER_H
 end
 
@@ -818,65 +810,6 @@ local function draw_tail_handles(slot, ix, iy, iw, ih, dur)
   return hs.hot, { hs = hs, natural = natural }
 end
 
--- Corner lanes: each sound in the hit on the layered pane's time line, with
--- its own length (end line) and fade (grip) handles.
-function seq_layering_draw_lanes(dl, slot, x, y, w)
-  local lanes = seq_layering_lanes(slot)
-  if #lanes == 0 then return end
-  local ix, iw = x + 10.0, w - 20.0
-  local _, dur = seq_layering_mix_peaks(slot, math.floor(iw))
-  dur = tonumber(dur) or 0
-  if dur <= 0 then return end
-  local labels = { "top", "left", "right" }
-  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w,
-    y + #lanes * (SEQ_LAYER_LANE_H + SEQ_LAYER_LANE_GAP) - SEQ_LAYER_LANE_GAP, UI_THEME.bg_panel, 5.0)
-  for k, lane in ipairs(lanes) do
-    local ly = y + (k - 1) * (SEQ_LAYER_LANE_H + SEQ_LAYER_LANE_GAP)
-    local lh = SEQ_LAYER_LANE_H
-    local v = lane.vert
-    local col = get_sample_dot_color(lane.sample or { path = lane.path })
-    local peaks = seq_layering_lane_peaks(lane, math.max(32, math.floor(iw / 2)), dur)
-    seq_layering_draw_wave(dl, "lane_" .. lane.key, ix, ly + 3.0, iw, lh - 6.0, peaks,
-      seq_layer_col_alpha(col, 0.6), nil)
-    local t_end = lane.t_off + lane.len
-    local end_t = v.len and math.min(v.len, t_end) or t_end
-    local hs = cut_handles("seq_layer_lane_" .. tostring(slot.id) .. "_" .. lane.key, ix, ly + 3.0, iw, lh - 6.0, dur, end_t, v.fade)
-    local new_len, new_fade, set = v.len, v.fade, false
-    if hs.end_dbl then
-      new_len, set = nil, true
-    elseif hs.fade_dbl then
-      new_fade, set = nil, true
-    elseif hs.end_active and hs.t then
-      new_len = (hs.t < t_end - 0.001) and math.max(lane.t_off + 0.005, hs.t) or nil
-      if new_fade then new_fade = math.min(new_fade, (new_len or t_end) - lane.t_off) end
-      set = true
-    elseif hs.fade_active and hs.t then
-      new_fade = math.max(0.0, math.min(end_t - lane.t_off, end_t - hs.t))
-      set = true
-    end
-    if set and seq_layering_set_lane_cut(slot, lane, new_len, new_fade) then
-      state.seq_layering_bias_drag = true
-    end
-    end_t = v.len and math.min(v.len, t_end) or t_end
-    draw_cut_overlay(dl, ix, ly + 3.0, iw, lh - 6.0, dur, end_t, v.fade, t_end, col, hs)
-    -- Label: side and corner, sample name.
-    local o = lane.owners[1]
-    local tag = (#lane.owners > 1 and "T+S" or (o.side == "transient" and "T" or "S")) .. " " .. labels[o.idx]
-    local name = truncate(basename(lane.path), 150.0)
-    local text = tag .. "  " .. name
-    local tw = text_w(text)
-    local lx = ix + math.max(0.0, math.min(iw - tw - 12.0, lane.t_off / dur * iw)) + 4.0
-    local side_col = SEQ_LAYER_SIDE_COLORS[o.side] or UI_THEME.accent
-    r.ImGui_DrawList_AddText(dl, lx, ly + lh * 0.5 - 7.0,
-      (v.len or v.fade) and 0xFFFFFFFF or seq_layer_col_mix(side_col, 0xFFFFFFFF, 0.55), text)
-    if hs.end_hot then
-      tooltip(string.format("%s %s length %.0f ms: drag the end to cut it shorter  ·  Double-click: full length", tag, name, end_t * 1000.0))
-    elseif hs.fade_hot then
-      tooltip(string.format("%s %s fade-out %.0f ms: drag the grip  ·  Double-click: no fade", tag, name, (v.fade or 0) * 1000.0))
-    end
-  end
-end
-
 function seq_layering_draw_wave_pane(dl, slot, x, y, w, h, kind, hover_side)
   local is_orig = kind == "original"
   local using = seq_layering_output(slot) == kind
@@ -1281,6 +1214,9 @@ end
 
 function seq_layering_open_vert_chooser(slot, side_key, idx)
   if not slot or not seq_open_minimap_popup then return false end
+  if state.seq_env_popup_target and seq_close_env_editor_popup then
+    seq_close_env_editor_popup()
+  end
   seq_normalize_slot_layers(slot)
   local vert = slot.layers[side_key].verts[idx]
   if not seq_layering_can_pick(vert, idx) then return false end
@@ -1415,108 +1351,7 @@ local PICKER_ROW_H = 24.0
 function seq_layering_picker_header_h(pop, slot, w)
   if not pop.layer then return 0 end
   local _, tags_h = picker_tag_layout(slot, pop.layer.side, pop.layer.idx, 0, 0, w)
-  return PICKER_ROW_H + 8.0 + math.max(tags_h, 22.0) + 4.0 + SEQ_LAYER_CORNER_STRIP_H
-end
-
-SEQ_LAYER_CORNER_STRIP_H = 64.0
-SEQ_LAYER_CORNER_COL = 0x7CC8FFFF
-
--- The corner's own sound on the hit's time line, with its length and fade
--- handles (seconds from the hit). Drags are one undo step, committed on release.
-local function draw_corner_cut(pop, slot, dl, x, y, w)
-  local side_key, idx = pop.layer.side, pop.layer.idx
-  local vert = slot.layers[side_key].verts[idx]
-  local t0, t1 = seq_layering_corner_span(slot, side_key, idx)
-  local cap_y = y + 2.0
-  local sy, sh = y + 20.0, SEQ_LAYER_CORNER_STRIP_H - 26.0
-  r.ImGui_DrawList_AddRectFilled(dl, x, sy, x + w, sy + sh, UI_THEME.bg or 0x0A0E0CFF, 4.0)
-  if not t0 then
-    r.ImGui_DrawList_AddText(dl, x, cap_y, UI_THEME.text_mute, "LENGTH")
-    r.ImGui_DrawList_AddText(dl, x + 8.0, sy + sh * 0.5 - 7.0, UI_THEME.text_mute,
-      truncate("Not heard: give this corner some blend", w - 16.0))
-    return
-  end
-  local dur = t1
-  local end_t = vert.len and math.min(vert.len, t1) or t1
-  local fade = vert.fade
-  local caption = string.format("LENGTH %.0f ms", end_t * 1000.0) .. (fade and string.format("  ·  FADE %.0f ms", fade * 1000.0) or "")
-  r.ImGui_DrawList_AddText(dl, x, cap_y, (vert.len or fade) and UI_THEME.text or UI_THEME.text_dim, caption)
-
-  -- The corner's pieces as bars.
-  local pieces = {}
-  for _, p in ipairs(seq_layering_build_pieces(slot, { no_tail = true, no_corner_cut = true })) do
-    for _, o in ipairs(p.owners or {}) do
-      if o.side == side_key and o.idx == idx then
-        local sample, pd, startoffs, t_off, len = seq_layering_piece_span(p)
-        local peaks = sample and seq_env_get_wave_peaks(sample, 160)
-        if peaks and #peaks > 0 and pd > 0 then
-          pieces[#pieces + 1] = { peaks = peaks, pd = pd, startoffs = startoffs, t_off = t_off, len = len }
-        end
-        break
-      end
-    end
-  end
-  local col = get_sample_dot_color(find_sample_by_path(vert.path) or { path = vert.path or "" })
-  local mid = sy + sh * 0.5
-  for px = x + 1.5, x + w - 1.0, 3.0 do
-    local t = (px - x) / w * dur
-    local v = 0.0
-    for _, pc in ipairs(pieces) do
-      if t >= pc.t_off and t <= pc.t_off + pc.len then
-        local n = #pc.peaks
-        local si = math.floor(((pc.startoffs + t - pc.t_off) / pc.pd) * n) + 1
-        if si >= 1 and si <= n then v = math.max(v, pc.peaks[si] or 0) end
-      end
-    end
-    if v > 0.002 then
-      local half = math.max(0.5, math.min(1.0, v) * sh * 0.46)
-      r.ImGui_DrawList_AddRectFilled(dl, px - 1.0, mid - half, px + 1.0, mid + half, seq_layer_col_alpha(col, 0.75), 1.0)
-    end
-  end
-
-  local hs = cut_handles("seq_layer_corner_cut", x, sy, w, sh, dur, end_t, fade)
-  local new_len, new_fade, set = vert.len, vert.fade, false
-  if hs.end_dbl then
-    new_len, set = nil, true
-  elseif hs.fade_dbl then
-    new_fade, set = nil, true
-  elseif hs.end_active and hs.t then
-    new_len = (hs.t < t1 - 0.001) and math.max(t0 + 0.005, hs.t) or nil
-    if new_fade then new_fade = math.min(new_fade, (new_len or t1) - t0) end
-    set = true
-  elseif hs.fade_active and hs.t then
-    new_fade = math.max(0.0, math.min(end_t - t0, end_t - hs.t))
-    set = true
-  end
-  if set then
-    if (hs.end_active or hs.fade_active) and not pop.cut_drag then
-      pop.cut_drag = true
-      pop.cut_undo = seq_undo_own_begin and seq_undo_own_begin("Drum layer length", { lazy_reaper = true })
-    end
-    if hs.end_dbl or hs.fade_dbl then
-      seq_layering_with_undo("Drum layer length", function()
-        seq_layering_set_corner_cut(slot, side_key, idx, new_len, new_fade)
-      end)
-      seq_layering_commit(slot, { force_rebuild = true })
-    else
-      seq_layering_set_corner_cut(slot, side_key, idx, new_len, new_fade)
-    end
-  end
-  if pop.cut_drag and not r.ImGui_IsMouseDown(ctx, 0) then
-    pop.cut_drag = nil
-    if pop.cut_undo and seq_undo_is_open and seq_undo_is_open() then
-      end_seq_undo()
-    end
-    pop.cut_undo = nil
-    seq_layering_commit(slot, { force_rebuild = true })
-  end
-  draw_cut_overlay(dl, x, sy, w, sh, dur, vert.len and math.min(vert.len, t1) or t1, vert.fade, t1,
-    SEQ_LAYER_CORNER_COL, hs)
-  if hs.end_hot then
-    pop.hint = "This corner's length: drag to cut it shorter  ·  Double-click: full length"
-  elseif hs.fade_hot then
-    pop.hint = "This corner's fade-out before its end  ·  Double-click: no fade"
-  end
+  return PICKER_ROW_H + 8.0 + math.max(tags_h, 22.0) + 4.0
 end
 
 -- Header of the picker: Roll, the drum type menu, close; then tag chips.
@@ -1633,12 +1468,92 @@ function seq_layering_draw_picker_header(pop, slot, dl, x, y, w)
     end
   end
 
-  local _, tags_h = picker_tag_layout(slot, side_key, idx, 0, 0, w)
-  draw_corner_cut(pop, slot, dl, x, chips_y + math.max(tags_h, 22.0) + 2.0, w)
-
   if close_clicked then
     state.seq_minimap_popup = nil
   end
+end
+
+-- ---------------------------------------------------------------------------
+-- Corner envelope: the track envelope editor, aimed at one corner's sample
+-- (state.seq_env_popup_target).
+
+function seq_layering_corner_env_open_for(slot, side_key, idx)
+  local t = state.seq_env_popup_target
+  return state.seq_env_popup_slot_id == slot.id and t ~= nil and t.slot_id == slot.id
+      and t.side == side_key and t.idx == idx
+end
+
+-- The editor's target for the open corner: id / name / sample_path for the
+-- graph, and env read from and written to the corner itself (so presets,
+-- drags and undo all land on vert.env).
+function seq_env_popup_custom_target()
+  local t = state.seq_env_popup_target
+  if not t or t.slot_id ~= state.seq_env_popup_slot_id then return nil end
+  local slot = find_seq_track_by_id(t.slot_id)
+  if not slot then return nil end
+  seq_normalize_slot_layers(slot)
+  local v = slot.layers[t.side] and slot.layers[t.side].verts[t.idx]
+  if not v or not v.path then return nil end
+  local px = state.seq_layer_env_proxy
+  if not px or rawget(px, "_v") ~= v then
+    px = setmetatable({ _v = v, _slot = slot, _side = t.side }, {
+      __index = function(tb, k)
+        if k == "env" then return rawget(tb, "_v").env end
+      end,
+      __newindex = function(tb, k, val)
+        if k == "env" then
+          rawget(tb, "_v").env = val
+          seq_layering_sync_linked(rawget(tb, "_slot"), rawget(tb, "_side"))
+        else
+          rawset(tb, k, val)
+        end
+      end,
+    })
+    state.seq_layer_env_proxy = px
+  end
+  local where = (SEQ_LAYER_SIDE_LABELS[t.side] or ""):sub(1, 1) .. ({ " top", " left", " right" })[t.idx]
+  rawset(px, "id", "layer:" .. tostring(slot.id) .. ":" .. t.side .. ":" .. t.idx)
+  rawset(px, "name", where .. "  ·  " .. basename(v.path))
+  rawset(px, "sample_path", v.path)
+  rawset(px, "popup_anchor", function(w, h)
+    return seq_layering_picker_pos({ layer = { side = t.side, idx = t.idx } }, w, h)
+  end)
+  -- Working in the layering window doesn't close it.
+  rawset(px, "keep_open", seq_layering_pointer_over_window)
+  return px
+end
+
+function seq_env_popup_on_close()
+  if state.seq_env_popup_target then
+    state.seq_layering_env_closed = true
+  end
+  state.seq_env_popup_target = nil
+  state.seq_layer_env_proxy = nil
+end
+
+function seq_layering_open_corner_env(slot, side_key, idx)
+  local v = slot.layers and slot.layers[side_key] and slot.layers[side_key].verts[idx]
+  if not v or not v.path then return false end
+  if seq_close_env_editor_popup and state.seq_env_popup_slot_id then
+    seq_close_env_editor_popup()
+  end
+  local pop = state.seq_minimap_popup
+  if pop and pop.mode == "layer" then
+    state.seq_minimap_popup = nil  -- one corner tool beside the window at a time
+  end
+  state.seq_env_popup_target = { slot_id = slot.id, side = side_key, idx = idx }
+  state.seq_env_popup_slot_id = slot.id
+  state.seq_env_popup_just_opened = true
+  state.seq_env_popup_preview_rect = nil
+  return true
+end
+
+function seq_layering_toggle_corner_env(slot, side_key, idx)
+  if seq_layering_corner_env_open_for(slot, side_key, idx) then
+    if seq_close_env_editor_popup then seq_close_env_editor_popup() end
+    return false
+  end
+  return seq_layering_open_corner_env(slot, side_key, idx)
 end
 
 -- The picker's hint line: what's under the mouse, else how to use it.
@@ -1748,6 +1663,9 @@ function seq_layering_render_menus(slot)
       end
       if r.ImGui_MenuItem(ctx, "Choose sample...", nil, false, seq_layering_can_pick(vert, idx)) then
         seq_layering_open_vert_chooser(slot, side_key, idx)
+      end
+      if r.ImGui_MenuItem(ctx, "Envelope...", nil, false, vert.path ~= nil) then
+        seq_layering_open_corner_env(slot, side_key, idx)
       end
       if r.ImGui_MenuItem(ctx, "Randomize", nil, false, not vert.locked) then
         seq_layering_roll_corner(slot, side_key, idx)
@@ -2075,7 +1993,7 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
   local controls_hot = dice_hovered or reset_hovered or menu_hovered or gain_hot
   local mini = 18.0
   local mini_gap = 3.0
-  local buttons_w = mini * 3 + mini_gap * 3
+  local buttons_w = mini * 4 + mini_gap * 4
   for i = 1, 3 do
     local vx, vy = verts_xy[i][1], verts_xy[i][2]
     local vert = side.verts[i]
@@ -2181,6 +2099,28 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
       r.ImGui_DrawList_AddTriangleFilled(dl, ax2 - 3.5, ay2 - 1.5, ax2 + 3.5, ay2 - 1.5, ax2, ay2 + 2.5, tcol)
     end
     local v_changed, v_hovered = seq_layering_vol_knob("##seq_layer_vol_" .. vid, dl, tx0 + type_w + mini_gap, row_y, mini, vert)
+    -- Envelope button, drawn by hand: a frame and a decay stroke (cheap, as
+    -- there are six of these).
+    local env_on = seq_layering_corner_env_open_for(slot, side_key, i)
+    local ex0 = tx0 + type_w + mini_gap * 2 + mini
+    r.ImGui_SetCursorScreenPos(ctx, ex0, row_y)
+    local e_clicked = r.ImGui_InvisibleButton(ctx, "##seq_layer_env_" .. vid, mini, mini)
+    local e_hovered = r.ImGui_IsItemHovered(ctx)
+    do
+      local shaped = seq_layer_corner_env(vert) ~= nil
+      local ecol = (env_on or e_hovered) and 0xFFFFFFFF or (shaped and side_col or UI_THEME.text_dim)
+      r.ImGui_DrawList_AddRectFilled(dl, ex0, row_y, ex0 + mini, row_y + mini,
+        env_on and seq_layer_col_alpha(side_col, 0.35) or (e_hovered and UI_THEME.surface_hvr or UI_THEME.surface), 4.0)
+      local gx, gy = ex0 + 4.0, row_y + 4.0
+      r.ImGui_DrawList_AddLine(dl, gx, gy + 10.0, gx + 2.5, gy, ecol, 1.4)
+      r.ImGui_DrawList_AddLine(dl, gx + 2.5, gy, gx + 10.0, gy + 10.0, ecol, 1.4)
+    end
+    if e_hovered then
+      tooltip(vert.path and "This corner's envelope: its length, fades and volume shape" or "Empty corner")
+    end
+    if e_clicked and vert.path then
+      seq_layering_toggle_corner_env(slot, side_key, i)
+    end
     if d_hovered then
       tooltip(vert.locked and "Locked: unlock to randomize"
         or ("Randomize from " .. type_label .. "  ·  Right-click: choose type, tags or a sample on the map"))
@@ -2207,7 +2147,7 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
       seq_layering_sync_linked(slot, side_key)
       state.seq_layering_vol_drag = true
     end
-    if d_hovered or l_hovered or t_hovered or v_hovered or item_hot then
+    if d_hovered or l_hovered or t_hovered or v_hovered or e_hovered or item_hot then
       controls_hot = true
     end
 
@@ -2461,6 +2401,9 @@ function seq_layering_close()
   if pop and pop.mode == "layer" then
     state.seq_minimap_popup = nil
   end
+  if state.seq_env_popup_target and seq_close_env_editor_popup then
+    seq_close_env_editor_popup()
+  end
 end
 
 -- Segmented two-way switch; returns the clicked key, if any.
@@ -2634,7 +2577,7 @@ function render_seq_layering_window()
   local pad_x, pad_y = 12.0, 10.0
   local stored_w = tonumber(state.seq_layering_win_w) or 800
   stored_w = math.max(SEQ_LAYER_MIN_W, math.min(1240, stored_w))
-  local ideal_h = seq_layering_ideal_content_h(stored_w - pad_x * 2.0, slot) + pad_y * 2.0
+  local ideal_h = seq_layering_ideal_content_h(stored_w - pad_x * 2.0) + pad_y * 2.0
   if r.ImGui_SetNextWindowSizeConstraints then
     r.ImGui_SetNextWindowSizeConstraints(ctx, SEQ_LAYER_MIN_W, 360.0, 1240.0, 1400.0)
   end
@@ -2705,12 +2648,13 @@ function render_seq_layering_window()
         and not (r.ImGui_IsAnyItemActive and r.ImGui_IsAnyItemActive(ctx))
         and not (r.ImGui_IsPopupOpen and r.ImGui_IsPopupOpen(ctx, "", r.ImGui_PopupFlags_AnyPopupId and r.ImGui_PopupFlags_AnyPopupId() or 0))
         and r.ImGui_IsKeyPressed and r.ImGui_Key_Escape and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
-      -- Esc that just closed the corner picker leaves the window open.
-      if not state.seq_minimap_esc_frame then
+      -- Esc that just closed the corner picker or envelope leaves the window open.
+      if not state.seq_minimap_esc_frame and not state.seq_layering_env_closed then
         seq_layering_close()
       end
     end
     state.seq_minimap_esc_frame = nil
+    state.seq_layering_env_closed = nil
     pcall(r.ImGui_End, ctx)
   else
     state.seq_layering_hovered = false
@@ -2757,11 +2701,6 @@ function seq_layering_render_body(slot)
   seq_layering_draw_wave_pane(dl, slot, wx, y, avail_w, SEQ_LAYER_PANE_H, "original", prev_hover)
   seq_layering_draw_wave_pane(dl, slot, wx, y + SEQ_LAYER_PANE_H + SEQ_LAYER_WAVE_GAP, avail_w, SEQ_LAYER_PANE_H, "layered", prev_hover)
   y = y + SEQ_LAYER_WAVE_H
-  local lanes_h = seq_layering_lanes_h(slot)
-  if lanes_h > 0 then
-    seq_layering_draw_lanes(dl, slot, wx, y - 4.0, avail_w)
-    y = y + lanes_h
-  end
 
   -- Triangle cards with the link / split column between them.
   local col_w = seq_layering_col_w(avail_w)
