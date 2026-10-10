@@ -12,10 +12,12 @@ function get_track_by_guid(track_guid)
   if not track_guid or track_guid == "" then
     return nil
   end
+  -- Cached as { track, index }: the track must still sit at that index in the
+  -- current project (catches deletes, reorders and project switches).
   local cached = seq_track_by_guid_cache[track_guid]
-  if cached and r.ValidatePtr2 and r.ValidatePtr2(0, cached, "MediaTrack*")
-      and r.GetTrackGUID(cached) == track_guid then
-    return cached
+  if cached and r.GetTrack(0, cached[2]) == cached[1]
+      and r.GetTrackGUID(cached[1]) == track_guid then
+    return cached[1]
   end
   local map = {}
   local found = nil
@@ -24,7 +26,7 @@ function get_track_by_guid(track_guid)
     local tr = r.GetTrack(0, i)
     local guid = r.GetTrackGUID(tr)
     if guid and map[guid] == nil then
-      map[guid] = tr
+      map[guid] = { tr, i }
     end
     if not found and guid == track_guid then
       found = tr

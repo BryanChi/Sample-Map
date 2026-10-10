@@ -119,6 +119,11 @@ function reset_seq_project_state()
   state.seq_last_proj_change = nil
   state.seq_skip_ingest = false
   state.seq_self_write_count = nil
+  state.seq_arrange_fp = nil
+  state.seq_fp_refresh_at = nil
+  state.seq_self_write_at = nil
+  state.seq_ingest_rescan = nil
+  state.seq_ingest_stale_since = nil
   state.seq_ingest_pending_count = nil
   state.seq_ingest_pending_at = nil
   state.seq_ingest_hold_parent = false
@@ -307,8 +312,11 @@ function load_seq_project_state(proj)
     legacy_seq_project_state = nil
     save_seq_project_state(proj)
   end
-  if seq_apply_all_slot_mix_to_reaper then
-    seq_apply_all_slot_mix_to_reaper()
+  -- The project's track faders were saved with it and may be newer than the
+  -- stored slot mix (moved while the script was closed): read them, don't
+  -- overwrite them.
+  if seq_ingest_slot_mix_from_arrange then
+    seq_ingest_slot_mix_from_arrange()
   end
 end
 

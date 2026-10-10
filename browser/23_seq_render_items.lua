@@ -112,7 +112,8 @@ function seq_remove_orphaned_region_items()
           if item_qn then
             local rs = tagged_reg.start_qn or 0.0
             local re = rs + get_seq_region_length_qn(tagged_reg)
-            if item_qn < rs - 0.000001 or item_qn >= re - 0.000001 then
+            if (item_qn < rs - 0.000001 or item_qn >= re - 0.000001)
+                and not seq_item_rendered_at_home(item, item_qn, tagged_reg) then
               if r.DeleteTrackMediaItem(tr, item) then
                 removed = removed + 1
               end
