@@ -16,42 +16,104 @@ function json_encode_string(s)
   return '"' .. s:gsub('[%z\1-\31"\\]', SM_JSON_ESCAPE_MAP) .. '"'
 end
 
-function json_encode(val)
-  if type(val) == "table" then
-    local parts = {}
+-- Encoded object keys ('"key":'), reused across calls; step keys and field
+-- names repeat on every save.
+SM_JSON_KEY_CACHE = {}
+SM_JSON_KEY_CACHE_N = 0
+
+local function json_key(k)
+  local cached = SM_JSON_KEY_CACHE[k]
+  if cached then
+    return cached
+  end
+  local s = tostring(k)
+  if s:find('[%z\1-\31"\\]') then
+    cached = json_encode_string(s) .. ":"
+  else
+    cached = '"' .. s .. '":'
+  end
+  if SM_JSON_KEY_CACHE_N >= 8192 then
+    SM_JSON_KEY_CACHE = {}
+    SM_JSON_KEY_CACHE_N = 0
+  end
+  SM_JSON_KEY_CACHE[k] = cached
+  SM_JSON_KEY_CACHE_N = SM_JSON_KEY_CACHE_N + 1
+  return cached
+end
+
+-- Appends val's JSON to buf after index n; returns the new last index.
+local function json_encode_into(val, buf, n)
+  local t = type(val)
+  if t == "table" then
     local is_array = true
     local max_idx = 0
-    for k, v in pairs(val) do
+    for k in pairs(val) do
       if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then
         is_array = false
         break
       end
-      max_idx = math.max(max_idx, k)
+      if k > max_idx then
+        max_idx = k
+      end
     end
-    
     if is_array then
+      n = n + 1
+      buf[n] = "["
       for i = 1, max_idx do
-        table.insert(parts, json_encode(val[i]))
+        if i > 1 then
+          n = n + 1
+          buf[n] = ","
+        end
+        n = json_encode_into(val[i], buf, n)
       end
-      return "[" .. table.concat(parts, ",") .. "]"
+      n = n + 1
+      buf[n] = "]"
     else
+      n = n + 1
+      buf[n] = "{"
+      local first = true
       for k, v in pairs(val) do
-        table.insert(parts, json_encode_string(tostring(k)) .. ":" .. json_encode(v))
+        if first then
+          first = false
+        else
+          n = n + 1
+          buf[n] = ","
+        end
+        n = n + 1
+        buf[n] = json_key(k)
+        n = json_encode_into(v, buf, n)
       end
-      return "{" .. table.concat(parts, ",") .. "}"
+      n = n + 1
+      buf[n] = "}"
     end
-  elseif type(val) == "string" then
-    return json_encode_string(val)
-  elseif type(val) == "number" then
+  elseif t == "string" then
+    n = n + 1
+    if val:find('[%z\1-\31"\\]') then
+      buf[n] = json_encode_string(val)
+    else
+      buf[n] = '"' .. val .. '"'
+    end
+  elseif t == "number" then
+    n = n + 1
     if val ~= val or val == math.huge or val == -math.huge then
-      return "null"
+      buf[n] = "null"
+    else
+      buf[n] = tostring(val)
     end
-    return tostring(val)
-  elseif type(val) == "boolean" then
-    return val and "true" or "false"
+  elseif t == "boolean" then
+    n = n + 1
+    buf[n] = val and "true" or "false"
   else
-    return "null"
+    n = n + 1
+    buf[n] = "null"
   end
+  return n
+end
+
+function json_encode(val)
+  local buf = {}
+  local n = json_encode_into(val, buf, 0)
+  return table.concat(buf, "", 1, n)
 end
 
 

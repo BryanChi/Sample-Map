@@ -807,6 +807,8 @@ function render_sequencer_map()
   seq_clear_stutter_badge_hits()
   local row_positions = {}
   local cursor_y = body_y0
+  -- Row drawing only reads notes: memoize next-trigger lookups until it ends.
+  seq_trigger_memo = {}
   for row_idx, row in ipairs(visual_rows) do
     local row_y0 = cursor_y
     local row_y1 = row_y0 + row.h
@@ -1033,6 +1035,7 @@ function render_sequencer_map()
     end
   end
 
+  seq_trigger_memo = nil
   render_seq_vary_filter_input()
 
   local slot_id_to_idx = {}

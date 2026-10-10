@@ -55,13 +55,15 @@ function seq_item_is_parent_marker(item)
 end
 
 function seq_item_is_owned(item, region_id)
+  -- The region tag first: when asked about one region it rules out most
+  -- items with a single read.
+  if region_id and tonumber(get_item_ext(item, SEQ_EXT_REGION) or "") ~= region_id then
+    return false
+  end
   if seq_item_is_parent_marker(item) then
     return false
   end
   if get_item_ext(item, SEQ_EXT_FLAG) ~= "1" then
-    return false
-  end
-  if region_id and tonumber(get_item_ext(item, SEQ_EXT_REGION) or "") ~= region_id then
     return false
   end
   return true

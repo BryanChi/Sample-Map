@@ -29,13 +29,45 @@ function get_seq_region_by_id(region_id)
   return nil
 end
 
+-- Region lengths depend only on start_qn, bar count and the project tempo map.
+-- The draw loop asks for them once per note per frame (four TimeMap calls each),
+-- so results are memoized for the current frame; sm_loop_frame clears the cache
+-- before any work, so tempo/time-signature edits show up on the next frame.
+seq_region_len_cache = {}
+
+function seq_region_len_cache_reset()
+  seq_region_len_cache = {}
+  seq_sample_qn_at_cache = {}
+  seq_trigger_memo = nil
+end
+
 function get_seq_region_length_qn(region)
   if not region then
     return 16.0
   end
   local bars = math.max(1, math.floor(region.length_bars or 4))
+  local start_qn = region.start_qn or 0.0
+  if start_qn ~= start_qn then
+    return seq_region_length_qn_uncached(start_qn, bars) -- NaN can't be a table key
+  end
+  local by_start = seq_region_len_cache[bars]
+  if by_start then
+    local cached = by_start[start_qn]
+    if cached then
+      return cached
+    end
+  else
+    by_start = {}
+    seq_region_len_cache[bars] = by_start
+  end
+  local len = seq_region_length_qn_uncached(start_qn, bars)
+  by_start[start_qn] = len
+  return len
+end
+
+function seq_region_length_qn_uncached(start_qn, bars)
   if r.TimeMap_GetMeasureInfo and r.TimeMap2_timeToBeats then
-    local start_time = qn_to_time(region.start_qn or 0.0)
+    local start_time = qn_to_time(start_qn)
     if start_time then
       local _, measure = r.TimeMap2_timeToBeats(0, start_time)
       if measure then
@@ -271,15 +303,17 @@ function snap_seq_length_qn(length_qn, step_qn)
   return steps * step_qn
 end
 
+SEQ_REGION_POOL_PALETTE = {
+  {0x4A, 0x8B, 0xD6},
+  {0x7D, 0xD6, 0x70},
+  {0xD6, 0xA4, 0x4A},
+  {0xC7, 0x6D, 0xD6},
+  {0x4A, 0xD6, 0xC1},
+  {0xD6, 0x6D, 0x6D},
+}
+
 function seq_region_pool_color(pool_id, alpha)
-  local palette = {
-    {0x4A, 0x8B, 0xD6},
-    {0x7D, 0xD6, 0x70},
-    {0xD6, 0xA4, 0x4A},
-    {0xC7, 0x6D, 0xD6},
-    {0x4A, 0xD6, 0xC1},
-    {0xD6, 0x6D, 0x6D},
-  }
+  local palette = SEQ_REGION_POOL_PALETTE
   local idx = ((math.floor(pool_id or 1) - 1) % #palette) + 1
   local rgb = palette[idx]
   return build_color_rrgbbaa(rgb[1], rgb[2], rgb[3], alpha or 160)

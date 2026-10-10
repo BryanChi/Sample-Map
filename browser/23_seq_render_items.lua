@@ -55,6 +55,7 @@ function remove_seq_rendered_items(region)
   local tr_count = r.CountTracks(0)
   for tr_idx = 0, tr_count - 1 do
     local tr = r.GetTrack(0, tr_idx)
+    local removed_here = removed
     for item_idx = r.CountTrackMediaItems(tr) - 1, 0, -1 do
       local item = r.GetTrackMediaItem(tr, item_idx)
       if item and seq_item_is_owned(item, region_id) then
@@ -63,9 +64,9 @@ function remove_seq_rendered_items(region)
         end
       end
     end
-  end
-  if removed > 0 then
-    seq_mark_self_arrange_write()
+    if removed > removed_here then
+      seq_mark_self_arrange_write(tr, region_id)
+    end
   end
   return removed
 end
@@ -85,13 +86,11 @@ function remove_seq_rendered_items_by_ids(id_set)
         if rid and id_set[rid] then
           if r.DeleteTrackMediaItem(tr, item) then
             removed = removed + 1
+            seq_mark_self_arrange_write(tr, rid)
           end
         end
       end
     end
-  end
-  if removed > 0 then
-    seq_mark_self_arrange_write()
   end
   return removed
 end
@@ -112,7 +111,8 @@ function seq_remove_orphaned_region_items()
           if item_qn then
             local rs = tagged_reg.start_qn or 0.0
             local re = rs + get_seq_region_length_qn(tagged_reg)
-            if item_qn < rs - 0.000001 or item_qn >= re - 0.000001 then
+            if (item_qn < rs - 0.000001 or item_qn >= re - 0.000001)
+                and not seq_item_rendered_at_home(item, item_qn, tagged_reg) then
               if r.DeleteTrackMediaItem(tr, item) then
                 removed = removed + 1
               end
@@ -324,6 +324,36 @@ function seq_note_draw_length_qn(region, pattern, slot, track_id, step_idx, note
   if span then
     return span
   end
+  -- While rows draw (seq_trigger_memo set; notes are read-only there) the same
+  -- note's length is asked for by its note lane and every parameter lane.
+  local memo = seq_trigger_memo
+  if memo and type(note) == "table" then
+    local by_note = memo.draw_len
+    if not by_note then
+      by_note = {}
+      memo.draw_len = by_note
+    end
+    local list = by_note[note]
+    if list then
+      for i = 1, #list do
+        local e = list[i]
+        if e[1] == region and e[2] == pattern and e[3] == slot and e[4] == track_id
+            and e[5] == step_idx and e[6] == resolved_sample and e[7] == grid_qn then
+          return e[8]
+        end
+      end
+    else
+      list = {}
+      by_note[note] = list
+    end
+    local len = seq_note_draw_length_qn_uncached(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
+    list[#list + 1] = { region, pattern, slot, track_id, step_idx, resolved_sample, grid_qn, len }
+    return len
+  end
+  return seq_note_draw_length_qn_uncached(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
+end
+
+function seq_note_draw_length_qn_uncached(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
   local len = seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
   local decay_qn = tonumber(note and note.decay_qn)
   if type(decay_qn) == "number" and decay_qn > 1e-9 then

@@ -11,9 +11,16 @@ function sample_passes_filters(sample, needle, skip_tags)
     needle = (state.filter ~= "" and string.lower(state.filter)) or ""
   end
   if needle ~= "" then
-    local name = string.lower(sample.name or "")
-    local path = string.lower(sample.path or "")
-    if not string.find(name, needle, 1, true) and not string.find(path, needle, 1, true) then
+    -- Lowercased name/path are memoized on the sample (underscore fields are
+    -- never written to the library cache) and refreshed if either changes.
+    local src_name, src_path = sample.name or "", sample.path or ""
+    if sample._lc_src_name ~= src_name or sample._lc_src_path ~= src_path then
+      sample._lc_src_name = src_name
+      sample._lc_src_path = src_path
+      sample._lc_name = string.lower(src_name)
+      sample._lc_path = string.lower(src_path)
+    end
+    if not string.find(sample._lc_name, needle, 1, true) and not string.find(sample._lc_path, needle, 1, true) then
       return false
     end
   end
