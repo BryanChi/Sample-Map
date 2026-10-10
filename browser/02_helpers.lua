@@ -183,6 +183,21 @@ function volume_root_from_path(path)
   return nil
 end
 
+function volume_is_mounted_scan(vol_name)
+  local i = 0
+  while true do
+    local name = r.EnumerateSubdirectories("/Volumes", i)
+    if not name then
+      break
+    end
+    if name == vol_name then
+      return true
+    end
+    i = i + 1
+  end
+  return false
+end
+
 function volume_is_mounted(vol_root)
   vol_root = normalize_path(vol_root or "")
   if vol_root == "" then
@@ -191,18 +206,18 @@ function volume_is_mounted(vol_root)
 
   local vol_name = vol_root:match("^/Volumes/(.+)$")
   if vol_name then
-    local i = 0
-    while true do
-      local name = r.EnumerateSubdirectories("/Volumes", i)
-      if not name then
-        break
-      end
-      if name == vol_name then
-        return true
-      end
-      i = i + 1
+    -- refresh_scan_folder_availability asks once per scan folder and once per
+    -- volume; reuse one /Volumes listing for the duration of that refresh.
+    local memo = sm_volume_list_memo
+    if not memo or (r.time_precise() - memo.t) > 0.25 then
+      return volume_is_mounted_scan(vol_name)
     end
-    return false
+    local hit = memo.names[vol_name]
+    if hit == nil then
+      hit = volume_is_mounted_scan(vol_name)
+      memo.names[vol_name] = hit
+    end
+    return hit
   end
 
   -- Windows drive root (e.g. "E:/"): present if we can see any entry or rename succeeds.
@@ -253,6 +268,24 @@ function scan_folder_path_exists(path)
   return false
 end
 
+-- Case-insensitive in-place sort of a list of strings. Same order as sorting
+-- with string.lower(a) < string.lower(b), but lowercases each name once
+-- instead of twice per comparison.
+function sm_sort_ci(list)
+  if #list < 2 then
+    return list
+  end
+  local key = {}
+  for i = 1, #list do
+    local s = list[i]
+    if key[s] == nil then
+      key[s] = string.lower(s)
+    end
+  end
+  table.sort(list, function(a, b) return key[a] < key[b] end)
+  return list
+end
+
 function sample_under_scan_folder(sample_path, folder_path)
   local norm_sample = normalize_path(sample_path or "")
   local norm_folder = normalize_path(folder_path or "")
@@ -294,6 +327,7 @@ function refresh_scan_folder_availability()
   local missing_folders = {}
   local missing_volumes = {}
   local volumes = {}
+  sm_volume_list_memo = { t = r.time_precise(), names = {} }
 
   for _, folder in ipairs(state.folders) do
     local norm_folder = normalize_path(folder)
@@ -312,6 +346,7 @@ function refresh_scan_folder_availability()
     end
   end
 
+  sm_volume_list_memo = nil
   local prev_sig = availability_signature(state.missing_scan_folders, state.missing_volumes)
   local new_sig = availability_signature(missing_folders, missing_volumes)
   state.missing_scan_folders = missing_folders

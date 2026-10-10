@@ -324,6 +324,36 @@ function seq_note_draw_length_qn(region, pattern, slot, track_id, step_idx, note
   if span then
     return span
   end
+  -- While rows draw (seq_trigger_memo set; notes are read-only there) the same
+  -- note's length is asked for by its note lane and every parameter lane.
+  local memo = seq_trigger_memo
+  if memo and type(note) == "table" then
+    local by_note = memo.draw_len
+    if not by_note then
+      by_note = {}
+      memo.draw_len = by_note
+    end
+    local list = by_note[note]
+    if list then
+      for i = 1, #list do
+        local e = list[i]
+        if e[1] == region and e[2] == pattern and e[3] == slot and e[4] == track_id
+            and e[5] == step_idx and e[6] == resolved_sample and e[7] == grid_qn then
+          return e[8]
+        end
+      end
+    else
+      list = {}
+      by_note[note] = list
+    end
+    local len = seq_note_draw_length_qn_uncached(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
+    list[#list + 1] = { region, pattern, slot, track_id, step_idx, resolved_sample, grid_qn, len }
+    return len
+  end
+  return seq_note_draw_length_qn_uncached(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
+end
+
+function seq_note_draw_length_qn_uncached(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
   local len = seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
   local decay_qn = tonumber(note and note.decay_qn)
   if type(decay_qn) == "number" and decay_qn > 1e-9 then

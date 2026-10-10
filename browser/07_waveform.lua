@@ -793,17 +793,27 @@ function process_waveform_pixel(job)
   -- Cap read size for speed — RMS only needs a short window, not full pixel duration
   local read_samples = math.min(256, math.max(64, math.floor((duration / width) * sr)))
   local buf_size = read_samples * channels
-  local buf = r.new_array(buf_size)
+  -- One buffer per job (it is cleared after every pixel below) instead of a
+  -- new reaper.array per pixel.
+  local buf = job.pixel_buf
+  if not buf or job.pixel_buf_size ~= buf_size then
+    buf = r.new_array(buf_size)
+    job.pixel_buf = buf
+    job.pixel_buf_size = buf_size
+  end
 
   local samples_read = r.GetAudioAccessorSamples(accessor, sr, channels, time_start, read_samples, buf)
   if samples_read and samples_read > 0 and buf then
     local actual_frames = samples_read
+    -- Read the samples into a Lua table with one call; indexing the
+    -- reaper.array directly costs a C call per sample.
+    local vals = buf.table and buf.table() or buf
     for c = 0, channels - 1 do
       local sum_sq = 0.0
       local count = 0
       for j = 0, actual_frames - 1 do
         local buf_idx = j * channels + c + 1
-        local sample_val = buf[buf_idx]
+        local sample_val = vals[buf_idx]
         if sample_val then
           sum_sq = sum_sq + (sample_val * sample_val)
           count = count + 1

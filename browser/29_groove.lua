@@ -483,7 +483,7 @@ function seq_sample_length_qn(path, sample, at_qn)
   if not length_sec or length_sec <= 0 then
     return nil
   end
-  if type(at_qn) == "number" and r.TimeMap2_timeToQN then
+  if type(at_qn) == "number" and at_qn == at_qn and length_sec == length_sec and r.TimeMap2_timeToQN then
     local by_at = seq_sample_qn_at_cache[length_sec]
     if not by_at then
       by_at = {}

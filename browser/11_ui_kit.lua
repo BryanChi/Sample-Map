@@ -649,9 +649,7 @@ function draw_ui_button(id, label, w, h, opts)
   if icon and not trailing then
     display = ""
   end
-  local frame_padding = { r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding()) }
-  local frame_pad_x = frame_padding[1]
-  local frame_pad_y = frame_padding[2]
+  local frame_pad_x, frame_pad_y = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   if opts.compact then
     frame_pad_x = frame_pad_x * 0.65
     frame_pad_y = frame_pad_y * 0.65
@@ -1238,9 +1236,9 @@ function draw_tag_button(ctx, label, active, tag, id_prefix, opts)
   id_prefix = id_prefix or ""
   opts = opts or {}
   local text_size = {r.ImGui_CalcTextSize(ctx, label)}
-  local frame_padding = {r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())}
-  local button_width = text_size[1] + frame_padding[1] * 2
-  local button_height = text_size[2] + frame_padding[2] * 2
+  local frame_pad_x, frame_pad_y = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
+  local button_width = text_size[1] + frame_pad_x * 2
+  local button_height = text_size[2] + frame_pad_y * 2
   local tag_color = state.tag_colors[tag] or 0x336699
   local base_r, base_g, base_b = extract_rgb(tag_color)
   local allow_delete = opts.allow_delete ~= false
@@ -1297,8 +1295,8 @@ function draw_tag_button(ctx, label, active, tag, id_prefix, opts)
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local press = pressed and 1.0 or 0.0
   ui_draw_panel(dl, x0, y0, x1, y1, rounding, bg, border, hovered, pressed)
-  local text_x = x0 + frame_padding[1]
-  local text_y = y0 + frame_padding[2] + press
+  local text_x = x0 + frame_pad_x
+  local text_y = y0 + frame_pad_y + press
   r.ImGui_DrawList_AddText(dl, text_x, text_y, text_color, label)
   if active and not alt_delete then
     r.ImGui_DrawList_AddText(dl, text_x + 0.4, text_y, text_color, label)
@@ -1929,9 +1927,9 @@ end
 function draw_category_tag(ctx, label, id_prefix, active)
   id_prefix = id_prefix or ""
   local text_size = {r.ImGui_CalcTextSize(ctx, label)}
-  local frame_padding = {r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())}
-  local button_width = text_size[1] + frame_padding[1] * 2
-  local button_height = text_size[2] + frame_padding[2] * 2
+  local frame_pad_x, frame_pad_y = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
+  local button_width = text_size[1] + frame_pad_x * 2
+  local button_height = text_size[2] + frame_pad_y * 2
 
   local clicked = r.ImGui_InvisibleButton(ctx, "##" .. id_prefix .. "cat_" .. label, button_width, button_height)
   local x0, y0 = r.ImGui_GetItemRectMin(ctx)

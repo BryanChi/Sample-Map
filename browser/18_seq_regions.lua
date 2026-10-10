@@ -47,6 +47,9 @@ function get_seq_region_length_qn(region)
   end
   local bars = math.max(1, math.floor(region.length_bars or 4))
   local start_qn = region.start_qn or 0.0
+  if start_qn ~= start_qn then
+    return seq_region_length_qn_uncached(start_qn, bars) -- NaN can't be a table key
+  end
   local by_start = seq_region_len_cache[bars]
   if by_start then
     local cached = by_start[start_qn]

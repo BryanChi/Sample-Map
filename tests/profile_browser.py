@@ -5,7 +5,9 @@ the Sample Map and Sequencer views. Numbers are relative (stub ImGui calls cost
 almost nothing), so use it to compare before/after a change, not as absolute
 frame times. Requires `pip install lupa`.
 
-usage: python3 tests/profile_browser.py [repo_dir] [frames] [samples] [tracks] [top]"""
+usage: python3 tests/profile_browser.py [repo_dir] [frames] [samples] [tracks] [top]
+Set PROFILE_NOWRAP=1 to skip per-function timing and report plain frame time
+(the timing wrappers inflate the cost of small functions)."""
 import sys, os, re, tempfile
 from lupa import lua54
 
@@ -22,7 +24,7 @@ stub = re.search(r"L\.execute\(r'''(.*?)local report = \{\}", src, re.S).group(1
 L = lua54.LuaRuntime(unpack_returned_tuples=True)
 g = L.globals()
 g.REPO = repo; g.RES = tempfile.mkdtemp(); g.FRAMES = frames
-g.NSAMPLES = n_samples; g.NTRACKS = n_tracks; g.TOP = top
+g.NOWRAP = bool(os.environ.get('PROFILE_NOWRAP')); g.NSAMPLES = n_samples; g.NTRACKS = n_tracks; g.TOP = top
 
 out = L.execute(stub + r'''
 -- Fake project: NTRACKS tracks with stable GUIDs and names; no items.
@@ -151,7 +153,7 @@ local function wrap(name, f)
   end
 end
 local libs = { string = 1, table = 1, math = 1, io = 1, os = 1, coroutine = 1, debug = 1, utf8 = 1, package = 1 }
-for k, v in pairs(_G) do
+for k, v in pairs(NOWRAP and {} or _G) do
   if type(v) == "function" and type(k) == "string" and not libs[k]
      and not ({ print=1, pairs=1, ipairs=1, next=1, type=1, tostring=1, tonumber=1, select=1, error=1,
         pcall=1, xpcall=1, rawget=1, rawset=1, rawequal=1, rawlen=1, setmetatable=1, getmetatable=1,

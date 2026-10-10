@@ -887,6 +887,26 @@ function seq_update_link_hover(mx, my, y0, region_lane_h, timeline_x0, timeline_
 end
 
 function seq_region_at_qn(qn)
+  -- Lock/filter spans ask per column per track while rows draw; regions are
+  -- not edited during the row loop, so memoize there (see seq_trigger_memo).
+  local memo = seq_trigger_memo
+  if memo and qn == qn then
+    local by_qn = memo.region_at
+    if not by_qn then
+      by_qn = {}
+      memo.region_at = by_qn
+    end
+    local hit = by_qn[qn]
+    if hit == nil then
+      hit = seq_region_at_qn_scan(qn) or false
+      by_qn[qn] = hit
+    end
+    return hit or nil
+  end
+  return seq_region_at_qn_scan(qn)
+end
+
+function seq_region_at_qn_scan(qn)
   for _, reg in ipairs(state.seq_regions) do
     local reg_start = reg.start_qn or 0.0
     local reg_end = reg_start + get_seq_region_length_qn(reg)
@@ -904,18 +924,23 @@ function seq_build_visible_active_cells(start_qn, end_qn, step_qn, step_count)
   end
   for _, reg in ipairs(state.seq_regions) do
     local reg_start = reg.start_qn or 0.0
-    local reg_end = reg_start + get_seq_region_length_qn(reg)
+    local reg_len = get_seq_region_length_qn(reg)
+    local reg_end = reg_start + reg_len
     if reg_end >= start_qn and reg_start <= end_qn then
       local pattern = get_seq_pattern(reg.pattern_id, false)
       if pattern then
+        -- Same tests as seq_note_in_region / seq_note_visual_abs_qn, with the
+        -- region length and absolute position computed once per note.
+        local in_lo = reg_start - 1e-9
+        local in_hi = reg_start + reg_len - 1e-9
         for _, slot in ipairs(state.seq_tracks) do
           local notes = get_track_note_table(pattern, slot.id, false)
           if notes then
             for step_key, note in pairs(notes) do
-              if type(note) == "table" and note.enabled ~= false
-                 and seq_note_in_region(reg, note, step_key, step_qn) then
-                local abs_qn = seq_note_abs_qn(reg, note, step_key, step_qn)
-                local vis_qn = seq_note_visual_abs_qn(reg, note, step_key, step_qn)
+              local abs_qn = (type(note) == "table" and note.enabled ~= false)
+                and seq_note_abs_qn(reg, note, step_key, step_qn) or nil
+              if abs_qn and abs_qn >= in_lo and abs_qn < in_hi then
+                local vis_qn = abs_qn + (note.offset_qn or 0.0)
                 -- Hit-testing occupies the start cell (and stutter span). Head
                 -- and sustain that draw into later cells stay empty so those
                 -- grids can be painted.

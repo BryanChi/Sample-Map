@@ -378,7 +378,9 @@ end
 
 function seq_draw_env_sparkline(dl, x, y, w, h, env, active, hovered)
   -- Compact non-interactive preview; click handling lives in the lane controls.
-  env = seq_normalize_track_env(env)
+  if not seq_env_is_normalized(env) then
+    env = seq_normalize_track_env(env)
+  end
   local bg = UI_THEME.bg_panel
   local edge = UI_THEME.border
   local edge_w = 1.0
@@ -501,7 +503,13 @@ function seq_env_sparkline_points(env, x, y, w, h, t1, max_y, steps)
     seq_env_sparkline_geom = {}
     seq_env_sparkline_geom_count = 1
   end
-  seq_env_sparkline_geom[rect_key] = { pts = pts, t1 = t1, max_y = max_y, xs = xs, ys = ys }
+  -- Copy the points: env may be the live slot.env, which is edited in place.
+  local snap = {}
+  for i = 1, n do
+    local p = pts[i]
+    snap[i] = { t = p.t, amp = p.amp, curve = p.curve }
+  end
+  seq_env_sparkline_geom[rect_key] = { pts = snap, t1 = t1, max_y = max_y, xs = xs, ys = ys }
   return xs, ys
 end
 
