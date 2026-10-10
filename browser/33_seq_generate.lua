@@ -1972,10 +1972,6 @@ end
 function open_seq_kit_random_popup()
   state.seq_kit_random_query = state.seq_kit_random_query or ""
   sm_tag_index_rebuild_if_stale()
-  if r.ImGui_SetNextWindowSize then
-    local cond = r.ImGui_Cond_Appearing and r.ImGui_Cond_Appearing() or 0
-    r.ImGui_SetNextWindowSize(ctx, 440, 620, cond)
-  end
   r.ImGui_OpenPopup(ctx, "seq_kit_random_popup")
 end
 
