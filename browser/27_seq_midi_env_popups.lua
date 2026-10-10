@@ -513,6 +513,7 @@ function render_seq_env_editor_popup()
   if r.ImGui_WindowFlags_NoFocusOnAppearing then flags = flags | r.ImGui_WindowFlags_NoFocusOnAppearing() end
   if r.ImGui_WindowFlags_NoNav then flags = flags | r.ImGui_WindowFlags_NoNav() end
   if r.ImGui_WindowFlags_NoBackground then flags = flags | r.ImGui_WindowFlags_NoBackground() end
+  if r.ImGui_WindowFlags_TopMost then flags = flags | r.ImGui_WindowFlags_TopMost() end
 
   local visible = r.ImGui_Begin(ctx, "##seq_env_editor", true, flags)
   local popup_dl = (r.ImGui_GetWindowDrawList and r.ImGui_GetWindowDrawList(ctx))
@@ -618,7 +619,11 @@ function render_seq_env_editor_popup()
     end
 
     local dragging = state.seq_env_graph_drag and state.seq_env_graph_drag.slot_id
-    local win_hovered = r.ImGui_IsWindowHovered and r.ImGui_IsWindowHovered(ctx)
+    -- Test the pointer against the card itself: IsWindowHovered turns false as
+    -- soon as any item is pressed, which made a click on the editor's own
+    -- buttons count as a click outside and close it before the click landed.
+    local pmx, pmy = r.ImGui_GetMousePos(ctx)
+    local win_hovered = pmx and pmy and pmx >= x0 and pmx < x1 and pmy >= y0 and pmy < y1
     local escape = r.ImGui_IsKeyPressed and r.ImGui_Key_Escape
       and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false)
     local clicked_outside = r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0)
@@ -637,6 +642,13 @@ function render_seq_env_editor_popup()
 end
 
 function seq_render_env_editor_host()
+  -- The host is called from both the map layout and the sequencer view; draw
+  -- the editor once per frame so its buttons aren't submitted twice.
+  local frame = r.ImGui_GetFrameCount and r.ImGui_GetFrameCount(ctx)
+  if frame and state.seq_env_host_frame == frame then
+    return false
+  end
+  state.seq_env_host_frame = frame
   if not render_seq_env_editor_popup() then
     return false
   end
