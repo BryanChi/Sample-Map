@@ -43,7 +43,7 @@ function seq_set_playhead_qn(qn)
 end
 
 function imgui_text_input_active()
-  if state.seq_vary_filter_edit or state.seq_region_rename then
+  if state.seq_vary_filter_edit or state.seq_region_rename or state.seq_track_rename then
     return true
   end
   if state._text_input_item_active then

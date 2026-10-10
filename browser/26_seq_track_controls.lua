@@ -954,7 +954,9 @@ function seq_draw_track_name_and_expand(dl, slot, layout, expanded, name_alpha, 
     ui_button_draw_icon(dl, expanded and "chev_down" or "chev_right", cx, cy, size * 1.1, col)
   end
   local name_box = layout.name
-  if name_box and name_box.w > 4 then
+  if name_box and name_box.w > 4 and seq_track_rename_active(slot, not (exp and exp.w > 0)) then
+    seq_render_track_rename_input(slot, name_box)
+  elseif name_box and name_box.w > 4 then
     local name_txt = seq_truncate_text_to_width(slot.name or fallback_name or "Track", name_box.w - 2.0)
     local _, nh = r.ImGui_CalcTextSize(ctx, name_txt)
     local a = name_alpha or 255
@@ -987,6 +989,76 @@ function seq_lane_mix_controls_hit(row_pos, mx, my, x0, timeline_x0, map_nav_w)
   end
   return seq_layout_hit(layout and layout.mix_hit, mx, my)
     or seq_layout_hit(layout and layout.candidates, mx, my)
+    or (seq_track_rename_active(row_pos.row.slot, false) and seq_layout_hit(layout and layout.name, mx, my))
+end
+
+-- ===== Inline track rename =============================================
+-- Double-clicking a track name swaps it for a text field. Enter or clicking
+-- away keeps the new name; Esc cancels. panel = the tracks side panel row
+-- (it draws the same track separately from the sequencer lane).
+
+function seq_track_rename_active(slot, panel)
+  local ren = state.seq_track_rename
+  return ren ~= nil and slot ~= nil and ren.slot_id == slot.id and ren.panel == (panel == true)
+end
+
+function seq_begin_track_rename(slot, panel)
+  if not slot or seq_track_rename_active(slot, panel) then
+    return
+  end
+  state.seq_track_rename = {
+    slot_id = slot.id,
+    text = slot.name or "",
+    focus = true,
+    panel = panel == true,
+    frames = 0,
+  }
+end
+
+function seq_render_track_rename_input(slot, box)
+  local ren = state.seq_track_rename
+  if not ren then
+    return
+  end
+  local vars, cols = 0, 0
+  if r.ImGui_StyleVar_FramePadding then
+    r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FramePadding(), 4, 1); vars = vars + 1
+  end
+  if r.ImGui_StyleVar_FrameRounding then
+    r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FrameRounding(), 4); vars = vars + 1
+  end
+  if r.ImGui_StyleVar_FrameBorderSize then
+    r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FrameBorderSize(), 1); vars = vars + 1
+  end
+  r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBg(), 0x0B0F0CFF); cols = cols + 1
+  r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Border(), UI_THEME.accent); cols = cols + 1
+  local fh = (r.ImGui_GetFrameHeight and r.ImGui_GetFrameHeight(ctx)) or box.h
+  r.ImGui_SetCursorScreenPos(ctx, box.x, box.y + (box.h - fh) * 0.5)
+  r.ImGui_SetNextItemWidth(ctx, math.max(40.0, box.w))
+  if ren.focus and r.ImGui_SetKeyboardFocusHere then
+    r.ImGui_SetKeyboardFocusHere(ctx)
+    ren.focus = false
+  end
+  local flags = 0
+  if r.ImGui_InputTextFlags_EnterReturnsTrue then flags = flags | r.ImGui_InputTextFlags_EnterReturnsTrue() end
+  if r.ImGui_InputTextFlags_AutoSelectAll then flags = flags | r.ImGui_InputTextFlags_AutoSelectAll() end
+  local entered, text = r.ImGui_InputText(ctx, "##seq_track_rename", ren.text, flags)
+  if type(text) == "string" then
+    ren.text = text
+  end
+  local active = r.ImGui_IsItemActive(ctx)
+  r.ImGui_PopStyleColor(ctx, cols)
+  r.ImGui_PopStyleVar(ctx, vars)
+  ren.frames = (ren.frames or 0) + 1
+
+  local escape = r.ImGui_IsKeyPressed and r.ImGui_Key_Escape
+    and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false)
+  if escape then
+    state.seq_track_rename = nil
+  elseif entered or (ren.frames > 2 and not active) then
+    state.seq_track_rename = nil
+    seq_rename_track(slot, ren.text)
+  end
 end
 
 -- ===== Track control buttons ===========================================

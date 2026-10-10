@@ -487,11 +487,14 @@ function render_seq_tracks_panel()
       seq_draw_track_name_and_expand(dl, slot, layout, false, 255, nil, slot.name)
 
       local name_box = layout.name
-      if name_box and name_box.w > 4 then
+      if name_box and name_box.w > 4 and not seq_track_rename_active(slot, true) then
         r.ImGui_SetCursorScreenPos(ctx, name_box.x, name_box.y)
         r.ImGui_InvisibleButton(ctx, "##seq_panel_name_" .. slot.id, name_box.w, name_box.h)
         if r.ImGui_IsItemClicked(ctx, 0) and not sample_drag_active() then
           select_seq_track(idx)
+          if r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0) then
+            seq_begin_track_rename(slot, true)
+          end
         end
         if r.ImGui_IsItemClicked(ctx, 1) then
           seq_open_track_context_menu(slot.id)

@@ -1370,6 +1370,9 @@ function render_sequencer_map()
           if track_idx then
             select_seq_track(track_idx)
           end
+          if r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0) then
+            seq_begin_track_rename(row_pos.row.slot, false)
+          end
           break
         end
       end
