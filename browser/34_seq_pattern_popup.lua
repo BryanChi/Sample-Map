@@ -272,7 +272,8 @@ end
 
 -- Write a role -> {16th positions} map into the region's pattern, repeating each
 -- role's positions across every bar (same contract the built-in templates use).
-function seq_write_role_positions(region, style_key, role_map)
+-- hit_detail (optional): per-hit velocity / micro-timing, see seq_apply_role_hit_detail.
+function seq_write_role_positions(region, style_key, role_map, hit_detail)
   if not region or type(role_map) ~= "table" then return 0 end
   style_key = normalize_seq_gen_style(style_key)
   local pattern = get_seq_pattern(region.pattern_id, true)
@@ -304,6 +305,7 @@ function seq_write_role_positions(region, style_key, role_map)
                 local note = make_default_seq_note(slot, step_idx, step_idx * grid_qn)
                 if note then
                   note.offset_qn = seq_pattern_base_offset(role, pos16, style_key, grid_qn)
+                  if hit_detail then seq_apply_role_hit_detail(note, role, pos16, hit_detail) end
                   if (step_idx % steps_per_bar) == 0 and note.offset_qn < 0.0 then
                     note.offset_qn = 0.0
                   end
@@ -1178,7 +1180,8 @@ function seq_gmd_apply_result(region, result)
 
   seq_pattern_confirm_capture(region)
   local style = normalize_seq_gen_style(state.seq_gen_style)
-  local hits = seq_write_role_positions(region, style, role_map)
+  local hits = seq_write_role_positions(region, style, role_map,
+    { velocities = result.velocities, offsets = result.offsets })
 
   local meta = result.meta or {}
   state.seq_pattern_source = "gmd"

@@ -69,6 +69,27 @@ SEQ_GROOVE_BOOM_BAP = {
   0.07, 0.18, 0.00, 0.18,
 }
 
+-- Groove MIDI hit detail for one written hit: the played velocity becomes the
+-- note volume (floor keeps ghost notes audible) and the played micro-timing
+-- (in 16ths) replaces the style's swing offset. detail = { velocities =
+-- {role = {["pos16"] = 1..127}}, offsets = {role = {["pos16"] = -0.5..0.5}} }.
+function seq_apply_role_hit_detail(note, role, pos16, detail)
+  if type(note) ~= "table" or type(detail) ~= "table" then
+    return
+  end
+  local key = tostring(pos16)
+  local vel_map = type(detail.velocities) == "table" and detail.velocities[role]
+  local vel = type(vel_map) == "table" and tonumber(vel_map[key]) or nil
+  if vel and vel > 0 then
+    note.volume = math.max(0.2, math.min(1.0, vel / 127.0))
+  end
+  local off_map = type(detail.offsets) == "table" and detail.offsets[role]
+  local frac = type(off_map) == "table" and tonumber(off_map[key]) or nil
+  if frac then
+    note.offset_qn = math.max(-0.5, math.min(0.5, frac)) * 0.25
+  end
+end
+
 SEQ_GROOVE_PRESETS = {
   off              = { steps = nil },
   swing16_54       = { steps = seq_groove_swing16(0.08) },
@@ -116,8 +137,8 @@ SEQ_GROOVE_ORDER = {
   { key = "laid_back",       label = "Laid Back (behind the beat)", desc = "Everything nudged slightly late for a relaxed pocket." },
   { key = "pushed",          label = "Pushed (ahead of the beat)",  desc = "Everything nudged slightly early for urgency." },
   { header = "Exotic" },
-  { key = "quintuplet",      label = "Quintuplet 3:2 (60%)",        desc = "Angular quintuplet-based swing." },
-  { key = "septuplet",       label = "Septuplet 4:3 (57%)",         desc = "Hip, subtle lopsided septuplet feel." },
+  { key = "quintuplet",      label = "Quintuplet-ratio swing 3:2 (60%)", desc = "1/16 swing with the off 1/16 at 3:2 (a quintuplet ratio). Not true 5-tuplets." },
+  { key = "septuplet",       label = "Septuplet-ratio swing 4:3 (57%)",  desc = "1/16 swing with the off 1/16 at 4:3 (a septuplet ratio). Not true 7-tuplets." },
   { key = "shuffle_triplet", label = "Triplet Shuffle (swung 1/8)", desc = "Full triplet shuffle on the 1/8s." },
   { header = "Human" },
   { key = "human_tight",     label = "Humanize (tight)",            desc = "Small random offsets, hand-played but tight." },
