@@ -26,17 +26,22 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
     reset = opts.unity
   end
 
+  local drag = state.seq_rect_drag
   if reset ~= nil and hovered and r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0) then
     value = math.max(min_v, math.min(max_v, reset))
-    changed = true
-    state.seq_rect_drag = nil
+    changed = math.abs(value - entry_value) > (max_v - min_v) * 1e-7
+    -- Hold the reset value until the button is released, so the second
+    -- click of the double-click doesn't start a drag away from it.
+    state.seq_rect_drag = { id = id, hold = true }
+  elseif active and drag and drag.id == id and drag.hold then
+    -- Reset done; ignore the rest of this press.
   elseif active then
     local mx, my = r.ImGui_GetMousePos(ctx)
     mx, my = mx or x, my or y
-    if (not state.seq_rect_drag) or state.seq_rect_drag.id ~= id then
+    if (not drag) or drag.id ~= id then
       state.seq_rect_drag = { id = id, start_value = value, start_my = my, start_mx = mx, fine = fine }
+      drag = state.seq_rect_drag
     end
-    local drag = state.seq_rect_drag
     if drag.fine ~= fine then
       drag.start_value = value
       drag.start_my = my
@@ -46,24 +51,18 @@ function seq_rect_drag_control(id, dl, x, y, w, h, value, min_v, max_v, opts)
     local span = max_v - min_v
     local scale = fine and SEQ_FINE_DRAG_SCALE or 1.0
     if opts.horizontal then
-      if fine then
-        local start_t = opts.to_pos and opts.to_pos(drag.start_value or value)
-          or (((drag.start_value or value) - min_v) / span)
-        local t = start_t + (mx - (drag.start_mx or mx)) / math.max(1.0, w) * scale
-        t = math.max(0.0, math.min(1.0, t))
-        if opts.from_pos then
-          value = opts.from_pos(t)
-        else
-          value = min_v + t * span
-        end
+      -- Relative drag: a click alone never moves the value, so clicks and
+      -- double-clicks don't jump the fader to the pointer.
+      local start_t = opts.to_pos and opts.to_pos(drag.start_value or value)
+        or (((drag.start_value or value) - min_v) / span)
+      local t = start_t + (mx - (drag.start_mx or mx)) / math.max(1.0, w) * scale
+      t = math.max(0.0, math.min(1.0, t))
+      if math.abs(mx - (drag.start_mx or mx)) < 0.5 then
+        value = drag.start_value or value
+      elseif opts.from_pos then
+        value = opts.from_pos(t)
       else
-        local t = (mx - x) / math.max(1.0, w)
-        t = math.max(0.0, math.min(1.0, t))
-        if opts.from_pos then
-          value = opts.from_pos(t)
-        else
-          value = min_v + t * span
-        end
+        value = min_v + t * span
       end
       value = math.max(min_v, math.min(max_v, value))
     else
