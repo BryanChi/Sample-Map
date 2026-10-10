@@ -1064,6 +1064,7 @@ function generate_seq_pattern(region, style_key, opts)
   local hit_count = seq_restore_locked_notes(region, locked_notes)
 
   local skipped_unassigned = false
+  local cycle_bars = seq_template_cycle_bars(template)
   for _, slot in ipairs(state.seq_tracks) do
     if slot.sample_path then
       local role = infer_seq_track_role(slot)
@@ -1101,10 +1102,14 @@ function generate_seq_pattern(region, style_key, opts)
         for bar = 0, bar_count - 1 do
           local bar_lo = bar * steps_per_bar
           local bar_hi = bar_lo + steps_per_bar - 1
+          -- Two-bar presets alternate: this bar takes steps from its half.
+          local cycle_lo = (bar % cycle_bars) * 16
 
           -- Place template hits, applying density-drop and displacement.
-          for _, template_step in ipairs(role_steps) do
-            local grid_step = seq_template_step_to_grid_step(template_step, steps_per_bar)
+          for _, raw_step in ipairs(role_steps) do
+            local template_step = raw_step - cycle_lo
+            local grid_step = (template_step >= 0 and template_step < 16)
+              and seq_template_step_to_grid_step(template_step, steps_per_bar) or nil
             if grid_step then
               local base_idx = bar_lo + grid_step
               local is_anchor = seq_role_anchor_hit(role, template_step)
@@ -1152,7 +1157,7 @@ function generate_seq_pattern(region, style_key, opts)
           -- Density-add: sprinkle new hits onto empty 16th steps in this bar.
           if add_prob > 0 then
             for template_step = 0, 15 do
-              if not template_step_lookup[template_step] then
+              if not template_step_lookup[cycle_lo + template_step] then
                 local grid_step = seq_template_step_to_grid_step(template_step, steps_per_bar)
                 if grid_step then
                   local idx = bar_lo + grid_step
@@ -1975,7 +1980,7 @@ function open_seq_kit_random_popup()
   r.ImGui_OpenPopup(ctx, "seq_kit_random_popup")
 end
 
-SEQ_PATTERN_POPUP_W = 340.0
+SEQ_PATTERN_POPUP_W = 380.0
 
 function seq_truncate_text_to_width(text, max_w)
   if not text or text == "" then return "" end
