@@ -160,6 +160,7 @@ function apply_seq_project_state(cfg)
           overlap = entry.overlap,
           env = entry.env,
           layers = entry.layers,
+          layer_versions = entry.layer_versions,
           midi_lo = entry.midi_lo,
           midi_hi = entry.midi_hi,
           sample_candidates = entry.sample_candidates,

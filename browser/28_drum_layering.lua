@@ -990,7 +990,9 @@ end
 -- The sample whose transient sets the split: the track sample, else the first
 -- transient corner that resolves.
 function seq_layering_split_sample(slot)
-  local sample = slot and find_sample_by_path(slot.sample_path)
+  -- A just-rendered glue isn't indexed yet: use its file as is.
+  local sample = slot and (find_sample_by_path(slot.sample_path)
+    or (slot.sample_path and { path = slot.sample_path, name = slot.sample_name }))
   if not sample and slot then
     seq_normalize_slot_layers(slot)
     for i = 1, 3 do
@@ -1718,4 +1720,223 @@ function seq_layering_ab_playing(slot, kind)
       and preview_sample_obj
       and slot.sample_path
       and preview_sample_obj.path == slot.sample_path
+end
+
+-- ===== Commit (glue) =======================================================
+-- Commit renders the layered hit to a WAV in the render folder, adds it to
+-- the library and makes it the track's sample with a fresh stack on top.
+-- slot.layer_versions keeps every glue and the stack it was glued from:
+--   { current = n (a glue) or "stack:n" (glue n's source stack) or nil,
+--     glues = { { path, name, at, stack = { sample_path, sample_name, layers } } } }
+
+SEQ_LAYER_RENDER_DIRNAME = "Layered Renders"
+SEQ_LAYER_RENDER_KEY = "layering_render_folder"
+
+function seq_layering_default_render_folder()
+  local lib = state.folders and state.folders[1]
+  if type(lib) == "string" and lib ~= "" then
+    return normalize_path(lib):gsub("/+$", "") .. "/" .. SEQ_LAYER_RENDER_DIRNAME
+  end
+  local res = (r.GetResourcePath and r.GetResourcePath()) or "."
+  return normalize_path(res) .. "/Data/Sample Map/" .. SEQ_LAYER_RENDER_DIRNAME
+end
+
+-- The configured render folder (Settings > Sequencer), else the default.
+function seq_layering_render_folder()
+  local v = r.GetExtState and r.GetExtState(SEQ_LAYER_EXT_SECTION or "SampleMapBrowser", SEQ_LAYER_RENDER_KEY) or ""
+  if v ~= "" then return v end
+  return seq_layering_default_render_folder()
+end
+
+function seq_layering_set_render_folder(path)
+  if not r.SetExtState then return end
+  if not path or path == "" then
+    if r.DeleteExtState then
+      r.DeleteExtState(SEQ_LAYER_EXT_SECTION or "SampleMapBrowser", SEQ_LAYER_RENDER_KEY, true)
+    else
+      r.SetExtState(SEQ_LAYER_EXT_SECTION or "SampleMapBrowser", SEQ_LAYER_RENDER_KEY, "", true)
+    end
+    return
+  end
+  r.SetExtState(SEQ_LAYER_EXT_SECTION or "SampleMapBrowser", SEQ_LAYER_RENDER_KEY, normalize_path(path), true)
+end
+
+-- Writes interleaved float samples (frames x channels) as a 32-bit float WAV.
+-- chunks: list of tables of interleaved samples. Returns true on success.
+function seq_layering_write_wav(path, srate, channels, chunks)
+  local f = io.open(path, "wb")
+  if not f then return false end
+  local frames_total = 0
+  for _, c in ipairs(chunks) do frames_total = frames_total + #c end
+  local data_bytes = frames_total * 4
+  local block_align = channels * 4
+  f:write("RIFF", string.pack("<I4", 4 + 26 + 12 + 8 + data_bytes), "WAVE")
+  f:write("fmt ", string.pack("<I4I2I2I4I4I2I2", 18, 3, channels, srate, srate * block_align, block_align, 32),
+    string.pack("<I2", 0))
+  f:write("fact", string.pack("<I4I4", 4, frames_total // channels))
+  f:write("data", string.pack("<I4", data_bytes))
+  for _, c in ipairs(chunks) do
+    local parts, n = {}, 0
+    for i = 1, #c do
+      n = n + 1
+      parts[n] = string.pack("<f", c[i])
+      if n >= 4096 then
+        f:write(table.concat(parts, "", 1, n))
+        n = 0
+      end
+    end
+    if n > 0 then f:write(table.concat(parts, "", 1, n)) end
+  end
+  f:close()
+  return true
+end
+
+-- Renders the layered hit of slot to path (a WAV). The pieces go on a
+-- temporary track as items, a track audio accessor reads them back mixed
+-- (with their volumes and fades), and the track is removed again.
+function seq_layering_render_mix(slot, path)
+  local pieces = seq_layering_build_pieces(slot)
+  local dur = seq_layering_mix_duration(slot)
+  if #pieces == 0 or not dur then return false, "Nothing to glue" end
+  if not (r.CreateTrackAudioAccessor and r.GetAudioAccessorSamples and r.new_array) then
+    return false, "This REAPER can't render audio from a script"
+  end
+  local srate = 48000
+  if r.GetSetProjectInfo then
+    local sr = tonumber(r.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false)) or 0
+    if sr >= 8000 then srate = math.floor(sr + 0.5) end
+  end
+  dur = dur + 0.005
+  local chunks = {}
+  local ok_items, err = false, nil
+  if r.PreventUIRefresh then r.PreventUIRefresh(1) end
+  local idx = r.CountTracks(0)
+  r.InsertTrackAtIndex(idx, false)
+  local tr = r.GetTrack(0, idx)
+  if tr then
+    ok_items = seq_layering_insert_mix_at_position(
+      { path = slot.sample_path, name = slot.sample_name, is_layering_mix = true, layering_slot_id = slot.id },
+      0.0, tr)
+    if ok_items then
+      local acc = r.CreateTrackAudioAccessor(tr)
+      if acc then
+        local block = 4096
+        local total = math.floor(dur * srate + 0.5)
+        local buf = r.new_array(block * 2)
+        local pos = 0
+        while pos < total do
+          local n = math.min(block, total - pos)
+          buf.clear()
+          r.GetAudioAccessorSamples(acc, srate, 2, pos / srate, n, buf)
+          local t = buf.table(1, n * 2)
+          chunks[#chunks + 1] = t
+          pos = pos + n
+        end
+        r.DestroyAudioAccessor(acc)
+      else
+        err = "Couldn't read the layered audio"
+      end
+    else
+      err = "The layer samples are offline"
+    end
+    r.DeleteTrack(tr)
+  else
+    err = "Couldn't create a render track"
+  end
+  if r.PreventUIRefresh then r.PreventUIRefresh(-1) end
+  if err then return false, err end
+  if not seq_layering_write_wav(path, srate, 2, chunks) then
+    return false, "Couldn't write " .. path
+  end
+  return true
+end
+
+local function render_file_name(slot)
+  local base = tostring(slot.name or slot.sample_name or "Drum"):gsub("%.%w+$", "")
+  base = base:gsub("[^%w%-_ ]", ""):gsub("%s+", " ")
+  if base == "" then base = "Drum" end
+  return string.format("%s layered %s.wav", base, os.date("%Y%m%d-%H%M%S"))
+end
+
+-- A sample record for a file the library may not have indexed yet.
+function seq_layering_sample_for_path(path, name)
+  if not path then return nil end
+  return find_sample_by_path(path) or { path = path, name = name or basename(path) }
+end
+
+function seq_layering_versions(slot)
+  if type(slot.layer_versions) ~= "table" then
+    slot.layer_versions = { glues = {} }
+  end
+  local v = slot.layer_versions
+  if type(v.glues) ~= "table" then v.glues = {} end
+  return v
+end
+
+function seq_layering_can_commit(slot)
+  return slot ~= nil and slot.sample_path ~= nil and seq_layering_geometry_active(slot)
+end
+
+-- Puts sample on the track with a fresh stack (the sample alone on top).
+local function start_fresh_stack(slot, sample)
+  assign_sample_to_seq_track(slot, sample, false)
+  slot.layers = nil
+  seq_normalize_slot_layers(slot)
+  seq_layering_seed_from_track(slot)
+end
+
+-- Glues the current stack. Returns the new glue entry, or nil and a reason.
+-- Callers wrap it in an undo step.
+function seq_layering_commit_glue(slot)
+  if not seq_layering_can_commit(slot) then
+    return nil, "Nothing to glue: the stack plays the original sample"
+  end
+  local folder = seq_layering_render_folder()
+  if r.RecursiveCreateDirectory then r.RecursiveCreateDirectory(folder, 0) end
+  local path = folder .. "/" .. render_file_name(slot)
+  local ok, err = seq_layering_render_mix(slot, path)
+  if not ok then
+    return nil, err or ("Couldn't render to " .. folder)
+  end
+  local versions = seq_layering_versions(slot)
+  local entry = {
+    path = normalize_path(path),
+    name = basename(path),
+    at = os.time(),
+    stack = {
+      sample_path = slot.sample_path,
+      sample_name = slot.sample_name,
+      layers = clone_table_deep(slot.layers),
+    },
+  }
+  versions.glues[#versions.glues + 1] = entry
+  versions.current = #versions.glues
+  -- Into the library (indexed, analyzed and placed on the map by a scan of
+  -- the render folder), then onto the track as the new stack's sample A.
+  if start_scan then pcall(start_scan, folder) end
+  start_fresh_stack(slot, seq_layering_sample_for_path(entry.path, entry.name))
+  seq_layering_sync_arrange(slot, { force_rebuild = true })
+  save_config()
+  return entry
+end
+
+-- Switches the track to glue n, or (unglued = true) back to the stack glue n
+-- was made from.
+function seq_layering_use_version(slot, n, unglued)
+  local versions = seq_layering_versions(slot)
+  local g = versions.glues[n]
+  if not g then return false end
+  if unglued then
+    local st = g.stack or {}
+    assign_sample_to_seq_track(slot, seq_layering_sample_for_path(st.sample_path, st.sample_name), false)
+    slot.layers = clone_table_deep(st.layers)
+    seq_normalize_slot_layers(slot)
+    versions.current = "stack:" .. n
+  else
+    start_fresh_stack(slot, seq_layering_sample_for_path(g.path, g.name))
+    versions.current = n
+  end
+  seq_layering_sync_arrange(slot, { force_rebuild = true })
+  save_config()
+  return true
 end

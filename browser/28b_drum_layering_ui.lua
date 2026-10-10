@@ -198,6 +198,10 @@ SEQ_LAYER_IDLE_HINT = "Drag in a triangle to blend  ·  Shift: fine  ·  Double-
 -- Hint bar: what's under the mouse, else how the window works.
 function seq_layering_draw_hint_bar(dl, x, y, w, h)
   local hint = state.seq_layering_hint
+  local msg = state.seq_layering_commit_msg
+  if not hint and msg and r.time_precise() - (msg.t or 0) < 5.0 then
+    hint = msg.text
+  end
   ui_draw_panel(dl, x, y, x + w, y + h, h * 0.5, hint and UI_THEME.surface or UI_THEME.bg_panel,
     hint and UI_THEME.border or UI_THEME.border_soft, false, false)
   local cy = y + h * 0.5
@@ -788,7 +792,7 @@ function seq_layering_draw_wave_pane(dl, slot, x, y, w, h, kind, hover_side)
   local using = seq_layering_output(slot) == kind
   local playing = seq_layering_ab_playing(slot, kind)
   local linked = slot.layers and slot.layers.linked
-  local sample = slot.sample_path and find_sample_by_path(slot.sample_path) or nil
+  local sample = seq_layering_sample_for_path(slot.sample_path, slot.sample_name)
   local ix, iy, iw, ih = x + 10.0, y + 22.0, w - 20.0, h - 28.0
 
   local peaks, dur, ribbon = nil, nil, nil
@@ -1569,7 +1573,53 @@ function seq_layering_open_side_menu(slot, side_key)
   r.ImGui_OpenPopup(ctx, "##seq_layer_side_menu")
 end
 
+-- Commit as one undo step; a failed render changes nothing.
+function seq_layering_do_commit(slot)
+  local entry, err = nil, nil
+  seq_layering_with_undo("Commit drum layering", function()
+    entry, err = seq_layering_commit_glue(slot)
+  end)
+  if not entry then
+    log("Commit failed: " .. tostring(err))
+    state.seq_layering_commit_msg = { text = "Commit failed: " .. tostring(err), t = r.time_precise() }
+    return false
+  end
+  state.seq_layering_commit_msg = { text = "Glued: " .. entry.name, t = r.time_precise() }
+  return true
+end
+
+local function version_time(g)
+  return g.at and os.date("%H:%M:%S", g.at) or ""
+end
+
 function seq_layering_render_menus(slot)
+  if r.ImGui_BeginPopup and r.ImGui_BeginPopup(ctx, "##seq_layer_versions_menu") then
+    local versions = slot.layer_versions
+    local glues = versions and versions.glues or {}
+    local cur = versions and versions.current
+    local pick, unglued = nil, false
+    ui_group_caption("GLUED")
+    for n = #glues, 1, -1 do
+      local g = glues[n]
+      if r.ImGui_MenuItem(ctx, "Glue " .. n .. "  ·  " .. truncate(g.name or "", 220), version_time(g), cur == n) then
+        pick, unglued = n, false
+      end
+    end
+    r.ImGui_Separator(ctx)
+    ui_group_caption("UNGLUED")
+    for n = #glues, 1, -1 do
+      if r.ImGui_MenuItem(ctx, "Stack before Glue " .. n, version_time(glues[n]), cur == ("stack:" .. n)) then
+        pick, unglued = n, true
+      end
+    end
+    r.ImGui_EndPopup(ctx)
+    if pick then
+      seq_layering_with_undo(unglued and "Unglue drum layering" or "Use glued drum layering", function()
+        seq_layering_use_version(slot, pick, unglued)
+      end)
+    end
+  end
+
   if r.ImGui_BeginPopup and r.ImGui_BeginPopup(ctx, "##seq_layer_vert_menu") then
     local m = state.seq_layering_menu
     if m and m.slot_id == slot.id then
@@ -2410,9 +2460,50 @@ function seq_layering_header(dl, slot, x, y, w)
     seq_layering_set_output(slot, picked)
   end
 
+  -- Commit (glue) and the version picker, left of the output switch.
+  local cx1 = rx - 16.0 - ocw
+  local commit_w = text_w("Commit") + 34.0
+  cx1 = cx1 - commit_w
+  local can_commit = seq_layering_can_commit(slot)
+  r.ImGui_SetCursorScreenPos(ctx, cx1, y + 3.0)
+  if draw_ui_button("seq_layer_commit", "Commit", commit_w, h - 6.0, {
+    compact = true, pill = true, style = can_commit and "accent" or "default", lead_icon = "check",
+  }) and can_commit then
+    seq_layering_do_commit(slot)
+  end
+  if r.ImGui_IsItemHovered(ctx) then
+    tooltip(can_commit
+      and ("Commit: glue the stack into one sample in " .. seq_layering_render_folder() .. ", add it to the library and start a fresh stack on it  ·  Undo brings the stack back")
+      or "Commit: nothing to glue yet, the stack plays the original sample")
+  end
+  local versions = slot.layer_versions
+  local n_glues = versions and type(versions.glues) == "table" and #versions.glues or 0
+  if n_glues > 0 then
+    local cur = versions.current
+    local vlabel = (type(cur) == "number") and ("Glue " .. cur)
+        or (type(cur) == "string" and "Unglued") or "Edited"
+    local vw = text_w(vlabel) + 30.0
+    cx1 = cx1 - 6.0 - vw
+    r.ImGui_SetCursorScreenPos(ctx, cx1, y + 3.0)
+    local v_clicked = r.ImGui_InvisibleButton(ctx, "##seq_layer_versions", vw, h - 6.0)
+    local v_hov = r.ImGui_IsItemHovered(ctx)
+    ui_draw_panel(dl, cx1, y + 3.0, cx1 + vw, y + h - 3.0, (h - 6.0) * 0.5,
+      v_hov and UI_THEME.surface_hvr or UI_THEME.surface, v_hov and UI_THEME.border_hvr or UI_THEME.border, v_hov, false)
+    r.ImGui_DrawList_AddText(dl, cx1 + 10.0, y + h * 0.5 - 7.0, v_hov and 0xFFFFFFFF or UI_THEME.text_dim, vlabel)
+    local ax, ay = cx1 + vw - 11.0, y + h * 0.5
+    r.ImGui_DrawList_AddTriangleFilled(dl, ax - 3.5, ay - 1.5, ax + 3.5, ay - 1.5, ax, ay + 2.5, UI_THEME.text_dim)
+    if v_hov then
+      tooltip(string.format("%d glued version%s: switch between them or back to an unglued stack", n_glues, n_glues == 1 and "" or "s"))
+    end
+    if v_clicked then
+      state.seq_layering_versions_menu = { slot_id = slot.id }
+      r.ImGui_OpenPopup(ctx, "##seq_layer_versions_menu")
+    end
+  end
+
   -- Track chip between the title and the controls.
   local chip_x = tx + tw + 12.0
-  local chip_max = (rx - 16.0 - ocw) - chip_x - 14.0
+  local chip_max = (cx1 - 10.0) - chip_x
   if chip_max > 30.0 then
     draw_pill(dl, chip_x, y + h * 0.5, truncate(slot.name or "Track", chip_max), UI_THEME.surface, UI_THEME.border, UI_THEME.text_dim, 20.0)
   end

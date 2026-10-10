@@ -103,6 +103,9 @@ function settings_section_should_show(label)
       "Update", "GitHub", "Download", "version", "Check for updates", "install"
     )
   end
+  if label == "Drum Layering" then
+    return settings_matches("Render folder", "Commit", "glue", "Layered Renders")
+  end
   return false
 end
 
@@ -789,6 +792,33 @@ end
 
 -- Settings are grouped by what they affect; each group gets a caption and
 -- its sections stay individually collapsible (search expands everything).
+-- Where Commit in the drum layering window writes its glued samples.
+function settings_render_drum_layering()
+  r.ImGui_Text(ctx, "Render folder")
+  r.ImGui_TextColored(ctx, UI_THEME.text_dim,
+    "Commit in the drum layering window glues the stack into a WAV here and adds it to the library.")
+  r.ImGui_Spacing(ctx)
+  local folder = seq_layering_render_folder()
+  local custom = folder ~= seq_layering_default_render_folder()
+  r.ImGui_TextColored(ctx, custom and UI_THEME.text or UI_THEME.text_dim, folder .. (custom and "" or "  (default)"))
+  if draw_ui_button("settings_layer_render_browse", "Browse", nil, nil, { compact = true }) then
+    if r.APIExists("JS_Dialog_BrowseForFolder") then
+      local ok, picked = r.JS_Dialog_BrowseForFolder("Folder for glued drum layers", folder)
+      if ok == 1 and picked and picked ~= "" then
+        seq_layering_set_render_folder(picked)
+      end
+    else
+      r.ShowMessageBox("JS_ReaScriptAPI extension is required for folder browsing.\n\nPlease install it via ReaPack:\nExtensions > ReaPack > Browse Packages > Search for 'js_ReaScriptAPI'", "Extension Required", 0)
+    end
+  end
+  if custom then
+    r.ImGui_SameLine(ctx)
+    if draw_ui_button("settings_layer_render_default", "Use default", nil, nil, { compact = true }) then
+      seq_layering_set_render_folder(nil)
+    end
+  end
+end
+
 function settings_groups()
   local groups = {
     { caption = "Library", sections = {
@@ -804,6 +834,7 @@ function settings_groups()
     } },
     { caption = "Sequencer", sections = {
       { label = "Sequencer Controls", open = true, draw = settings_render_sequencer_controls },
+      { label = "Drum Layering", open = false, draw = settings_render_drum_layering },
     } },
     { caption = "General", sections = {
       { label = "Keyboard Shortcuts", open = false, draw = settings_render_keyboard_shortcuts },

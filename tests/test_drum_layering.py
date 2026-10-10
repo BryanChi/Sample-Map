@@ -1102,3 +1102,164 @@ def test_corner_strip_in_the_picker_sets_length():
     length, synced = got
     assert length and abs(length - 0.2) < 0.01
     assert synced
+
+
+def _fake_render(L):
+    os.makedirs(os.path.join(L.globals().RES, "lib", "Layered Renders"), exist_ok=True)
+    L.execute(r'''
+      RENDERS = {}
+      seq_layering_render_mix = function(slot, path)
+        RENDERS[#RENDERS + 1] = path
+        return seq_layering_write_wav(path, 48000, 2, { { 0.1, -0.1, 0.2, -0.2 } })
+      end
+      SCANS = {}
+      start_scan = function(folder) SCANS[#SCANS + 1] = folder end
+      state.folders = { RES .. "/lib" }
+    ''')
+
+
+def test_wav_writer_writes_a_float_wav():
+    L = _runtime()
+    path = os.path.join(L.globals().RES, "t.wav")
+    L.execute(f'return seq_layering_write_wav([[{path}]], 44100, 2, {{ {{ 0.5, -0.5, 1.5, 0 }}, {{ 0.25, 0.25 }} }})')
+    import struct
+    data = open(path, "rb").read()
+    assert data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+    fmt, ch, sr = struct.unpack("<HHI", data[20:28])
+    assert (fmt, ch, sr) == (3, 2, 44100)
+    i = data.index(b"data")
+    size = struct.unpack("<I", data[i + 4:i + 8])[0]
+    assert size == 6 * 4 and len(data) == i + 8 + size
+    assert struct.unpack("<6f", data[i + 8:])[2] == 1.5
+    assert struct.unpack("<I", data[4:8])[0] == len(data) - 8
+
+
+def test_render_mix_reads_the_temp_track_and_removes_it():
+    L = _runtime()
+    path = os.path.join(L.globals().RES, "r.wav")
+    got = L.execute(f'''
+      local tracks, deleted = 0, 0
+      reaper.CountTracks = function() return tracks end
+      reaper.InsertTrackAtIndex = function() tracks = tracks + 1 end
+      reaper.GetTrack = function() return {{ fake = true }} end
+      reaper.DeleteTrack = function() deleted = deleted + 1; tracks = tracks - 1 end
+      seq_layering_insert_mix_at_position = function(s, pos, tr) return tr and tr.fake end
+      reaper.CreateTrackAudioAccessor = function() return {{}} end
+      reaper.DestroyAudioAccessor = function() end
+      reaper.GetSetProjectInfo = function() return 44100 end
+      reaper.new_array = function(n)
+        local a = {{ data = {{}} }}
+        a.clear = function() a.data = {{}} end
+        a.table = function(o, sz) local t = {{}} for i = 1, sz do t[i] = a.data[i] or 0 end return t end
+        return a
+      end
+      reaper.GetAudioAccessorSamples = function(acc, sr, ch, t, n, buf)
+        for i = 1, n * ch do buf.data[i] = 0.25 end
+        return 1
+      end
+      SLOT.layers.output = "layered"
+      local ok, err = seq_layering_render_mix(SLOT, [[{path}]])
+      return ok, err, deleted, tracks, seq_layering_mix_duration(SLOT)
+    ''')
+    ok, err, deleted, tracks, dur = got
+    assert ok is True and err is None and deleted == 1 and tracks == 0
+    import struct
+    data = open(path, "rb").read()
+    i = data.index(b"data")
+    frames = struct.unpack("<I", data[i + 4:i + 8])[0] // 8
+    assert frames == round((dur + 0.005) * 44100)
+    assert struct.unpack("<f", data[i + 8:i + 12])[0] == 0.25
+
+
+def test_commit_glues_starts_a_fresh_stack_and_keeps_versions():
+    L = _runtime()
+    _fake_render(L)
+    got = L.execute(r'''
+      local folder = seq_layering_render_folder()
+      local entry = seq_layering_commit_glue(SLOT)
+      local first = {
+        folder = folder, scanned = SCANS[1], file_ok = io.open(entry.path, "rb") ~= nil,
+        track = SLOT.sample_path, fresh = not seq_layering_geometry_active(SLOT),
+        top = SLOT.layers.transient.verts[1].path, stack_b = entry.stack.layers.transient.verts[2].path,
+        stack_sample = entry.stack.sample_path,
+      }
+      -- Nothing to glue on a fresh stack.
+      local again, why = seq_layering_commit_glue(SLOT)
+      -- Tweak and commit again.
+      SLOT.layers.sustain.verts[2].path = D.path
+      SLOT.layers.sustain.blend = { 0.5, 0.5, 0.0 }
+      local entry2 = seq_layering_commit_glue(SLOT)
+      local v = SLOT.layer_versions
+      -- Back to glue 1, then to the stack glue 1 was made from.
+      seq_layering_use_version(SLOT, 1)
+      local on_g1 = SLOT.sample_path == entry.path and v.current == 1
+      seq_layering_use_version(SLOT, 1, true)
+      local t = SLOT.layers.transient
+      return first, again == nil and why ~= nil, #v.glues, entry2.stack.sample_path == entry.path, on_g1,
+        SLOT.sample_path, t.verts[2].path, t.verts[3].path, v.current
+    ''')
+    first, refused, n, chained, on_g1, sample, b, c, cur = got
+    assert first.folder.endswith("/lib/Layered Renders")
+    assert first.scanned == first.folder and first.file_ok
+    assert first.track.startswith(first.folder) and first.top == first.track and first.fresh
+    assert first.stack_b == "/s/click.wav" and first.stack_sample == "/s/kick.wav"
+    assert refused and n == 2 and chained and on_g1
+    assert sample == "/s/kick.wav" and b == "/s/click.wav" and c == "/s/sub.wav"
+    assert cur == "stack:1"
+
+
+def test_commit_is_one_undo_step():
+    L = _runtime()
+    _fake_render(L)
+    _render_ok(L, 1)
+    got = L.execute(r'''
+      local before = SLOT.sample_path
+      seq_layering_do_commit(SLOT)
+      local after = find_seq_track_by_id(77).sample_path
+      seq_undo()
+      local slot = find_seq_track_by_id(77)
+      return before, after, slot.sample_path, slot.layers.transient.verts[2].path,
+        slot.layer_versions == nil or #slot.layer_versions.glues == 0
+    ''')
+    before, after, undone, b, no_versions = got
+    assert after != before and after.endswith(".wav")
+    assert undone == before and b == "/s/click.wav" and no_versions
+
+
+def test_versions_menu_switches_versions():
+    L = _runtime()
+    _fake_render(L)
+    _render_ok(L, 1)
+    got = L.execute(r'''
+      local e = seq_layering_commit_glue(SLOT)
+      frame()
+      reaper.ImGui_OpenPopup(ctx, "##seq_layer_versions_menu")
+      set_menu_pick("Stack before Glue 1")
+      frame()
+      set_menu_pick(nil)
+      close_popups()
+      local unglued = SLOT.sample_path
+      reaper.ImGui_OpenPopup(ctx, "##seq_layer_versions_menu")
+      set_menu_pick("Glue 1")
+      frame()
+      set_menu_pick(nil)
+      return unglued, SLOT.sample_path == e.path, SLOT.layer_versions.current
+    ''')
+    assert got[0] == "/s/kick.wav" and got[1] is True and got[2] == 1
+    _render_ok(L, 2)
+
+
+def test_render_folder_setting():
+    L = _runtime()
+    got = L.execute(r'''
+      state.folders = { "/lib/drums/" }
+      local d = seq_layering_render_folder()
+      seq_layering_set_render_folder("/elsewhere/glues")
+      local custom = seq_layering_render_folder()
+      settings_render_drum_layering()
+      seq_layering_set_render_folder(nil)
+      return d, custom, seq_layering_render_folder()
+    ''')
+    assert got[0] == "/lib/drums/Layered Renders"
+    assert got[1] == "/elsewhere/glues"
+    assert got[2] == "/lib/drums/Layered Renders"
