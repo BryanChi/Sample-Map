@@ -202,23 +202,37 @@ function ui_fit_child_end(key, opened)
   imgui_end_child(true)
 end
 
+-- ImGui enum getter -> value. Enum values are constants, so each getter is
+-- called once instead of ~60 times per frame by ui_push_theme.
+SM_ENUM_VALUE = {}
+
+function sm_enum(getter)
+  local v = SM_ENUM_VALUE[getter]
+  if v == nil then
+    v = getter()
+    SM_ENUM_VALUE[getter] = v
+  end
+  return v
+end
+
 function ui_push_theme()
   local n_col, n_var = 0, 0
+  local push_col, push_var = r.ImGui_PushStyleColor, r.ImGui_PushStyleVar
   local function col(getter, value)
     if getter then
-      r.ImGui_PushStyleColor(ctx, getter(), value)
+      push_col(ctx, sm_enum(getter), value)
       n_col = n_col + 1
     end
   end
   local function var1(getter, value)
     if getter then
-      r.ImGui_PushStyleVar(ctx, getter(), value)
+      push_var(ctx, sm_enum(getter), value)
       n_var = n_var + 1
     end
   end
   local function var2(getter, a, b)
     if getter then
-      r.ImGui_PushStyleVar(ctx, getter(), a, b)
+      push_var(ctx, sm_enum(getter), a, b)
       n_var = n_var + 1
     end
   end
@@ -2852,6 +2866,10 @@ function update_provisional_drop(sample)
     return
   end
 
+  -- Nothing moved since last frame: skip the reposition and arrange redraw.
+  if drop_track == p.track and drop_time == p.time then
+    return
+  end
   -- Reposition the existing preview (cheap: no source/peak rebuild).
   r.PreventUIRefresh(1)
   if drop_track ~= p.track and r.ValidatePtr(drop_track, "MediaTrack*") then
@@ -3237,15 +3255,23 @@ function shortcut_conflict_label(action)
   return nil
 end
 
+-- ImGui key enum values by key id (constants; false = no such key).
+SM_KEY_ENUM = {}
+
 function shortcut_key_pressed(key_id)
   if not key_id or key_id == "" or not r.ImGui_IsKeyPressed then
     return false
   end
-  local fn = r["ImGui_Key_" .. key_id]
-  if not fn then
+  local key = SM_KEY_ENUM[key_id]
+  if key == nil then
+    local fn = r["ImGui_Key_" .. key_id]
+    key = fn and fn() or false
+    SM_KEY_ENUM[key_id] = key
+  end
+  if not key then
     return false
   end
-  return r.ImGui_IsKeyPressed(ctx, fn(), false)
+  return r.ImGui_IsKeyPressed(ctx, key, false)
 end
 
 function shortcut_pressed(action)
@@ -3259,10 +3285,12 @@ function shortcut_pressed(action)
   if not spec then
     return false
   end
-  if not shortcut_would_fire(spec, is_shift_down(), is_alt_down(), is_ctrl_down(), is_cmd_down()) then
+  -- Key first: reading the four modifiers costs ~20 API calls, and most
+  -- frames have no key press at all.
+  if not shortcut_key_pressed(spec.key) then
     return false
   end
-  return shortcut_key_pressed(spec.key)
+  return shortcut_would_fire(spec, is_shift_down(), is_alt_down(), is_ctrl_down(), is_cmd_down())
 end
 
 function shortcut_poll_pressed_key()

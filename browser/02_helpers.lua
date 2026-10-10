@@ -357,6 +357,11 @@ function sample_scan_folder_unavailable(sample)
   if not sample or not sample.path then
     return false
   end
+  -- Only a missing volume or scan folder can make a sample unavailable; skip
+  -- the per-folder path normalization when nothing is missing (the usual case).
+  if next(state.missing_volumes) == nil and next(state.missing_scan_folders) == nil then
+    return false
+  end
   local vol = volume_root_from_path(sample.path)
   if vol and state.missing_volumes[vol] then
     return true

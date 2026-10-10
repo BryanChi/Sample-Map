@@ -235,7 +235,7 @@ end
 
 function get_seq_note_anim(region_id, track_id, step_key, now)
   local anims = state.seq_note_anims
-  if not anims then
+  if not anims or next(anims) == nil then
     return nil
   end
   local key = seq_note_anim_cell_key(region_id, track_id, step_key)

@@ -3,18 +3,35 @@
 local r = reaper
 
 -- --- Sequencer track helpers -------------------------------------------------
+-- guid -> MediaTrack from the last full scan. A hit is only trusted after
+-- checking the pointer is a live track in the current project with that GUID;
+-- anything else rescans (and refreshes the whole map), so results match a scan.
+seq_track_by_guid_cache = {}
+
 function get_track_by_guid(track_guid)
   if not track_guid or track_guid == "" then
     return nil
   end
+  local cached = seq_track_by_guid_cache[track_guid]
+  if cached and r.ValidatePtr2 and r.ValidatePtr2(0, cached, "MediaTrack*")
+      and r.GetTrackGUID(cached) == track_guid then
+    return cached
+  end
+  local map = {}
+  local found = nil
   local n = r.CountTracks(0)
   for i = 0, n - 1 do
     local tr = r.GetTrack(0, i)
-    if r.GetTrackGUID(tr) == track_guid then
-      return tr
+    local guid = r.GetTrackGUID(tr)
+    if guid and map[guid] == nil then
+      map[guid] = tr
+    end
+    if not found and guid == track_guid then
+      found = tr
     end
   end
-  return nil
+  seq_track_by_guid_cache = map
+  return found
 end
 
 function get_project_tracks_list()
@@ -74,6 +91,16 @@ function find_sample_by_path(path)
   end
   -- Fallback once if index is stale (then cache). Case-insensitive for
   -- external volumes whose enumeration casing does not match the cache.
+  -- Misses are remembered until the library changes (explorer rows for files
+  -- not in the library would otherwise rescan every sample every frame).
+  if sample_path_miss_list ~= state.samples then
+    sample_path_miss = {}
+    sample_path_miss_list = state.samples
+  end
+  local lib_n = #state.samples
+  if sample_path_miss[path] == lib_n then
+    return nil
+  end
   for _, s in ipairs(state.samples) do
     if s.path == path or s.path == norm then
       samples_by_path[path] = s
@@ -86,6 +113,7 @@ function find_sample_by_path(path)
       return s
     end
   end
+  sample_path_miss[path] = lib_n
   return nil
 end
 
@@ -801,6 +829,11 @@ function seq_get_region_track_sample(region, track_id)
     return rec
   end
   if not region then
+    return nil
+  end
+  -- Only a linked region has link-group members; skip the O(R^2) scan below
+  -- for the usual unlinked region.
+  if seq_region_is_linked and not seq_region_is_linked(region) then
     return nil
   end
   for _, reg in ipairs(state.seq_regions or {}) do

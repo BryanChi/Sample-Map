@@ -859,6 +859,18 @@ end
 
 function seq_update_link_hover(mx, my, y0, region_lane_h, timeline_x0, timeline_w, start_qn, qn_span, qn_to_x)
   state.seq_link_hover_region_id = nil
+  -- The hover only matters for a linked region. With none linked (the usual
+  -- case) skip the window/arrange hit tests, which query REAPER every frame.
+  local any_linked = false
+  for _, reg in ipairs(state.seq_regions or {}) do
+    if seq_region_is_linked(reg) then
+      any_linked = true
+      break
+    end
+  end
+  if not any_linked then
+    return nil
+  end
   local hover_reg = nil
   if seq_mouse_over_script_ui() and my >= y0 and my <= y0 + region_lane_h and mx >= timeline_x0 and mx <= timeline_x0 + timeline_w then
     local hit = seq_hit_test_region_at(mx, my, y0, region_lane_h, timeline_x0, timeline_w, start_qn, qn_span, qn_to_x)

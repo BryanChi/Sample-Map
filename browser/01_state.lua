@@ -607,8 +607,12 @@ function path_index_key(path)
   return string.lower(path)
 end
 
+sample_path_miss = {}       -- path -> #state.samples when find_sample_by_path last missed
+sample_path_miss_list = nil -- state.samples table the miss cache belongs to
+
 function rebuild_samples_path_index()
   samples_by_path = {}
+  sample_path_miss = {}
   for _, s in ipairs(state.samples) do
     if s.path then
       samples_by_path[s.path] = s
