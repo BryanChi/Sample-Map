@@ -1570,11 +1570,16 @@ function snapshot_seq_kit_history(keywords, opts)
   end
   local sig = seq_kit_signature(elements)
   if opts.skip_duplicate ~= false and seq_kit_history_has_signature(sig) then
-    -- Same main samples: refresh the stored per-region samples so going
-    -- back restores the latest ones.
+    -- Same main samples: store the current per-region samples on that entry
+    -- so going back restores them. Never clear ones it already has.
     for _, entry in ipairs(state.seq_kit_history or {}) do
       if seq_kit_signature(entry.elements) == sig then
-        entry.elements = elements
+        for i, elem in ipairs(elements) do
+          local old = entry.elements[i]
+          if old and elem.region_samples then
+            old.region_samples = elem.region_samples
+          end
+        end
         break
       end
     end
