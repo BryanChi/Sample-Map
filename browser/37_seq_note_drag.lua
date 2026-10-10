@@ -1377,7 +1377,7 @@ function apply_seq_stutter_lane_drag(drag, region, step_qn, start_qn, step_count
       local key = seq_alloc_note_key(region, slot.id, qn_offset)
       local note = make_default_seq_note(slot, key, qn_offset)
       if not note then
-        log("Sequencer slot has no assigned sample")
+        sm_notify("This track has no sample yet: drop a sample on it first", "warn")
         return false
       end
       set_seq_note(region, slot.id, key, note)

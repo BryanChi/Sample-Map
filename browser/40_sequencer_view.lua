@@ -1622,7 +1622,7 @@ function render_sequencer_map()
           state.seq_note_drag.dirty = true
         end
       else
-        log("Sequencer slot has no assigned sample")
+        sm_notify("This track has no sample yet: drop a sample on it first", "warn")
       end
     elseif hovered_row.row.type == "note" and in_region and left_clicked and mx >= timeline_x0
         and not edit_def and not is_alt_down()

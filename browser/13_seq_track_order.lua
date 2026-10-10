@@ -418,7 +418,7 @@ function create_seq_track_from_popup(track_name, tag_name)
     if sample then
       assign_sample_to_seq_track(slot, sample, false)
     else
-      log("No sample found for tag '" .. chosen_tag .. "'")
+      sm_notify("No sample found for tag '" .. chosen_tag .. "'", "warn")
     end
   end
 
