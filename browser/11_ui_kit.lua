@@ -3637,7 +3637,8 @@ function render_sample_path_line()
     end
 
     if not preview_sample_obj then
-      r.ImGui_Text(ctx, "(No sample selected)")
+      r.ImGui_AlignTextToFramePadding(ctx)
+      r.ImGui_TextColored(ctx, UI_THEME.text_mute, "No sample selected. Click a dot on the map to audition it.")
     else
       local full_path = preview_sample_obj.path or ""
       local path_segments = {}
@@ -3733,15 +3734,32 @@ function render_sample_path_line()
         end
       end
 
-      local slash = " / "
-      local name_w = (select(1, r.ImGui_CalcTextSize(ctx, slash)) or 8)
-        + (select(1, r.ImGui_CalcTextSize(ctx, filename)) or 40)
-      path_advance(name_w, #path_segments == 0)
+      -- Filename: chevron, then a tinted pill with a waveform glyph so the
+      -- file reads as the end of the trail rather than another folder.
+      local fn_w, fn_h = r.ImGui_CalcTextSize(ctx, filename)
+      local fn_pill_w = fn_w + 26
+      local fn_pill_h = fn_h + 6
+      local chevron_w = 10
+      path_advance(chevron_w + 2 + fn_pill_w, #path_segments == 0)
       if #path_segments > 0 then
-        r.ImGui_Text(ctx, slash)
-        path_advance(select(1, r.ImGui_CalcTextSize(ctx, filename)) or 40, false)
+        local cx, cy = r.ImGui_GetCursorScreenPos(ctx)
+        r.ImGui_Dummy(ctx, chevron_w, 18)
+        ui_button_draw_icon(r.ImGui_GetWindowDrawList(ctx), "chev_right", cx + 5, cy + 9, 12, UI_THEME.text_mute)
+        path_advance(fn_pill_w, false)
       end
-      r.ImGui_TextColored(ctx, 0xFFCCCCCC, filename)
+      local fx, fy = r.ImGui_GetCursorScreenPos(ctx)
+      r.ImGui_Dummy(ctx, fn_pill_w, fn_pill_h)
+      local fdl = r.ImGui_GetWindowDrawList(ctx)
+      r.ImGui_DrawList_AddRectFilled(fdl, fx, fy, fx + fn_pill_w, fy + fn_pill_h, UI_THEME.elevated, fn_pill_h * 0.5)
+      r.ImGui_DrawList_AddRect(fdl, fx + 0.5, fy + 0.5, fx + fn_pill_w - 0.5, fy + fn_pill_h - 0.5, UI_THEME.border_hvr, fn_pill_h * 0.5, 0, 1.0)
+      local gx, gy = fx + 10, fy + fn_pill_h * 0.5
+      local bars = { 0.35, 0.8, 0.55, 1.0, 0.45 }
+      for bi = 1, #bars do
+        local bh = bars[bi] * (fn_pill_h * 0.28)
+        local bx = gx - 4 + (bi - 1) * 2
+        r.ImGui_DrawList_AddLine(fdl, bx, gy - bh, bx, gy + bh, UI_THEME.accent, 1.0)
+      end
+      r.ImGui_DrawList_AddText(fdl, fx + 18, fy + 3, UI_THEME.text, filename)
     end
 
     if not wrap and r.ImGui_SetScrollX and r.ImGui_IsWindowHovered and r.ImGui_IsWindowHovered(ctx) then
@@ -3885,7 +3903,7 @@ function render_waveform()
       local half_height = height * 0.4
       
       -- Draw center line
-      r.ImGui_DrawList_AddLine(dl, x0, center_y, x0 + width, center_y, 0x444444FF, 1.0)
+      r.ImGui_DrawList_AddLine(dl, x0, center_y, x0 + width, center_y, UI_THEME.border, 1.0)
       
       -- Draw waveform
       local n = #waveform
@@ -3907,27 +3925,13 @@ function render_waveform()
         local color = frequency_to_color(freq)
         
         -- Draw vertical line for this sample
-        r.ImGui_DrawList_AddLine(dl, x, y_top, x, y_bot, color, 1.5)
+        r.ImGui_DrawList_AddLine(dl, x, y_top, x, y_bot, (color & 0xFFFFFF00) | 0x9C, 1.5)
         
         -- Draw connecting line to previous sample (use average color for smooth transition)
         if prev_x then
           local prev_freq = frequency_data and frequency_data[i - 1]
           local prev_color_val = frequency_to_color(prev_freq)
-          -- Blend colors for smooth transition
-          local avg_color = color
-          if prev_color_val ~= color then
-            -- Simple average of RGB components
-            local r1 = (color >> 16) & 0xFF
-            local g1 = (color >> 8) & 0xFF
-            local b1 = color & 0xFF
-            local r2 = (prev_color_val >> 16) & 0xFF
-            local g2 = (prev_color_val >> 8) & 0xFF
-            local b2 = prev_color_val & 0xFF
-            local r_avg = math.floor((r1 + r2) / 2)
-            local g_avg = math.floor((g1 + g2) / 2)
-            local b_avg = math.floor((b1 + b2) / 2)
-            avg_color = (0xFF << 24) | (r_avg << 16) | (g_avg << 8) | b_avg
-          end
+          local avg_color = wave_mix_color(color, prev_color_val)
           r.ImGui_DrawList_AddLine(dl, prev_x, prev_y_top, x, y_top, avg_color, 1.0)
           r.ImGui_DrawList_AddLine(dl, prev_x, prev_y_bot, x, y_bot, avg_color, 1.0)
         end
@@ -3953,7 +3957,7 @@ function render_waveform()
           local ch_half_height = channel_height * 0.4
           
           -- Draw center line for this channel
-          r.ImGui_DrawList_AddLine(dl, x0, ch_center_y, x0 + width, ch_center_y, 0x444444FF, 1.0)
+          r.ImGui_DrawList_AddLine(dl, x0, ch_center_y, x0 + width, ch_center_y, UI_THEME.border_soft, 1.0)
           
           -- Draw waveform for this channel
           local n = #ch_data
@@ -3974,27 +3978,13 @@ function render_waveform()
             local color = frequency_to_color(freq)
             
             -- Draw vertical line for this sample
-            r.ImGui_DrawList_AddLine(dl, x, y_top, x, y_bot, color, 1.5)
+            r.ImGui_DrawList_AddLine(dl, x, y_top, x, y_bot, (color & 0xFFFFFF00) | 0x9C, 1.5)
             
             -- Draw connecting line to previous sample (use average color for smooth transition)
             if prev_x then
               local prev_freq = ch_freq_data and ch_freq_data[i - 1]
               local prev_color_val = frequency_to_color(prev_freq)
-              -- Blend colors for smooth transition
-              local avg_color = color
-              if prev_color_val ~= color then
-                -- Simple average of RGB components
-                local r1 = (color >> 16) & 0xFF
-                local g1 = (color >> 8) & 0xFF
-                local b1 = color & 0xFF
-                local r2 = (prev_color_val >> 16) & 0xFF
-                local g2 = (prev_color_val >> 8) & 0xFF
-                local b2 = prev_color_val & 0xFF
-                local r_avg = math.floor((r1 + r2) / 2)
-                local g_avg = math.floor((g1 + g2) / 2)
-                local b_avg = math.floor((b1 + b2) / 2)
-                avg_color = (0xFF << 24) | (r_avg << 16) | (g_avg << 8) | b_avg
-              end
+              local avg_color = wave_mix_color(color, prev_color_val)
               r.ImGui_DrawList_AddLine(dl, prev_x, prev_y_top, x, y_top, avg_color, 1.0)
               r.ImGui_DrawList_AddLine(dl, prev_x, prev_y_bot, x, y_bot, avg_color, 1.0)
             end
@@ -4006,7 +3996,7 @@ function render_waveform()
           
           -- Draw separator line between channels (except after last channel)
           if ch < channels - 1 then
-            r.ImGui_DrawList_AddLine(dl, x0, ch_y1, x0 + width, ch_y1, 0x333333FF, 1.0)
+            r.ImGui_DrawList_AddLine(dl, x0 + 6, ch_y1, x0 + width - 6, ch_y1, UI_THEME.border, 1.0)
           end
         end
       end

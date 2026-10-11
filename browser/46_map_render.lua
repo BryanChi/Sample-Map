@@ -16,53 +16,149 @@ function round_to_nice_map_freq(freq)
   end
 end
 
+-- Map canvas palette. The plot sits on the darkest surface with a faint
+-- accent glow in the middle; the axis gutters are a shade darker still and
+-- carry the scale labels, so the plot area itself stays clean.
+MAP_CANVAS = {
+  plot_bg      = 0x0C100DFF,
+  gutter_bg    = 0x090C0AFF,
+  gutter_edge  = 0x222B25FF,
+  frame        = 0x26302AFF,
+  glow         = 0x1EFF5E06,
+  grid_major   = 0x8FB39A1E,
+  grid_minor   = 0x8FB39A0C,
+  tick         = 0x5F6962FF,
+  label_major  = 0x9FB2A5D8,
+  label_minor  = 0x6F7B73B0,
+  axis_caption = 0x5F6962FF,
+  guide        = 0xE8EEEA30,
+  readout_bg   = 0x0E2A18F0,
+  readout_text = 0xDFFFE8FF,
+}
+MAP_GUTTER_LEFT = 70
+MAP_GUTTER_TOP = 25
+
+function map_format_hz(hz)
+  if type(hz) ~= "number" then
+    return "?"
+  end
+  if hz >= 1000.0 then
+    return string.format("%.1fkHz", hz / 1000.0)
+  end
+  return string.format("%.0fHz", hz)
+end
+
+function map_format_seconds(sec)
+  if type(sec) ~= "number" then
+    return "?"
+  end
+  if sec < 1.0 then
+    return string.format("%.0fms", sec * 1000.0)
+  elseif sec < 10.0 then
+    return string.format("%.2fs", sec)
+  end
+  return string.format("%.1fs", sec)
+end
+
+-- Rounded canvas fill with a soft accent glow, drawn before the grid.
+function draw_map_canvas_backdrop(dl, x0, y0, width, height, padded_x0, padded_y0)
+  local C = MAP_CANVAS
+  local rounding = UI_METRICS.radius_panel
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + height, C.plot_bg, rounding)
+  local px1, py1 = x0 + width, y0 + height
+  local pw, ph = px1 - padded_x0, py1 - padded_y0
+  if pw > 8 and ph > 8 then
+    if r.ImGui_DrawList_PushClipRect then
+      r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, px1, py1, true)
+    end
+    local cx, cy = padded_x0 + pw * 0.5, padded_y0 + ph * 0.5
+    local rad = math.max(pw, ph) * 0.55
+    for i = 1, 3 do
+      r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, rad * (1.0 - (i - 1) * 0.28), C.glow, 48)
+    end
+    if r.ImGui_DrawList_PopClipRect then
+      r.ImGui_DrawList_PopClipRect(dl)
+    end
+  end
+end
+
+-- Axis gutters: darker strips on the left (Y scale) and top (X scale), split
+-- from the plot by a hairline, with the axis names in the corner.
+function draw_map_gutters(dl, x0, y0, width, height, padded_x0, padded_y0)
+  local C = MAP_CANVAS
+  local rounding = UI_METRICS.radius_panel
+  local corner_tl = r.ImGui_DrawFlags_RoundCornersTopLeft and r.ImGui_DrawFlags_RoundCornersTopLeft() or 0
+  local corner_bl = r.ImGui_DrawFlags_RoundCornersBottomLeft and r.ImGui_DrawFlags_RoundCornersBottomLeft() or 0
+  local corner_tr = r.ImGui_DrawFlags_RoundCornersTopRight and r.ImGui_DrawFlags_RoundCornersTopRight() or 0
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, padded_x0, y0 + height, C.gutter_bg, rounding, corner_tl | corner_bl)
+  r.ImGui_DrawList_AddRectFilled(dl, padded_x0, y0, x0 + width, padded_y0, C.gutter_bg, rounding, corner_tr)
+  r.ImGui_DrawList_AddLine(dl, padded_x0 - 0.5, padded_y0, padded_x0 - 0.5, y0 + height, C.gutter_edge, 1.0)
+  r.ImGui_DrawList_AddLine(dl, padded_x0, padded_y0 - 0.5, x0 + width, padded_y0 - 0.5, C.gutter_edge, 1.0)
+
+  -- Corner: Y axis name over X axis name, each with a small direction arrow.
+  local y_name = map_y_axis_id() == "weight" and "Wt" or "Hz"
+  local _, th = r.ImGui_CalcTextSize(ctx, "Hz")
+  local cx = x0 + 8
+  local cy = y0 + (padded_y0 - y0 - th) * 0.5
+  local ax = cx + 3
+  r.ImGui_DrawList_AddTriangleFilled(dl, ax, cy + 2, ax - 3, cy + 7, ax + 3, cy + 7, C.axis_caption)
+  r.ImGui_DrawList_AddText(dl, cx + 9, cy, C.axis_caption, y_name)
+  local s_label = "s"
+  local sw = select(1, r.ImGui_CalcTextSize(ctx, s_label)) or 6
+  local sx = padded_x0 - 8 - sw - 8
+  r.ImGui_DrawList_AddText(dl, sx, cy, C.axis_caption, s_label)
+  local tx = sx + sw + 3
+  local ty = cy + th * 0.5
+  r.ImGui_DrawList_AddTriangleFilled(dl, tx + 5, ty, tx, ty - 3, tx, ty + 3, C.axis_caption)
+end
+
 function draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
+  draw_map_gutters(dl, x0, y0, width, height, padded_x0, padded_y0)
   -- Draw grid lines for frequency (horizontal) and time (vertical)
   if #state.samples > 0 and state.samples[1].x then
+    local C = MAP_CANVAS
     local log10 = math.log(10)
-    
+
     -- Brightness / pitch floor is 40 Hz (analyzer does not report below that)
     local freq_min_log = math.log(40.0) / log10
     local freq_max_log = math.log(20000.0) / log10
-    
+
     -- Calculate duration range from samples for X-axis grid (cached with filter rebuild)
     local len_min_log, len_max_log = nil, nil
     if map_cache.duration_min and map_cache.duration_max then
       len_min_log = math.log(math.max(map_cache.duration_min, 0.01)) / log10
       len_max_log = math.log(math.max(map_cache.duration_max, 0.01)) / log10
     end
-    
+
     -- Use reasonable defaults for duration if no samples
     if not len_min_log then
       len_min_log = math.log(0.01) / log10  -- 10ms
       len_max_log = math.log(60.0) / log10   -- 60 seconds
     end
-    
-    -- Subtle theme-tinted grid so it sits behind the dots without competing
-    local grid_color = UI_THEME.grid_line
-    local text_color = UI_THEME.grid_text
-    
-    -- Draw evenly spaced horizontal Y-axis grid lines
+
+    local plot_x1 = x0 + width
+    local plot_y1 = y0 + height
+
+    -- Horizontal Y-axis lines: even steps are major (brighter line, brighter label)
     local y_axis = map_y_axis_id()
-    local num_freq_lines = 10  -- 10 evenly spaced lines
+    local num_freq_lines = 10
     for i = 0, num_freq_lines do
-      local normalized_y = i / num_freq_lines  -- 0.0 to 1.0, evenly spaced
-      
-      -- Convert normalized Y back to the selected axis (inverse of layout transform)
+      local normalized_y = i / num_freq_lines
       -- normalized_y = 1.0 - y_normalized, so y_normalized = 1.0 - normalized_y
       local y_normalized = 1.0 - normalized_y
       local freq_log = freq_min_log + y_normalized * (freq_max_log - freq_min_log)
       local freq_val = 10 ^ freq_log
-      
-      -- Convert normalized Y to screen coordinate (using padded area)
+
       local base_y = normalized_y * padded_height
       local py = padded_center_y + (base_y - padded_height * 0.5) * state.zoom
-      
-      -- Only draw if line is visible in viewport
+
       if py >= padded_y0 - 1 and py <= padded_y0 + padded_height + 1 then
-        -- Draw line across padded area (from label padding to right edge)
-        r.ImGui_DrawList_AddLine(dl, padded_x0, py, x0 + width, py, grid_color, 1.0)
-        
+        local major = (i % 2) == 0
+        if py > padded_y0 + 0.5 then
+          r.ImGui_DrawList_AddLine(dl, padded_x0, py, plot_x1, py, major and C.grid_major or C.grid_minor, 1.0)
+        end
+        r.ImGui_DrawList_AddLine(dl, padded_x0 - 5, py, padded_x0 - 1, py, C.tick, 1.0)
+
         local freq_text
         if y_axis == "weight" then
           if i == 0 then
@@ -73,57 +169,103 @@ function draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_w
             freq_text = string.format("%.0f%%", y_normalized * 100.0)
           end
         else
-          local rounded_freq = round_to_nice_map_freq(freq_val)
-          if rounded_freq >= 1000.0 then
-            freq_text = string.format("%.1fkHz", rounded_freq / 1000.0)
-          else
-            freq_text = string.format("%.0fHz", rounded_freq)
-          end
+          freq_text = map_format_hz(round_to_nice_map_freq(freq_val))
         end
-        -- Draw text at left edge, slightly offset from line
-        r.ImGui_DrawList_AddText(dl, x0 + 4, py - 7, text_color, freq_text)
+        -- Right-aligned against the gutter edge, clamped inside the gutter
+        local tw, th = r.ImGui_CalcTextSize(ctx, freq_text)
+        local ty = math.max(padded_y0 + 1, math.min(plot_y1 - th - 2, py - th * 0.5))
+        r.ImGui_DrawList_AddText(dl, padded_x0 - 9 - tw, ty, major and C.label_major or C.label_minor, freq_text)
       end
     end
-    
-    -- Draw vertical time/duration grid lines (seconds)
+
+    -- Vertical duration lines
     local duration_min, duration_max = map_cache.duration_min, map_cache.duration_max
-    
+
     if duration_min and duration_max then
-      -- Draw evenly spaced vertical time/duration grid lines
-      -- Generate evenly spaced normalized X positions (every 10% = 0.1, accounting for 5% padding)
       local padding = 0.05
-      local num_time_lines = 10  -- 10 evenly spaced lines
+      local num_time_lines = 10
       for i = 0, num_time_lines do
-        -- Map i from 0-num_time_lines to normalized_x accounting for padding
         local normalized_x = padding + (i / num_time_lines) * (1.0 - 2.0 * padding)
-        
-        -- Convert normalized X back to duration (inverse of layout transform)
         local len_log = len_min_log + ((normalized_x - padding) / (1.0 - 2.0 * padding)) * (len_max_log - len_min_log)
         local time_val = 10 ^ len_log
-        
-        -- Convert normalized X to screen coordinate (using padded area)
+
         local base_x = normalized_x * padded_width
         local px = padded_center_x + (base_x - padded_width * 0.5) * state.zoom
-        
-        -- Only draw if line is visible in viewport
+
         if px >= padded_x0 - 1 and px <= padded_x0 + padded_width + 1 then
-          -- Draw line across padded area (from label padding to bottom edge)
-          r.ImGui_DrawList_AddLine(dl, px, padded_y0, px, y0 + height, grid_color, 1.0)
-          
-          -- Add text label for time
+          local major = (i % 2) == 0
+          r.ImGui_DrawList_AddLine(dl, px, padded_y0, px, plot_y1, major and C.grid_major or C.grid_minor, 1.0)
+          r.ImGui_DrawList_AddLine(dl, px, padded_y0 - 5, px, padded_y0 - 1, C.tick, 1.0)
+
           local time_text
-          if time_val < 1.0 then
-            time_text = string.format("%.1fs", time_val)
-          elseif time_val < 10.0 then
+          if time_val < 10.0 then
             time_text = string.format("%.1fs", time_val)
           else
             time_text = string.format("%.0fs", time_val)
           end
-          -- Draw text at top edge, slightly offset from line
-          r.ImGui_DrawList_AddText(dl, px + 4, y0 + 4, text_color, time_text)
+          -- Centred on the line, clamped inside the top gutter
+          local tw, th = r.ImGui_CalcTextSize(ctx, time_text)
+          local tx = math.max(padded_x0 + 2, math.min(plot_x1 - tw - 4, px - tw * 0.5))
+          local ty = y0 + (padded_y0 - y0 - th) * 0.5 - 1
+          r.ImGui_DrawList_AddText(dl, tx, ty, major and C.label_major or C.label_minor, time_text)
         end
       end
     end
+  end
+end
+
+-- Hovered dot: thin guides out to both gutters, with the dot's own values
+-- shown as accent pills in the gutters (read from the sample, not the grid).
+function draw_map_hover_guides(dl, sample, px, py, x0, y0, padded_x0, padded_y0, plot_x1, plot_y1)
+  if not sample then
+    return
+  end
+  local C = MAP_CANVAS
+  if r.ImGui_DrawList_PushClipRect then
+    r.ImGui_DrawList_PushClipRect(dl, x0, y0, plot_x1, plot_y1, true)
+  end
+  -- Dotted guides (short dashes) so they read as helpers, not grid lines
+  local dash, gap = 3, 3
+  local xx = px - 6
+  while xx > padded_x0 do
+    r.ImGui_DrawList_AddLine(dl, math.max(padded_x0, xx - dash), py, xx, py, C.guide, 1.0)
+    xx = xx - dash - gap
+  end
+  local yy = py - 6
+  while yy > padded_y0 do
+    r.ImGui_DrawList_AddLine(dl, px, math.max(padded_y0, yy - dash), px, yy, C.guide, 1.0)
+    yy = yy - dash - gap
+  end
+
+  local y_text
+  local axis = map_y_axis_id()
+  if axis == "weight" then
+    local w = type(sample.sub_weight) == "number" and sample.sub_weight or 0.0
+    y_text = string.format("%.0f%%", w * 100.0)
+  elseif axis == "dominant_freq" then
+    y_text = map_format_hz(sample.dominant_freq)
+  else
+    y_text = map_format_hz(sample.brightness or sample.dominant_freq)
+  end
+  local x_text = map_format_seconds(sample_map_duration(sample))
+
+  local function pill(text, cx, cy, align_right)
+    local tw, th = r.ImGui_CalcTextSize(ctx, text)
+    local w, h = tw + 10, th + 4
+    local bx0 = align_right and (cx - w) or (cx - w * 0.5)
+    local by0 = cy - h * 0.5
+    r.ImGui_DrawList_AddRectFilled(dl, bx0, by0, bx0 + w, by0 + h, C.readout_bg, h * 0.5)
+    r.ImGui_DrawList_AddRect(dl, bx0 + 0.5, by0 + 0.5, bx0 + w - 0.5, by0 + h - 0.5, UI_THEME.accent, h * 0.5, 0, 1.0)
+    r.ImGui_DrawList_AddText(dl, bx0 + 5, by0 + 2, C.readout_text, text)
+  end
+  local _, th = r.ImGui_CalcTextSize(ctx, "0")
+  local pill_cy = math.max(padded_y0 + th * 0.5 + 3, math.min(plot_y1 - th * 0.5 - 3, py))
+  pill(y_text, padded_x0 - 4, pill_cy, true)
+  local tw = select(1, r.ImGui_CalcTextSize(ctx, x_text)) or 30
+  local pill_cx = math.max(padded_x0 + tw * 0.5 + 8, math.min(plot_x1 - tw * 0.5 - 8, px))
+  pill(x_text, pill_cx, y0 + (padded_y0 - y0) * 0.5, false)
+  if r.ImGui_DrawList_PopClipRect then
+    r.ImGui_DrawList_PopClipRect(dl)
   end
 end
 
@@ -292,6 +434,32 @@ function map_find_hover_entry(cache, entries, mx, my, snap_r)
   return result
 end
 
+-- Hover card header: colour dot + bold name, then a dim facts line
+-- (length · brightness · channels).
+function draw_map_dot_tooltip_header(s, color)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  local name = s.name or "?"
+  local nw, nh = r.ImGui_CalcTextSize(ctx, name)
+  r.ImGui_DrawList_AddCircleFilled(dl, x + 5, y + nh * 0.5, 4.0, color or UI_THEME.accent, 12)
+  r.ImGui_DrawList_AddText(dl, x + 15, y, UI_THEME.text, name)
+  r.ImGui_DrawList_AddText(dl, x + 15.5, y, UI_THEME.text, name)
+  local facts = { map_format_seconds(sample_map_duration(s)) }
+  local hz = s.brightness or s.dominant_freq
+  if type(hz) == "number" then
+    facts[#facts + 1] = map_format_hz(hz)
+  end
+  if s.channels == 1 then
+    facts[#facts + 1] = "mono"
+  elseif type(s.channels) == "number" and s.channels >= 2 then
+    facts[#facts + 1] = "stereo"
+  end
+  local line = table.concat(facts, "  ·  ")
+  local lw, lh = r.ImGui_CalcTextSize(ctx, line)
+  r.ImGui_DrawList_AddText(dl, x + 15, y + nh + 2, UI_THEME.text_dim, line)
+  r.ImGui_Dummy(ctx, math.max(nw, lw) + 16, nh + lh + 2)
+end
+
 function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
   local dot_radius = state.dot_radius or 2.0
   local clicked_sample = nil
@@ -324,6 +492,11 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   local assigned_entries = {}
   local highlight_info = seq_map_highlight_sample_info()
   local add_circle_filled = r.ImGui_DrawList_AddCircleFilled
+  -- Keep dots inside the plot so they never spill over the axis gutters.
+  local clip_dots = r.ImGui_DrawList_PushClipRect ~= nil
+  if clip_dots then
+    r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, padded_x0 + padded_width, padded_y0 + padded_height, true)
+  end
   if not playing_path and next(highlight_info) == nil then
     -- Common case (nothing playing, no hovered track): plain dot loop.
     for i = 1, #entries do
@@ -384,6 +557,9 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
     r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r, outline_color, 16, state.dot_outline_thickness or 3.0)
     r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r * 1.35, (e.color & 0xFFFFFF00) | 0x55, 12, 1.5)
   end
+  if clip_dots then
+    r.ImGui_DrawList_PopClipRect(dl)
+  end
 
   local closest = nil
   if hovered then
@@ -397,10 +573,17 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
     local px, py = closest.px, closest.py
     local is_currently_playing = playing_path and playing_path == s.path
 
+    draw_map_hover_guides(
+      dl, s, px, py, padded_x0 - MAP_GUTTER_LEFT, padded_y0 - MAP_GUTTER_TOP,
+      padded_x0, padded_y0, padded_x0 + padded_width, padded_y0 + padded_height
+    )
+    -- Soft halo in the dot's colour, then a crisp ring
+    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 7.0, (closest.color & 0xFFFFFF00) | 0x22, 20)
+    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 3.5, (closest.color & 0xFFFFFF00) | 0x40, 16)
     if not is_currently_playing then
-      r.ImGui_DrawList_AddCircle(dl, px, py, dot_radius + 2.0, closest.color, 12, 1.5)
+      r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius * 1.4, closest.color, 12)
     end
-    r.ImGui_DrawList_AddCircle(dl, px, py, dot_radius + 1.5, s.hot_color or hover_color, 12, 1.5)
+    r.ImGui_DrawList_AddCircle(dl, px, py, dot_radius + 3.0, s.hot_color or hover_color, 16, 1.5)
 
     -- Pin to the hovered dot so ImGui nav cannot relocate this tooltip.
     if r.ImGui_SetNextWindowPos then
@@ -408,8 +591,9 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
       r.ImGui_SetNextWindowPos(ctx, px + 14, py + 14, tip_cond)
     end
     r.ImGui_BeginTooltip(ctx)
-    r.ImGui_Text(ctx, s.name)
+    draw_map_dot_tooltip_header(s, closest.color)
     if s.tags and #s.tags > 0 then
+      r.ImGui_Dummy(ctx, 1, 2)
       r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 4, 3)
       r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FramePadding(), 4, 2)
       local max_row_w = 280
@@ -1176,64 +1360,65 @@ function draw_map_scan_progress_overlay(dl, x0, y0, width, height)
   end
   local progress = total > 0 and (done / total) or 0.0
 
-  -- Draw semi-transparent overlay background at the top of the map
+  -- Floating card across the top of the plot: label + percentage, a slim
+  -- accent bar, then counts and the time estimate in dim text.
   local overlay_height = 118.0
   local overlay_y = y0
-  local overlay_bg_color = 0x000000CC  -- Semi-transparent black (RRGGBBAA format, last two digits are alpha)
-  r.ImGui_DrawList_AddRectFilled(dl, x0, overlay_y, x0 + width, overlay_y + overlay_height, overlay_bg_color, 0, 0)
+  local card_margin = 10.0
+  local card_x0 = x0 + card_margin
+  local card_x1 = x0 + width - card_margin
+  local card_y0 = overlay_y + 6.0
+  local card_y1 = overlay_y + overlay_height - 4.0
+  r.ImGui_DrawList_AddRectFilled(dl, x0, overlay_y, x0 + width, overlay_y + overlay_height, 0x00000066, UI_METRICS.radius_panel)
+  r.ImGui_DrawList_AddRectFilled(dl, card_x0, card_y0, card_x1, card_y1, 0x111612F4, UI_METRICS.radius_panel)
+  r.ImGui_DrawList_AddRect(dl, card_x0 + 0.5, card_y0 + 0.5, card_x1 - 0.5, card_y1 - 0.5, UI_THEME.border, UI_METRICS.radius_panel, 0, 1.0)
 
-  -- Draw progress bar at the top of the map
-  local bar_padding = 20.0
-  local bar_y = overlay_y + 25.0
+  local bar_padding = 26.0
+  local bar_y = overlay_y + 36.0
   local bar_width = width - (bar_padding * 2)
-  local bar_height = 8.0
+  local bar_height = 6.0
 
-  -- Progress text (centered above bar)
-  local text = string.format("%s: %.1f%% (%d/%d) — %s", label, progress * 100.0, done, total, format_scan_clock(elapsed))
-  local text_size_x, text_size_y = r.ImGui_CalcTextSize(ctx, text)
-  local text_x = x0 + (width - text_size_x) * 0.5
-  local text_y = overlay_y + 8.0
-  -- Draw text with shadow for better visibility
-  r.ImGui_DrawList_AddText(dl, text_x + 1, text_y + 1, 0x000000FF, text)
-  r.ImGui_DrawList_AddText(dl, text_x, text_y, 0xFFFFFFFF, text)
+  local pct_text = string.format("%.0f%%", progress * 100.0)
+  local head = label
+  local _, head_h = r.ImGui_CalcTextSize(ctx, head)
+  local pct_w = select(1, r.ImGui_CalcTextSize(ctx, pct_text)) or 30
+  local text_y = overlay_y + 14.0
+  local pulse = 0.55 + 0.45 * math.sin(r.time_precise() * 4.0)
+  r.ImGui_DrawList_AddCircleFilled(dl, x0 + bar_padding + 3, text_y + head_h * 0.5, 3.5,
+    (UI_THEME.accent & 0xFFFFFF00) | math.floor(120 + 135 * pulse), 12)
+  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + 12, text_y, UI_THEME.text, head)
+  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + 12.5, text_y, UI_THEME.text, head)
+  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + bar_width - pct_w, text_y, UI_THEME.accent, pct_text)
 
-  -- Background bar (dark gray)
-  local bar_bg_color = 0x2A2A2AFF
-  r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y, x0 + bar_padding + bar_width, bar_y + bar_height, bar_bg_color, 4.0, 0)
-
-  -- Progress fill (bright green)
+  r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y, x0 + bar_padding + bar_width, bar_y + bar_height, 0x1E2621FF, bar_height * 0.5)
   local fill_width = bar_width * math.max(0.0, math.min(1.0, progress))
-  if fill_width > 2.0 then
-    local fill_color = 0x00FF00FF
-    r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding + 2, bar_y + 2, x0 + bar_padding + fill_width - 2, bar_y + bar_height - 2, fill_color, 2.0, 0)
+  if fill_width > bar_height then
+    r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y, x0 + bar_padding + fill_width, bar_y + bar_height, UI_THEME.accent, bar_height * 0.5)
+    r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y - 2, x0 + bar_padding + fill_width, bar_y + bar_height + 2, 0x1EFF5E1C, bar_height)
   end
 
-  -- Border (white)
-  local border_color = 0xFFFFFFFF
-  r.ImGui_DrawList_AddRect(dl, x0 + bar_padding, bar_y, x0 + bar_padding + bar_width, bar_y + bar_height, border_color, 4.0, 0, 1.5)
+  local text = string.format("%d of %d files  ·  %s elapsed", done, total, format_scan_clock(elapsed))
+  local remaining_y = bar_y + bar_height + 8.0
+  r.ImGui_DrawList_AddText(dl, x0 + bar_padding, remaining_y, UI_THEME.text_dim, text)
 
-  -- Estimate time remaining (below bar)
+  -- Estimate time remaining (right side, same row)
   local remaining_count = file_scanning and #state.scan_queue or (#state.analyzer_queue + #state.active_processes)
-  local remaining_y = bar_y + bar_height + 6.0
   local phase = file_scanning and "scan" or "analyze"
   local eta_sec = update_scan_eta(phase, done, remaining_count, r.time_precise())
+  local remaining_text = nil
   if remaining_count > 0 and type(eta_sec) == "number" and eta_sec > 0.5 then
-    local remaining_text = "Estimated time remaining: " .. format_scan_clock(eta_sec)
-    local remaining_size_x, remaining_size_y = r.ImGui_CalcTextSize(ctx, remaining_text)
-    local remaining_x = x0 + (width - remaining_size_x) * 0.5
-    r.ImGui_DrawList_AddText(dl, remaining_x + 1, remaining_y + 1, 0x000000FF, remaining_text)
-    r.ImGui_DrawList_AddText(dl, remaining_x, remaining_y, 0xCCCCCCFF, remaining_text)
+    remaining_text = "About " .. format_scan_clock(eta_sec) .. " left"
   elseif remaining_count > 0 and done < 4 then
-    local remaining_text = "Estimated time remaining: calculating…"
-    local remaining_size_x, remaining_size_y = r.ImGui_CalcTextSize(ctx, remaining_text)
-    local remaining_x = x0 + (width - remaining_size_x) * 0.5
-    r.ImGui_DrawList_AddText(dl, remaining_x + 1, remaining_y + 1, 0x000000FF, remaining_text)
-    r.ImGui_DrawList_AddText(dl, remaining_x, remaining_y, 0xCCCCCCFF, remaining_text)
+    remaining_text = "Estimating time left…"
+  end
+  if remaining_text then
+    local rw = select(1, r.ImGui_CalcTextSize(ctx, remaining_text)) or 0
+    r.ImGui_DrawList_AddText(dl, x0 + bar_padding + bar_width - rw, remaining_y, UI_THEME.text_dim, remaining_text)
   end
 
   local btn_w, btn_h = 72, 22
   local btn_x = x0 + (width - btn_w) * 0.5
-  local btn_y = overlay_y + overlay_height - btn_h - 8.0
+  local btn_y = overlay_y + overlay_height - btn_h - 12.0
   local mx, my = r.ImGui_GetMousePos(ctx)
   local over_btn = mx >= btn_x and mx <= (btn_x + btn_w) and my >= btn_y and my <= (btn_y + btn_h)
   -- Ignore the rect while another window/popup covers the map.
@@ -1293,10 +1478,8 @@ function render_map()
 
   handle_map_view_input(hovered and not over_scan_overlay, mx, my, width, height, x0, y0)
 
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + height, UI_THEME.bg, 6)
-
-  local label_padding_left = 70
-  local label_padding_top = 25
+  local label_padding_left = MAP_GUTTER_LEFT
+  local label_padding_top = MAP_GUTTER_TOP
   local padded_x0 = x0 + label_padding_left
   local padded_y0 = y0 + label_padding_top
   local padded_width = width - label_padding_left
@@ -1310,6 +1493,7 @@ function render_map()
   end
   state._map_frame_filter_key = map_filter_key
 
+  draw_map_canvas_backdrop(dl, x0, y0, width, height, padded_x0, padded_y0)
   draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
 
   local clicked_sample = render_map_samples(dl, hovered and not over_scan_overlay, mx, my, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
@@ -1331,6 +1515,7 @@ function render_map()
 
   state.map_scan_overlay_h = tonumber(draw_map_scan_progress_overlay(dl, x0, y0, width, height)) or 0
   draw_map_status_overlay(dl, x0, y0, width, height)
+  r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x0 + width - 0.5, y0 + height - 0.5, MAP_CANVAS.frame, UI_METRICS.radius_panel, 0, 1.0)
 end
 
 

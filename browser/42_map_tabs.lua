@@ -197,21 +197,21 @@ function render_sample_map_tab_bar()
     local x0, y0 = r.ImGui_GetItemRectMin(ctx)
     local x1, y1 = r.ImGui_GetItemRectMax(ctx)
     local dl = r.ImGui_GetWindowDrawList(ctx)
-    local bg, border, text_col
+    -- Segmented tabs: quiet text when idle, a raised surface on hover, and
+    -- the active tab gets a tinted fill and an accent underline.
+    local text_col
     if active then
-      bg = UI_THEME.accent_fill
-      border = UI_THEME.accent
-      text_col = 0xF2F6FAFF
-    elseif hovered then
-      bg = UI_THEME.surface_hvr
-      border = UI_THEME.border_hvr
       text_col = UI_THEME.text
+      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, UI_THEME.accent_fill, UI_METRICS.radius_ctrl)
+      r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, 0x1EFF5E40, UI_METRICS.radius_ctrl, 0, 1.0)
+      r.ImGui_DrawList_AddLine(dl, x0 + 6, y1 - 1.0, x1 - 6, y1 - 1.0, UI_THEME.accent, 2.0)
+    elseif hovered then
+      text_col = UI_THEME.text
+      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, UI_THEME.surface_hvr, UI_METRICS.radius_ctrl)
     else
-      bg = UI_THEME.surface
-      border = UI_THEME.border
       text_col = UI_THEME.text_dim
+      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, UI_THEME.surface, UI_METRICS.radius_ctrl)
     end
-    ui_draw_panel(dl, x0, y0, x1, y1, btn_h * 0.5, bg, border, hovered, pressed)
     local text_y = y0 + (btn_h - select(2, r.ImGui_CalcTextSize(ctx, label))) * 0.5 + (pressed and 1.0 or 0.0)
     r.ImGui_DrawList_AddText(dl, x0 + pad_x, text_y, text_col, label)
     if can_close then
