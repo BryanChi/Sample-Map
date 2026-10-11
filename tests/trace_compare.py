@@ -355,6 +355,106 @@ frames("seq zoomed edit", pos)
 p1.notes["6"]["8"] = nil
 frames("seq zoomed erase", still)
 
+-- ---- [seq grid] sequencer grid coverage (timeline rows) -------------------
+-- Medium zoom (LOD notes with the cell grid and lock/filter spans), zoomed in
+-- on the SELECTED region (packed notes), edit-mode overlays, locks, vary
+-- filters, sample variation, probability skips, groove, offsets, decay,
+-- stutter, overlap, a region sample override, a linked region and note anims.
+-- Restores view/selection/edit mode at the end so later steps are unchanged.
+do
+  local function nset(pid, tid, st, fields)
+    local row = get_seq_pattern(pid, false).notes[tostring(tid)]
+    local n = row[tostring(st)]
+    if not n then n = { vel = 100, volume = 1.0 }; row[tostring(st)] = n end
+    for k, v in pairs(fields) do n[k] = v end
+    return n
+  end
+  nset(1, 1, 4, { locked = true }); nset(1, 1, 5, { locked = true, locked_skip = true })
+  p1.locked_cells = { ["2"] = { ["8"] = true, ["9"] = true, ["10"] = true } }
+  p1.vary_filters = { ["1"] = { ["12"] = "kick", ["13"] = "kick", ["14"] = "zzzz" } }
+  nset(1, 2, 1, { vary_filter = "snare", sample_vary = 0.4 })
+  nset(1, 4, 1, { sample_vary = 0.6 }); nset(1, 5, 5, { sample_vary = 0.3, pan = -0.7 })
+  nset(1, 4, 2, { decay_qn = 0.75 }); nset(1, 2, 5, { offset_qn = 0.1, pitch = 5 })
+  nset(1, 2, 7, { qn_offset = 1.8 }); nset(1, 3, 1, { enabled = false })
+  nset(1, 5, 1, { stutter = 4, length_qn = 1.0, stutter_skew = 0.5 })
+  nset(1, 5, 7, { stutter = 3, stutter_hits = { [2] = { volume = 0.3, pan = 0.5 } } })
+  nset(1, 6, 1, { length_qn = 1.5 }); nset(1, 1, 10, { stretch = 2.0, start = 0.3 })
+  p1.track_settings = { ["3"] = { probability = 0.5, probability_seed = 11 },
+    ["4"] = { vary_prob = 0.6, vary_beat = 0.0, vary_seed = 5 } }
+  state.seq_regions[1].groove = "swing16_58"
+  state.seq_tracks[6].overlap = true
+  state.seq_regions[1].track_samples = { ["3"] = { path = samples[60].path, name = samples[60].name } }
+  state.seq_regions[4].pool_id = 2; state.seq_regions[4].pattern_id = 2
+  state.selected_seq_region_id = 1
+  state.seq_expanded_tracks = { ["1"] = true, ["5"] = true }
+  -- Mouse positions over given cells (rows start at y = 0 in this stub).
+  local function cell_pos(tid, qn, lane_idx)
+    local y = 0
+    for _, slot in ipairs(state.seq_tracks) do
+      local h = seq_note_lane_h_for_slot(slot)
+      if slot.id == tid and not lane_idx then return { state.seq_map_rect.timeline_x
+        + (qn - state.seq_view_start_qn) / state.seq_view_span_qn * state.seq_map_rect.timeline_w + 0.5, y + h * 0.5 } end
+      y = y + h
+      if state.seq_expanded_tracks[tostring(slot.id)] then
+        local li = 0
+        for _, def in ipairs(SEQ_PARAM_LANES) do
+          if def.key ~= "length_qn" and def.key ~= "decay" and def.key ~= "locked" and def.key ~= "vary_filter" then
+            li = li + 1
+            local ph = seq_default_param_lane_h()
+            if slot.id == tid and li == lane_idx then return { state.seq_map_rect.timeline_x
+              + (qn - state.seq_view_start_qn) / state.seq_view_span_qn * state.seq_map_rect.timeline_w + 0.5, y + ph * 0.5 } end
+            y = y + ph
+          end
+        end
+      end
+    end
+    return { -100, -100 }
+  end
+  local function targets()
+    return { cell_pos(1, 1.05), cell_pos(1, 3.55), cell_pos(1, 3.05), cell_pos(2, 2.3),
+      cell_pos(5, 0.3), cell_pos(1, 0.3, 1), cell_pos(5, 1.8, 3), cell_pos(4, 0.3), cell_pos(1, 2.55, 2) }
+  end
+  frames("grid out sel1", pos)
+  ARRANGE_END = 5
+  frames("grid medium", pos)
+  frames("grid medium targets", targets())
+  ARRANGE_END = 3.5
+  frames("grid medium2", pos)
+  state.seq_note_edit_mode = "locked"
+  frames("grid medium lock mode", pos)
+  frames("grid medium lock targets", targets())
+  state.seq_note_edit_mode = nil
+  ARRANGE_END = 2
+  frames("grid zoomed sel1", pos)
+  frames("grid zoomed targets", targets())
+  state.seq_vary_filter_edit = { track_id = 1, region_id = 1, col_min = 2, col_max = 3, text = "hat",
+    orig = "", start_qn = 0.0, step_qn = 0.25 }
+  frames("grid zoomed filter edit", targets())
+  state.seq_vary_filter_edit = nil
+  register_seq_note_anim(1, 1, "1", note(1, 1, 1), "sync")
+  register_seq_note_anim(1, 2, "2", note(1, 2, 2), "add")
+  register_seq_note_anim(1, 4, "1", note(1, 4, 1), "delete")
+  frames("grid zoomed anims", pos)
+  for _, mode in ipairs({ "volume", "pan", "stutter", "decay", "locked", "vary_filter", "sample_vary", "stretch" }) do
+    state.seq_note_edit_mode = mode
+    frames("grid zoomed mode " .. mode, targets())
+  end
+  state.seq_note_edit_mode = "volume"
+  ARRANGE_END = 10
+  frames("grid out mode volume", pos)
+  state.seq_note_edit_mode = nil
+  state.seq_view_start_qn = 2
+  state.seq_follow_arrange = false
+  state.seq_view_span_qn = 3
+  frames("grid offset view", pos)
+  state.seq_follow_arrange = true
+  state.seq_regions[4].pool_id = 4; state.seq_regions[4].pattern_id = 4
+  state.selected_seq_region_id = 2
+  state.seq_expanded_tracks = { ["3"] = true }
+  ARRANGE_END = 2
+end
+-- ---- [seq grid] end --------------------------------------------------------
+
 -- Layering window open on track 4.
 state.seq_layering_slot_id = 4
 frames("layering open", pos)
