@@ -192,9 +192,15 @@ function seq_mix_strip_width(btn, gap, vol_w, pan_w, midi_w)
     + (gap or 3) + SEQ_TCP_GROUP_GAP * 2
 end
 
+-- Hundreds of these are built per frame. `if not (w > 0) then w = 0 end` is
+-- math.max(0, w or 0) without the library calls: it keeps w when positive and
+-- gives the integer 0 otherwise (also for 0.0, -0.0 and NaN), as math.max(0, w)
+-- returns its first argument unless the second is larger.
 function seq_box(x, y, w, h)
-  w = math.max(0, w or 0)
-  h = math.max(0, h or 0)
+  w = w or 0
+  if not (w > 0) then w = 0 end
+  h = h or 0
+  if not (h > 0) then h = 0 end
   return { x = x, y = y, w = w, h = h, x1 = x + w, y1 = y + h }
 end
 
@@ -204,10 +210,7 @@ function seq_fit_mix_strip(avail_w, btn, gap, vol_w, pan_w, midi_w)
   midi_w = midi_w or 28.0
   btn = btn or 14.0
   gap = gap or 3.0
-  local function width()
-    return seq_mix_strip_width(btn, gap, vol_w, pan_w, midi_w)
-  end
-  while width() > avail_w do
+  while seq_mix_strip_width(btn, gap, vol_w, pan_w, midi_w) > avail_w do
     if vol_w > 34 then
       vol_w = vol_w - 2
     elseif pan_w > 26 then
@@ -220,7 +223,7 @@ function seq_fit_mix_strip(avail_w, btn, gap, vol_w, pan_w, midi_w)
       break
     end
   end
-  return btn, vol_w, pan_w, midi_w, width()
+  return btn, vol_w, pan_w, midi_w, seq_mix_strip_width(btn, gap, vol_w, pan_w, midi_w)
 end
 
 -- One row: [M S]  [vol] [pan]  [MIDI layering overlap]
@@ -269,11 +272,45 @@ function seq_candidate_unit_in_range(value, lo, hi, fallback)
   return math.max(0.0, math.min(1.0, (value - lo) / (hi - lo)))
 end
 
-function seq_candidate_slot_scale(slot)
-  if not slot then
-    return nil
+local function chip_num(sample, entry, key, fallback)
+  if sample and type(sample[key]) == "number" then
+    return sample[key]
   end
-  seq_normalize_slot_candidates(slot)
+  if entry and type(entry[key]) == "number" then
+    return entry[key]
+  end
+  return fallback
+end
+
+-- seq_candidate_chip_props as four values (freq, brightness, weight,
+-- duration), without building the table.
+local function candidate_chip_props4(entry)
+  local sample = entry and entry.path and find_sample_by_path(entry.path) or nil
+  local dur = nil
+  if sample and sample_map_duration then
+    dur = sample_map_duration(sample)
+  end
+  if type(dur) ~= "number" or dur <= 0 then
+    dur = chip_num(sample, entry, "effective_duration", chip_num(sample, entry, "duration", nil))
+  end
+  return chip_num(sample, entry, "dominant_freq", 440.0),
+    chip_num(sample, entry, "brightness", nil),
+    math.max(0.0, math.min(1.0, chip_num(sample, entry, "sub_weight", 0.45))),
+    dur
+end
+
+function seq_candidate_chip_props(entry)
+  local freq, brightness, weight, duration = candidate_chip_props4(entry)
+  return {
+    freq = freq,
+    brightness = brightness,
+    weight = weight,
+    duration = duration,
+  }
+end
+
+-- seq_candidate_slot_scale after its seq_normalize_slot_candidates.
+local function candidate_slot_scale_normalized(slot)
   local n = 0
   local b_lo, b_hi = 1e9, -1e9
   local w_lo, w_hi = 1e9, -1e9
@@ -283,19 +320,20 @@ function seq_candidate_slot_scale(slot)
     return nil
   end
   for i = 1, SEQ_SAMPLE_CANDIDATES_MAX do
-    if seq_candidate_entry_taken(list[i]) then
-      local p = seq_candidate_chip_props(list[i])
-      local bright = p.brightness or p.freq
+    local entry = list[i]
+    if seq_candidate_entry_taken(entry) then
+      local freq, brightness, weight, duration = candidate_chip_props4(entry)
+      local bright = brightness or freq
       n = n + 1
       if type(bright) == "number" then
         b_lo = math.min(b_lo, bright)
         b_hi = math.max(b_hi, bright)
       end
-      w_lo = math.min(w_lo, p.weight)
-      w_hi = math.max(w_hi, p.weight)
-      if type(p.duration) == "number" and p.duration > 0 then
-        d_lo = math.min(d_lo, p.duration)
-        d_hi = math.max(d_hi, p.duration)
+      w_lo = math.min(w_lo, weight)
+      w_hi = math.max(w_hi, weight)
+      if type(duration) == "number" and duration > 0 then
+        d_lo = math.min(d_lo, duration)
+        d_hi = math.max(d_hi, duration)
       end
     end
   end
@@ -307,6 +345,14 @@ function seq_candidate_slot_scale(slot)
     weight_lo = w_lo, weight_hi = w_hi,
     dur_lo = d_lo, dur_hi = d_hi,
   }
+end
+
+function seq_candidate_slot_scale(slot)
+  if not slot then
+    return nil
+  end
+  seq_normalize_slot_candidates(slot)
+  return candidate_slot_scale_normalized(slot)
 end
 
 function seq_candidate_hsv_to_color(h, s, v, a)
@@ -340,32 +386,6 @@ function seq_candidate_hsv_to_color(h, s, v, a)
   )
 end
 
-function seq_candidate_chip_props(entry)
-  local sample = entry and entry.path and find_sample_by_path(entry.path) or nil
-  local function num(key, fallback)
-    if sample and type(sample[key]) == "number" then
-      return sample[key]
-    end
-    if entry and type(entry[key]) == "number" then
-      return entry[key]
-    end
-    return fallback
-  end
-  local dur = nil
-  if sample and sample_map_duration then
-    dur = sample_map_duration(sample)
-  end
-  if type(dur) ~= "number" or dur <= 0 then
-    dur = num("effective_duration", num("duration", nil))
-  end
-  return {
-    freq = num("dominant_freq", 440.0),
-    brightness = num("brightness", nil),
-    weight = math.max(0.0, math.min(1.0, num("sub_weight", 0.45))),
-    duration = dur,
-  }
-end
-
 function seq_layout_place_name_candidates(layout, slot, inner_x0, inner_x1, top_y, name_h, expand_w, gap)
   layout.expand = seq_box(inner_x0, top_y, expand_w, name_h)
   local name_x = inner_x0 + expand_w
@@ -379,43 +399,47 @@ function seq_layout_place_name_candidates(layout, slot, inner_x0, inner_x1, top_
   layout.name = seq_box(name_x, top_y, name_w, name_h)
 end
 
+local function candidate_grid_dims(size, n, r, gap)
+  r = math.max(1, r)
+  local c = math.ceil(n / r)
+  return r, c, c * size + (c - 1) * gap, math.min(n, r) * size + (math.min(n, r) - 1) * gap
+end
+
+local function candidate_place_empty()
+  return { boxes = {}, w = 0, hit = seq_box(0, 0, 0, 0), sq = 0 }
+end
+
 function seq_place_sample_candidates(slot, x1, y0, y1, max_w)
-  local empty = { boxes = {}, w = 0, hit = seq_box(0, 0, 0, 0), sq = 0 }
   x1, y0, y1 = x1 or 0, y0 or 0, y1 or 0
   max_w = max_w or 0
   local avail_h = y1 - y0
   if avail_h < 12.0 or max_w < 12.0 then
-    return empty
+    return candidate_place_empty()
   end
   local gap = 2.0
   local count = seq_candidate_visible_count(slot)
   local sq = math.max(12.0, math.min(avail_h, 24.0))
   local rows = 1
   local cols = count
-  local function dims(size, n, r)
-    r = math.max(1, r)
-    local c = math.ceil(n / r)
-    return r, c, c * size + (c - 1) * gap, math.min(n, r) * size + (math.min(n, r) - 1) * gap
-  end
-  local _, _, grid_w, grid_h = dims(sq, count, rows)
+  local _, _, grid_w, grid_h = candidate_grid_dims(sq, count, rows, gap)
   if grid_w > max_w then
     local rows_fit = math.max(1, math.floor((avail_h + gap) / (sq + gap)))
     if rows_fit > 1 then
       rows = math.min(rows_fit, count)
-      _, cols, grid_w, grid_h = dims(sq, count, rows)
+      _, cols, grid_w, grid_h = candidate_grid_dims(sq, count, rows, gap)
     end
   end
   while grid_w > max_w and sq > 12.0 do
     sq = sq - 1.0
-    _, cols, grid_w, grid_h = dims(sq, count, rows)
+    _, cols, grid_w, grid_h = candidate_grid_dims(sq, count, rows, gap)
   end
   if grid_w > max_w then
     local fit_cols = math.max(1, math.floor((max_w + gap) / (sq + gap)))
     count = math.max(1, math.min(count, fit_cols * rows))
-    rows, cols, grid_w, grid_h = dims(sq, count, rows)
+    rows, cols, grid_w, grid_h = candidate_grid_dims(sq, count, rows, gap)
   end
   if grid_w > max_w or grid_w <= 0 then
-    return empty
+    return candidate_place_empty()
   end
   local left = x1 - grid_w
   local top = y0 + (avail_h - grid_h) * 0.5
@@ -438,6 +462,110 @@ function seq_place_sample_candidates(slot, x1, y0, y1, max_w)
   }
 end
 
+-- Candidate chip colours are pure functions of a few numbers that stay the
+-- same frame after frame, so they are memoized (bounded; cleared when full).
+-- Only non-NaN float inputs and integer colours are used as keys, so a hit
+-- is the value the function returns for exactly those arguments. (0.0 and
+-- -0.0 share a key; every memoized function clamps both to the same value.)
+local math_type = math.type
+local cand_color_memo = { hsv = {}, bands = {}, hue = {}, bright = {}, n = 0 }
+
+local function candidate_memo_room()
+  local m = cand_color_memo
+  if m.n >= 2048 then
+    m.hsv, m.bands, m.hue, m.bright, m.n = {}, {}, {}, {}, 0
+  end
+  m.n = m.n + 1
+end
+
+-- = seq_candidate_freq_hue(freq)
+local function candidate_freq_hue(freq)
+  if math_type(freq) ~= "float" or freq ~= freq then
+    return seq_candidate_freq_hue(freq)
+  end
+  local hue = cand_color_memo.hue[freq]
+  if hue == nil then
+    hue = seq_candidate_freq_hue(freq)
+    candidate_memo_room()
+    cand_color_memo.hue[freq] = hue
+  end
+  return hue
+end
+
+-- = seq_candidate_log_unit(value, 100.0, 2500.0)
+local function candidate_bright_unit(value)
+  if math_type(value) ~= "float" or value ~= value then
+    return seq_candidate_log_unit(value, 100.0, 2500.0)
+  end
+  local u = cand_color_memo.bright[value]
+  if u == nil then
+    u = seq_candidate_log_unit(value, 100.0, 2500.0)
+    candidate_memo_room()
+    cand_color_memo.bright[value] = u
+  end
+  return u
+end
+
+-- = seq_candidate_hsv_to_color(h, s, v, a)
+local function candidate_hsv_color(h, s, v, a)
+  if math_type(h) ~= "float" or math_type(s) ~= "float" or math_type(v) ~= "float" or math_type(a) ~= "float"
+      or h ~= h or s ~= s or v ~= v or a ~= a then
+    return seq_candidate_hsv_to_color(h, s, v, a)
+  end
+  local m1 = cand_color_memo.hsv[h]
+  local m2 = m1 and m1[s]
+  local m3 = m2 and m2[v]
+  local col = m3 and m3[a]
+  if col then
+    return col
+  end
+  col = seq_candidate_hsv_to_color(h, s, v, a)
+  candidate_memo_room()
+  local memo = cand_color_memo.hsv
+  m1 = memo[h]
+  if not m1 then m1 = {}; memo[h] = m1 end
+  m2 = m1[s]
+  if not m2 then m2 = {}; m1[s] = m2 end
+  m3 = m2[v]
+  if not m3 then m3 = {}; m2[v] = m3 end
+  m3[a] = col
+  return col
+end
+
+-- The gradient bands: band i (0-based) is blend_colors(top, bottom,
+-- (i + 0.5) / bands). nil (draw unmemoized) unless the inputs are integers
+-- in the ranges that make col_bot * 16 + bands a unique key.
+local function candidate_band_colors(col_top, col_bot, bands)
+  if math_type(col_top) ~= "integer" or math_type(col_bot) ~= "integer" or math_type(bands) ~= "integer"
+      or bands < 1 or bands > 15 or col_bot < 0 or col_bot > 0xFFFFFFFF then
+    return nil
+  end
+  local key = col_bot * 16 + bands
+  local by_top = cand_color_memo.bands[col_top]
+  local cols = by_top and by_top[key]
+  if cols then
+    return cols
+  end
+  cols = {}
+  for i = 0, bands - 1 do
+    cols[i + 1] = blend_colors(col_top, col_bot, (i + 0.5) / bands)
+  end
+  candidate_memo_room()
+  by_top = cand_color_memo.bands[col_top]
+  if not by_top then by_top = {}; cand_color_memo.bands[col_top] = by_top end
+  by_top[key] = cols
+  return cols
+end
+
+-- A colour with its alpha scaled by a (0..1).
+local function candidate_color_alpha(col, a)
+  if not col then
+    return col
+  end
+  local orig_a = (col % 256) / 255.0
+  return change_color_alpha(col, orig_a * a)
+end
+
 function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered, scale, slot_n, alpha)
   if not dl or not box or box.w < 4 then
     return
@@ -446,13 +574,7 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
   local rounding = math.min(3.5, w * 0.22)
   local taken = seq_candidate_entry_taken(entry)
   local a = math.max(0.0, math.min(1.0, tonumber(alpha) or 1.0))
-  local function ca(col, mul)
-    if not col then
-      return col
-    end
-    local orig_a = (col % 256) / 255.0
-    return change_color_alpha(col, orig_a * a * (mul or 1.0))
-  end
+  local ca = candidate_color_alpha
   local bg = is_active and (taken and 0x122016FF or UI_THEME.accent_fill) or (is_hovered and 0x161E1AFF or 0x0C1210FF)
   local edge = UI_THEME.border
   local edge_w = 1.0
@@ -465,18 +587,18 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
     edge = UI_THEME.border_hvr
   end
 
-  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, ca(bg), rounding)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, ca(bg, a), rounding)
 
   if taken then
-    local props = seq_candidate_chip_props(entry)
-    local hue = seq_candidate_freq_hue(props.freq)
-    local bright_src = props.brightness or props.freq
-    local bright_g = seq_candidate_log_unit(bright_src, 100.0, 2500.0)
+    local p_freq, p_brightness, p_weight = candidate_chip_props4(entry)
+    local hue = candidate_freq_hue(p_freq)
+    local bright_src = p_brightness or p_freq
+    local bright_g = candidate_bright_unit(bright_src)
     local bright_t = bright_g
-    local weight_t = props.weight
+    local weight_t = p_weight
     if scale then
       bright_t = seq_candidate_unit_in_range(bright_src, scale.bright_lo, scale.bright_hi, bright_g)
-      weight_t = seq_candidate_unit_in_range(props.weight, scale.weight_lo, scale.weight_hi, props.weight)
+      weight_t = seq_candidate_unit_in_range(p_weight, scale.weight_lo, scale.weight_hi, p_weight)
     end
     local sat = 0.55 + weight_t * 0.40
     if is_hovered then
@@ -485,16 +607,16 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
     if is_active then
       bright_t = math.min(1.0, bright_t + 0.10)
     end
-    local col_top = seq_candidate_hsv_to_color(hue, sat, 0.52 + bright_t * 0.46, a)
-    local col_bot = seq_candidate_hsv_to_color(hue, math.min(1.0, sat + 0.08), 0.22 + bright_t * 0.28, a)
+    local col_top = candidate_hsv_color(hue, sat, 0.52 + bright_t * 0.46, a)
+    local col_bot = candidate_hsv_color(hue, math.min(1.0, sat + 0.08), 0.22 + bright_t * 0.28, a)
 
     -- MultiColor fills are square; clip rounded rects per band so the chip
     -- follows the same corner radius as the outline.
     local bands = math.max(4, math.min(10, math.floor(h + 0.5)))
     if r.ImGui_DrawList_PushClipRect then
+      local band_cols = candidate_band_colors(col_top, col_bot, bands)
       for i = 0, bands - 1 do
-        local t = (i + 0.5) / bands
-        local col = blend_colors(col_top, col_bot, t)
+        local col = band_cols and band_cols[i + 1] or blend_colors(col_top, col_bot, (i + 0.5) / bands)
         local y0 = y + (h * i) / bands
         local y1 = y + (h * (i + 1) / bands)
         r.ImGui_DrawList_PushClipRect(dl, x, y0, x + w, math.min(y + h, y1 + 0.5), true)
@@ -508,9 +630,9 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
 
   if is_active then
     r.ImGui_DrawList_AddRect(dl, x - 1.2, y - 1.2, x + w + 1.2, y + h + 1.2,
-      ca(0xFFFFFF40), rounding + 1.0, 0, 2.0)
+      ca(0xFFFFFF40, a), rounding + 1.0, 0, 2.0)
   end
-  r.ImGui_DrawList_AddRect(dl, x, y, x + w, y + h, ca(edge), rounding, 0, edge_w)
+  r.ImGui_DrawList_AddRect(dl, x, y, x + w, y + h, ca(edge, a), rounding, 0, edge_w)
 
   if state.seq_candidate_show_numbers ~= false and slot_n then
     local label = tostring(slot_n)
@@ -522,8 +644,8 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
     th = (th or 10) * (sz / math.max(1.0, base_sz))
     local tx = x + (w - tw) * 0.5
     local ty = y + (h - th) * 0.5
-    local num_col = ca(taken and 0xFFFFFF72 or 0xC8D0C850)
-    local sh_col = ca(0x00000044)
+    local num_col = ca(taken and 0xFFFFFF72 or 0xC8D0C850, a)
+    local sh_col = ca(0x00000044, a)
     if r.ImGui_DrawList_AddTextEx then
       r.ImGui_DrawList_AddTextEx(dl, font, sz, tx + 0.5, ty + 0.5, sh_col, label)
       r.ImGui_DrawList_AddTextEx(dl, font, sz, tx, ty, num_col, label)
@@ -649,7 +771,9 @@ function render_seq_track_sample_candidates(dl, slot, layout)
   if #boxes == 0 then
     return false
   end
-  local scale = seq_candidate_slot_scale(slot)
+  -- = seq_candidate_slot_scale(slot): its normalize would be a no-op repeat
+  -- (a normalized candidate list has no holes, so compacting finds none).
+  local scale = candidate_slot_scale_normalized(slot)
   local hovered = false
   local changed = false
   local dragging = sample_drag_active()
@@ -670,11 +794,13 @@ function render_seq_track_sample_candidates(dl, slot, layout)
       fade.entry, false, false, scale, nil, 1.0 - ease)
     seq_draw_candidate_delete_x(dl, fade_box, (1.0 - ease) * (1.0 - ease * 0.35))
   end
+  local id_prefix = nil
   for i = 1, #boxes do
     local box = boxes[i]
     if box and box.w > 0 and box.h > 0 then
       r.ImGui_SetCursorScreenPos(ctx, box.x, box.y)
-      r.ImGui_InvisibleButton(ctx, "##seq_cand_" .. tostring(slot.id) .. "_" .. i, box.w, box.h)
+      id_prefix = id_prefix or ("##seq_cand_" .. tostring(slot.id) .. "_")
+      r.ImGui_InvisibleButton(ctx, id_prefix .. i, box.w, box.h)
       local hot = r.ImGui_IsItemHovered(ctx, hover_flags)
       local is_source = seq_candidate_is_drag_source(slot, i)
       if dragging and seq_layout_hit(box, mx, my) then
@@ -794,20 +920,24 @@ function seq_get_track_control_layout(x0, y0, x1, y1, slot, opts)
     mode = "split"
   end
 
+  -- Every mode below sets expand, name, gear, vol, pan, midi, mute, solo,
+  -- overlap and mix_hit (and env in stack and mixer) before anything reads
+  -- them, so they start as false placeholders rather than empty boxes that
+  -- would be thrown away; env (tiny, split) and the candidates may stay empty.
   local layout = {
     mode = mode,
     lane_h = lane_h,
-    expand = seq_box(0, 0, 0, 0),
-    name = seq_box(0, 0, 0, 0),
-    gear = seq_box(0, 0, 0, 0),
-    vol = seq_box(0, 0, 0, 0),
-    pan = seq_box(0, 0, 0, 0),
-    midi = seq_box(0, 0, 0, 0),
-    mute = seq_box(0, 0, 0, 0),
-    solo = seq_box(0, 0, 0, 0),
-    overlap = seq_box(0, 0, 0, 0),
-    env = seq_box(0, 0, 0, 0),
-    mix_hit = seq_box(0, 0, 0, 0),
+    expand = false,
+    name = false,
+    gear = false,
+    vol = false,
+    pan = false,
+    midi = false,
+    mute = false,
+    solo = false,
+    overlap = false,
+    env = (mode == "stack" or mode == "mixer") and false or seq_box(0, 0, 0, 0),
+    mix_hit = false,
     candidates = seq_box(0, 0, 0, 0),
     candidate_boxes = {},
   }
@@ -1065,9 +1195,16 @@ end
 -- Buttons in one group touch and share a frame (segmented pill); state shows
 -- through the fill color so a row of tracks scans quickly.
 
+local tcp_round_flag_cache = {}
+
 local function tcp_round_flag(name)
-  local fn = r["ImGui_DrawFlags_" .. name]
-  return fn and fn() or 0
+  local v = tcp_round_flag_cache[name]
+  if v == nil then
+    local fn = r["ImGui_DrawFlags_" .. name]
+    v = fn and fn() or 0
+    tcp_round_flag_cache[name] = v
+  end
+  return v
 end
 
 local function tcp_seg_flags(seg)
@@ -1193,25 +1330,32 @@ function seq_tcp_glyph_overlap(dl, cx, cy, size, col, on)
 end
 
 -- MIDI note chip: 5-pin icon when there is room, then the note name.
+local midi_glyph_label, midi_glyph_box = nil, nil
+local midi_button_opts = { active = false, on_fill = false, on_text = 0xDFFFE8FF, glyph = false }
+
+local function tcp_midi_glyph(gdl, cx, cy, size, col)
+  local label, box = midi_glyph_label, midi_glyph_box
+  local tw, th = r.ImGui_CalcTextSize(ctx, label)
+  local icon_w = (box.w >= tw + box.h + 4.0) and box.h * 0.9 or 0.0
+  local total = tw + (icon_w > 0 and (icon_w + 1.0) or 0.0)
+  local lx = cx - total * 0.5
+  if icon_w > 0 then
+    ui_button_draw_icon(gdl, "midi", lx + icon_w * 0.5, cy, icon_w, col)
+    lx = lx + icon_w + 1.0
+  end
+  r.ImGui_DrawList_AddText(gdl, lx, cy - th * 0.5, col, label)
+end
+
 function seq_tcp_midi_button(id, dl, box, seg, slot, open)
   local learning = state.seq_midi_learn_slot_id == (slot and slot.id)
   local label = learning and "…" or seq_midi_slot_label(slot)
-  local clicked, hovered, pressed = seq_tcp_seg_button(id, dl, box, seg, {
-    active = open or learning,
-    on_fill = UI_THEME.accent_fill_h,
-    on_text = 0xDFFFE8FF,
-    glyph = function(gdl, cx, cy, size, col)
-      local tw, th = r.ImGui_CalcTextSize(ctx, label)
-      local icon_w = (box.w >= tw + box.h + 4.0) and box.h * 0.9 or 0.0
-      local total = tw + (icon_w > 0 and (icon_w + 1.0) or 0.0)
-      local lx = cx - total * 0.5
-      if icon_w > 0 then
-        ui_button_draw_icon(gdl, "midi", lx + icon_w * 0.5, cy, icon_w, col)
-        lx = lx + icon_w + 1.0
-      end
-      r.ImGui_DrawList_AddText(gdl, lx, cy - th * 0.5, col, label)
-    end,
-  })
+  midi_glyph_label, midi_glyph_box = label, box
+  local opts = midi_button_opts
+  opts.active = open or learning
+  opts.on_fill = UI_THEME.accent_fill_h
+  opts.glyph = tcp_midi_glyph
+  local clicked, hovered, pressed = seq_tcp_seg_button(id, dl, box, seg, opts)
+  midi_glyph_label, midi_glyph_box = nil, nil
   if learning then
     local pulse = 0.5 + 0.5 * math.sin(r.time_precise() * 8.0)
     r.ImGui_DrawList_AddRect(dl, box.x - 0.5, box.y - 0.5, box.x1 + 0.5, box.y1 + 0.5,
@@ -1219,6 +1363,42 @@ function seq_tcp_midi_button(id, dl, box, seg, slot, open)
       tcp_seg_flags(seg), 1.5)
   end
   return clicked, hovered, pressed
+end
+
+-- Open the undo session before mutating slot fields so the "before"
+-- snapshot holds the old value (callers' begin_seq_undo is then a no-op).
+local function begin_mix_undo()
+  if not seq_undo_is_open() then
+    begin_seq_undo("Adjust sequencer mix")
+  end
+  seq_undo_commit_on_release = true
+end
+
+-- Option tables for the mix row, refilled field by field before each use
+-- (seq_tcp_seg_button / seq_rect_drag_control only read them), so a frame
+-- doesn't build a dozen tables and closures per track.
+local mix_opts = {
+  mute = { label = "M", active = false, on_fill = 0xB8383CFF },
+  solo = { label = "S", active = false, on_fill = 0xE0A028FF, on_text = 0x1C1404FF },
+  vol = {
+    fill_color = 0x6AA0E0FF, unity = 1.0, reset = 1.0, horizontal = true,
+    to_pos = false, from_pos = false, format_value = false,
+    icon = "gain", unit = " dB",
+  },
+  pan = {
+    bipolar = true, fill_color = 0x9FE3B5FF, horizontal = true, reset = 0.0,
+    format_value = false, icon = "pan",
+  },
+  layering = { active = false, on_fill = false, on_text = 0xC8FF9AFF, glyph = false, badge = nil },
+  overlap = { active = false, on_fill = 0x175052FF, on_text = 0x8FF2F2FF, glyph = false },
+  ms_group = { false, false },
+  tools_group = {},
+}
+
+local overlap_glyph_slot = nil
+
+local function tcp_overlap_glyph(gdl, cx, cy, size, col)
+  seq_tcp_glyph_overlap(gdl, cx, cy, size, col, overlap_glyph_slot.overlap)
 end
 
 -- Compact mixer + envelope preview in the sequencer track label column.
@@ -1238,22 +1418,13 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   local hovered = false
   local overlap_changed = false
 
-  -- Open the undo session before mutating slot fields so the "before"
-  -- snapshot holds the old value (callers' begin_seq_undo is then a no-op).
-  local function begin_mix_undo()
-    if not seq_undo_is_open() then
-      begin_seq_undo("Adjust sequencer mix")
-    end
-    seq_undo_commit_on_release = true
-  end
-
   -- [M S] group
   local mute, solo = layout.mute, layout.solo
   local ms_hot = false
   if mute and mute.w > 0 then
-    local clicked, hot = seq_tcp_seg_button("##seq_mute_" .. slot.id, dl, mute, "first", {
-      label = "M", active = slot.mute, on_fill = 0xB8383CFF,
-    })
+    local opts = mix_opts.mute
+    opts.active = slot.mute
+    local clicked, hot = seq_tcp_seg_button("##seq_mute_" .. slot.id, dl, mute, "first", opts)
     if clicked then
       begin_mix_undo()
       slot.mute = not slot.mute
@@ -1268,9 +1439,9 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     end
   end
   if solo and solo.w > 0 then
-    local clicked, hot = seq_tcp_seg_button("##seq_solo_" .. slot.id, dl, solo, "last", {
-      label = "S", active = slot.solo, on_fill = 0xE0A028FF, on_text = 0x1C1404FF,
-    })
+    local opts = mix_opts.solo
+    opts.active = slot.solo
+    local clicked, hot = seq_tcp_seg_button("##seq_solo_" .. slot.id, dl, solo, "last", opts)
     if clicked then
       begin_mix_undo()
       slot.solo = not slot.solo
@@ -1285,25 +1456,21 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     end
   end
   if mute and mute.w > 0 and solo and solo.w > 0 then
-    seq_tcp_group_frame(dl, { mute, solo }, ms_hot)
+    local group = mix_opts.ms_group
+    group[1], group[2] = mute, solo
+    seq_tcp_group_frame(dl, group, ms_hot)
+    group[1], group[2] = false, false
   end
 
   local vol = layout.vol
   if vol and vol.w > 0 then
+    local opts = mix_opts.vol
+    opts.to_pos = seq_vol_amp_to_pos
+    opts.from_pos = seq_vol_pos_to_amp
+    opts.format_value = seq_format_track_volume
     local vol_changed, vol_val, vol_hot = seq_rect_drag_control(
       "##seq_track_vol_" .. slot.id, dl, vol.x, vol.y, vol.w, vol.h,
-      slot.volume, 0.0, 4.0,
-      {
-        fill_color = 0x6AA0E0FF,
-        unity = 1.0,
-        reset = 1.0,
-        horizontal = true,
-        to_pos = seq_vol_amp_to_pos,
-        from_pos = seq_vol_pos_to_amp,
-        format_value = seq_format_track_volume,
-        icon = "gain",
-        unit = " dB",
-      }
+      slot.volume, 0.0, 4.0, opts
     )
     if vol_hot then
       hovered = true
@@ -1320,17 +1487,11 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
 
   local pan = layout.pan
   if pan and pan.w > 0 then
+    local opts = mix_opts.pan
+    opts.format_value = seq_format_track_pan
     local pan_changed, pan_val, pan_hot = seq_rect_drag_control(
       "##seq_track_pan_" .. slot.id, dl, pan.x, pan.y, pan.w, pan.h,
-      slot.pan, -1.0, 1.0,
-      {
-        bipolar = true,
-        fill_color = 0x9FE3B5FF,
-        horizontal = true,
-        reset = 0.0,
-        format_value = seq_format_track_pan,
-        icon = "pan",
-      }
+      slot.pan, -1.0, 1.0, opts
     )
     if pan_hot then
       hovered = true
@@ -1390,14 +1551,13 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
   if gear and gear.w > 0 then
     local layering_open = state.seq_layering_slot_id == slot.id
     local layered = seq_layering_is_active and seq_layering_is_active(slot)
+    local opts = mix_opts.layering
+    opts.active = layering_open
+    opts.on_fill = UI_THEME.accent_fill_h
+    opts.glyph = seq_tcp_glyph_layering
+    opts.badge = layered and not layering_open and UI_THEME.accent or nil
     local clicked, hot = seq_tcp_seg_button("##seq_layering_" .. slot.id, dl, gear,
-      (midi and midi.w > 0) and "mid" or "first", {
-        active = layering_open,
-        on_fill = UI_THEME.accent_fill_h,
-        on_text = 0xC8FF9AFF,
-        glyph = seq_tcp_glyph_layering,
-        badge = layered and not layering_open and UI_THEME.accent or nil,
-      })
+      (midi and midi.w > 0) and "mid" or "first", opts)
     if clicked then
       if layering_open then
         state.seq_layering_slot_id = nil
@@ -1419,14 +1579,12 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
 
   local overlap = layout.overlap
   if overlap and overlap.w > 0 then
-    local clicked, hot = seq_tcp_seg_button("##seq_overlap_" .. slot.id, dl, overlap, "last", {
-      active = slot.overlap,
-      on_fill = 0x175052FF,
-      on_text = 0x8FF2F2FF,
-      glyph = function(gdl, cx, cy, size, col)
-        seq_tcp_glyph_overlap(gdl, cx, cy, size, col, slot.overlap)
-      end,
-    })
+    local opts = mix_opts.overlap
+    opts.active = slot.overlap
+    opts.glyph = tcp_overlap_glyph
+    overlap_glyph_slot = slot
+    local clicked, hot = seq_tcp_seg_button("##seq_overlap_" .. slot.id, dl, overlap, "last", opts)
+    overlap_glyph_slot = nil
     if clicked then
       begin_mix_undo()
       slot.overlap = not slot.overlap
@@ -1444,11 +1602,13 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
     end
   end
   do
-    local group = {}
-    if midi and midi.w > 0 then group[#group + 1] = midi end
-    if gear and gear.w > 0 then group[#group + 1] = gear end
-    if overlap and overlap.w > 0 then group[#group + 1] = overlap end
-    if #group > 0 then
+    local group = mix_opts.tools_group
+    local n = 0
+    if midi and midi.w > 0 then n = n + 1; group[n] = midi end
+    if gear and gear.w > 0 then n = n + 1; group[n] = gear end
+    if overlap and overlap.w > 0 then n = n + 1; group[n] = overlap end
+    for i = n + 1, 3 do group[i] = nil end
+    if n > 0 then
       seq_tcp_group_frame(dl, group, tools_hot)
     end
   end

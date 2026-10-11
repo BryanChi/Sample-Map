@@ -52,12 +52,27 @@ end
 SEQ_LAYER_GAIN_MIN_DB = -24.0
 SEQ_LAYER_GAIN_MAX_DB = 12.0
 
+-- Linear gain limits for SEQ_LAYER_GAIN_MIN_DB / MAX_DB. The two powers are
+-- recomputed only when those globals change (the normalizers below run many
+-- times per frame); the values are exactly what the expressions give.
+local layer_gain_lim = { min_db = nil, max_db = nil, lo = nil, hi = nil }
+
+local function layer_gain_limits()
+  local lim = layer_gain_lim
+  local min_db, max_db = SEQ_LAYER_GAIN_MIN_DB, SEQ_LAYER_GAIN_MAX_DB
+  if lim.lo == nil or min_db ~= lim.min_db or max_db ~= lim.max_db then
+    lim.lo = 10 ^ (min_db / 20.0)
+    lim.hi = 10 ^ (max_db / 20.0)
+    lim.min_db, lim.max_db = min_db, max_db
+  end
+  return lim.lo, lim.hi
+end
+
 -- Side gain (linear) over everything in the transient or sustain.
 function seq_layer_clamp_gain(g)
   g = tonumber(g)
   if g == nil or g ~= g then return 1.0 end
-  local lo = 10 ^ (SEQ_LAYER_GAIN_MIN_DB / 20.0)
-  local hi = 10 ^ (SEQ_LAYER_GAIN_MAX_DB / 20.0)
+  local lo, hi = layer_gain_limits()
   if g < lo then return lo end
   if g > hi then return hi end
   return g
@@ -78,27 +93,59 @@ function seq_layer_clamp_fade(f)
 end
 
 -- Normalizes in place (no new tables once a side is well formed): this runs
--- many times per frame while the layering window is open.
+-- many times per frame while the layering window is open. A field that
+-- already holds what its clamp would return is left alone (the clamp would
+-- return that same value), so a well-formed side costs no helper calls.
+local math_type = math.type
+
 function seq_layer_normalize_side(side)
   if type(side) ~= "table" then
     return seq_layer_default_side()
   end
-  if type(side.verts) ~= "table" then
-    side.verts = seq_layer_default_side().verts
+  local verts = side.verts
+  if type(verts) ~= "table" then
+    verts = seq_layer_default_side().verts
+    side.verts = verts
   end
+  local vol_max = nil
   for i = 1, 3 do
-    local v = side.verts[i]
+    local v = verts[i]
     if type(v) ~= "table" then
-      side.verts[i] = { path = nil, name = nil, locked = (i == 1), vol = 1.0 }
+      verts[i] = { path = nil, name = nil, locked = (i == 1), vol = 1.0 }
     else
-      v.locked = v.locked == true
-      v.vol = seq_layer_vert_vol(v)
+      local locked = v.locked
+      if locked ~= true and locked ~= false then
+        v.locked = locked == true
+      end
+      -- seq_layer_vert_vol returns a number in [0, max] unchanged.
+      local vol = v.vol
+      if vol_max == nil then vol_max = SEQ_LAYER_VOL_MAX or 4.0 end
+      if not (math_type(vol) and vol >= 0.0 and vol <= vol_max) then
+        v.vol = seq_layer_vert_vol(v)
+      end
       if v.path == "" then v.path = nil end
-      v.len = seq_layer_clamp_len(v.len)
-      v.fade = seq_layer_clamp_fade(v.fade)
+      -- seq_layer_clamp_len / _fade return nil for nil, and a number strictly
+      -- inside their range unchanged (same value and subtype).
+      local len = v.len
+      if len ~= nil and not (math_type(len) and len > 0.005 and len < 30.0) then
+        v.len = seq_layer_clamp_len(len)
+      end
+      local fade = v.fade
+      if fade ~= nil and not (math_type(fade) and fade > 0.0005 and fade < 30.0) then
+        v.fade = seq_layer_clamp_fade(fade)
+      end
     end
   end
-  side.gain = seq_layer_clamp_gain(side.gain)
+  -- seq_layer_clamp_gain returns a number in [lo, hi] unchanged.
+  local gain = side.gain
+  local gain_ok = false
+  if math_type(gain) and gain == gain then
+    local gain_lo, gain_hi = layer_gain_limits()
+    gain_ok = gain >= gain_lo and gain <= gain_hi
+  end
+  if not gain_ok then
+    side.gain = seq_layer_clamp_gain(gain)
+  end
   local b = side.blend
   if type(b) ~= "table" then
     side.blend = { 1.0, 0.0, 0.0 }
@@ -108,7 +155,7 @@ function seq_layer_normalize_side(side)
   -- A side-wide source (older layouts) moves onto corners that have none.
   if type(side.rand) == "table" then
     for i = 2, 3 do
-      local v = side.verts[i]
+      local v = verts[i]
       if v.rand == nil then
         local tags = {}
         for k, t in ipairs(side.rand.tags or {}) do tags[k] = t end
@@ -118,7 +165,11 @@ function seq_layer_normalize_side(side)
   end
   side.rand = nil
   for i = 1, 3 do
-    seq_layer_normalize_rand(side.verts[i])
+    local v = verts[i]
+    -- seq_layer_normalize_rand only clears a non-table rand (nil stays nil).
+    if v.rand ~= nil then
+      seq_layer_normalize_rand(v)
+    end
   end
   return side
 end
@@ -145,39 +196,78 @@ end
 
 function seq_normalize_slot_layers(slot)
   if not slot then return end
-  if type(slot.layers) ~= "table" then
-    slot.layers = {}
+  local layers = slot.layers
+  if type(layers) ~= "table" then
+    layers = {}
+    slot.layers = layers
   end
-  slot.layers.transient = seq_layer_normalize_side(slot.layers.transient)
-  slot.layers.sustain = seq_layer_normalize_side(slot.layers.sustain)
-  slot.layers.linked = slot.layers.linked == true
-  if slot.layers.output ~= "original" and slot.layers.output ~= "layered" then
-    slot.layers.output = nil
+  layers.transient = seq_layer_normalize_side(layers.transient)
+  layers.sustain = seq_layer_normalize_side(layers.sustain)
+  layers.linked = layers.linked == true
+  local output = layers.output
+  if output ~= "original" and output ~= "layered" then
+    layers.output = nil
   end
-  local bias = tonumber(slot.layers.bias)
+  local bias = tonumber(layers.bias)
   if bias == nil then
-    slot.layers.bias = 0.0
+    layers.bias = 0.0
   else
     if bias < -1.0 then bias = -1.0 elseif bias > 1.0 then bias = 1.0 end
-    slot.layers.bias = bias
+    layers.bias = bias
   end
-  slot.layers.xfade = seq_layering_clamp_xfade(slot.layers.xfade)
-  -- Whole-hit tail: end point and fade-out (seconds from the hit).
-  slot.layers.tail_end = seq_layer_clamp_len(slot.layers.tail_end)
-  slot.layers.tail_fade = seq_layer_clamp_fade(slot.layers.tail_fade)
-  if not slot.layers.tail_end and not slot.layers.tail_fade then
-    slot.layers.tail_fade = nil
+  -- seq_layering_clamp_xfade returns a number in [min, max] unchanged.
+  local xfade = layers.xfade
+  if not (math_type(xfade) and xfade >= SEQ_LAYER_XFADE_MIN and xfade <= SEQ_LAYER_XFADE_MAX) then
+    layers.xfade = seq_layering_clamp_xfade(xfade)
+  end
+  -- Whole-hit tail: end point and fade-out (seconds from the hit). Both
+  -- clamps return nil for nil.
+  if layers.tail_end ~= nil then
+    layers.tail_end = seq_layer_clamp_len(layers.tail_end)
+  end
+  if layers.tail_fade ~= nil then
+    layers.tail_fade = seq_layer_clamp_fade(layers.tail_fade)
+  end
+  if not layers.tail_end and not layers.tail_fade then
+    layers.tail_fade = nil
   end
   -- The sustain as it was when the sides were linked, restored on unlink.
-  if type(slot.layers.unlinked_sustain) == "table" then
-    slot.layers.unlinked_sustain = seq_layer_normalize_side(slot.layers.unlinked_sustain)
+  local unlinked = layers.unlinked_sustain
+  if type(unlinked) == "table" then
+    layers.unlinked_sustain = seq_layer_normalize_side(unlinked)
   else
-    slot.layers.unlinked_sustain = nil
+    layers.unlinked_sustain = nil
   end
-  if slot.layers.top_locked_inited ~= true then
-    slot.layers.transient.verts[1].locked = true
-    slot.layers.sustain.verts[1].locked = true
-    slot.layers.top_locked_inited = true
+  if layers.top_locked_inited ~= true then
+    layers.transient.verts[1].locked = true
+    layers.sustain.verts[1].locked = true
+    layers.top_locked_inited = true
+  end
+end
+
+-- Running seq_normalize_slot_layers again on layers it has just normalized
+-- (with nothing changed in between) rewrites every field with the value it
+-- already holds, except in two places: seq_layer_clamp_bary divides each
+-- blend by a sum that can be 1 +- an ulp, so a repeat can move a weight by an
+-- ulp; and a side that was missing came back as seq_layer_default_side(),
+-- which has no gain, so the repeat gives it seq_layer_clamp_gain(nil) = 1.0.
+-- This does exactly those two steps, side by side in the same order, for
+-- callers that would otherwise normalize the same slot two or three times
+-- in a row.
+local function layers_side_repeat(side)
+  if side.gain == nil then
+    side.gain = seq_layer_clamp_gain(nil)
+  end
+  local b = side.blend
+  b[1], b[2], b[3] = seq_layer_clamp_bary(tonumber(b[1]) or 0, tonumber(b[2]) or 0, tonumber(b[3]) or 0)
+end
+
+local function layers_renormalize_repeat(layers)
+  layers_side_repeat(layers.transient)
+  layers_side_repeat(layers.sustain)
+  local unlinked = layers.unlinked_sustain
+  if type(unlinked) == "table" then
+    layers_side_repeat(unlinked)
   end
 end
 
@@ -514,14 +604,18 @@ local function corner(slot, side_key, idx)
   return side and side.verts[idx], side
 end
 
--- Drum type a corner draws from: its own choice, else the track's. The
--- second value is true when the corner chose it.
-function seq_layering_rand_role(slot, side_key, idx)
-  local v = corner(slot, side_key, idx)
+-- seq_layering_rand_role for the vert its corner() lookup found.
+local function rand_role_of(slot, v)
   if v and v.rand and v.rand.role then
     return v.rand.role, true
   end
   return seq_layering_track_role(slot), false
+end
+
+-- Drum type a corner draws from: its own choice, else the track's. The
+-- second value is true when the corner chose it.
+function seq_layering_rand_role(slot, side_key, idx)
+  return rand_role_of(slot, (corner(slot, side_key, idx)))
 end
 
 -- role: a drum type, or nil for the track's own. Changing the type drops tags
@@ -580,7 +674,10 @@ end
 function seq_layering_rand_label(slot, side_key, idx)
   local v = corner(slot, side_key, idx)
   local labels = SEQ_ROLE_LABELS or {}
-  local role, own = seq_layering_rand_role(slot, side_key, idx)
+  -- = seq_layering_rand_role(slot, side_key, idx): its corner() normalize is a
+  -- repeat (see layers_renormalize_repeat) and finds the same vert.
+  layers_renormalize_repeat(slot.layers)
+  local role, own = rand_role_of(slot, v)
   local bits = { role and (labels[role] or role) or "Any" }
   local tags = v and v.rand and v.rand.tags or {}
   if #tags > 0 then
@@ -799,40 +896,46 @@ function seq_layering_xfade_window(slot, split)
   return pre, post
 end
 
-function seq_layering_geometry_active(slot)
-  if not slot then
-    return false
-  end
-  seq_normalize_slot_layers(slot)
-  if slot.layers.tail_end or slot.layers.tail_fade then
+-- seq_layering_geometry_active after its normalize (read-only).
+local function layering_geometry_active_normalized(slot)
+  local layers = slot.layers
+  if layers.tail_end or layers.tail_fade then
     return true
   end
-  local sides = { slot.layers.transient, slot.layers.sustain }
   for s = 1, 2 do
-    local side = sides[s]
-    if math.abs((side.blend[1] or 1.0) - 1.0) > 0.02 then
+    local side = (s == 1) and layers.transient or layers.sustain
+    local blend, verts = side.blend, side.verts
+    if math.abs((blend[1] or 1.0) - 1.0) > 0.02 then
       return true
     end
     if math.abs((side.gain or 1.0) - 1.0) > 0.001 then
       return true
     end
     for i = 1, 3 do
-      local v = side.verts[i]
-      if v.path and (v.len or v.fade or seq_layer_corner_env(v)) and (side.blend[i] or 0) >= 0.02 then
+      local v = verts[i]
+      if v.path and (v.len or v.fade or seq_layer_corner_env(v)) and (blend[i] or 0) >= 0.02 then
         return true
       end
     end
     for i = 2, 3 do
-      if (side.blend[i] or 0.0) >= 0.02 and side.verts[i] and side.verts[i].path then
+      if (blend[i] or 0.0) >= 0.02 and verts[i] and verts[i].path then
         return true
       end
     end
-    local v1 = side.verts[1]
+    local v1 = verts[1]
     if v1 and v1.path and slot.sample_path and v1.path ~= slot.sample_path then
       return true
     end
   end
   return false
+end
+
+function seq_layering_geometry_active(slot)
+  if not slot then
+    return false
+  end
+  seq_normalize_slot_layers(slot)
+  return layering_geometry_active_normalized(slot)
 end
 
 function seq_layering_output(slot)
@@ -844,7 +947,9 @@ function seq_layering_output(slot)
   if out == "original" or out == "layered" then
     return out
   end
-  return seq_layering_geometry_active(slot) and "layered" or "original"
+  -- = seq_layering_geometry_active(slot); its normalize is a repeat.
+  layers_renormalize_repeat(slot.layers)
+  return layering_geometry_active_normalized(slot) and "layered" or "original"
 end
 
 function seq_layering_set_output(slot, kind)
@@ -862,8 +967,18 @@ function seq_layering_set_output(slot, kind)
   return true
 end
 
+-- = seq_layering_output(slot) == "layered" and seq_layering_geometry_active(slot),
+-- normalizing the slot once: the later normalizes are repeats (see
+-- layers_renormalize_repeat).
 function seq_layering_is_active(slot)
-  return seq_layering_output(slot) == "layered" and seq_layering_geometry_active(slot)
+  if not slot then
+    return false
+  end
+  if seq_layering_output(slot) ~= "layered" then
+    return false
+  end
+  layers_renormalize_repeat(slot.layers)
+  return layering_geometry_active_normalized(slot)
 end
 
 function seq_layering_drag_sample(slot)
@@ -1153,8 +1268,15 @@ end
 function seq_layering_build_pieces(slot, opts)
   seq_normalize_slot_layers(slot)
   opts = opts or {}
-  if not opts.all and not seq_layering_geometry_active(slot) then
-    return {}
+  if not opts.all then
+    -- = seq_layering_geometry_active(slot): its normalize is a repeat.
+    if not slot then
+      return {}
+    end
+    layers_renormalize_repeat(slot.layers)
+    if not layering_geometry_active_normalized(slot) then
+      return {}
+    end
   end
   local pieces = {}
   local function add(path, v, weight, fields, owners)
