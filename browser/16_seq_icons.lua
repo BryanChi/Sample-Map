@@ -245,6 +245,16 @@ function draw_sample_dot_control(sample, id_suffix, is_swap_active, play_t, role
   return clicked, hovered
 end
 
+-- Option tables the track rows pass to their callees every frame. The
+-- callees (draw_ui_button, draw_sample_dot_control, the layout and the
+-- sample controls) only read them, so one table each is reused; the
+-- per-track ones get every field rewritten before each call.
+local NAV_LEFT_BUTTON_OPTS = { icon = "chev_left", compact = true, style = "ghost_arrow" }
+local NAV_RIGHT_BUTTON_OPTS = { icon = "chev_right", compact = true, style = "ghost_arrow" }
+local PANEL_LAYOUT_OPTS = { hide_expand = true }
+local panel_nav_opts = {}
+local dot_cue_scratch = {}
+
 function render_seq_track_sample_controls(slot, idx, opts)
   opts = opts or {}
   local id_suffix = opts.id_suffix or tostring(slot.id)
@@ -279,12 +289,12 @@ function render_seq_track_sample_controls(slot, idx, opts)
   local cue_color = (edit_region or (has_override and cue_region))
     and seq_region_pool_color((edit_region or cue_region).pool_id, 230)
     or nil
-  local dot_cue = {
-    region_color = cue_color,
-    override_color = has_override and cue_color or nil,
-    has_override = has_override,
-    edit_mode = edit_region ~= nil,
-  }
+  local dot_cue = dot_cue_scratch
+  dot_cue.region_color = cue_color
+  dot_cue.override_color = has_override and cue_color or nil
+  dot_cue.has_override = has_override
+  dot_cue.edit_mode = edit_region ~= nil
+  dot_cue.drop_armed = nil
 
   local row_drop_hovered = false
   local can_nav = assigned_sample ~= nil or (slot.sample_path and slot.sample_path ~= "")
@@ -300,7 +310,7 @@ function render_seq_track_sample_controls(slot, idx, opts)
     r.ImGui_BeginDisabled(ctx)
   end
   r.ImGui_SetCursorScreenPos(ctx, x, mid_y - ctrl_size * 0.5)
-  if draw_ui_button("seq_left_" .. id_suffix, nil, ctrl_size, ctrl_size, { icon = "chev_left", compact = true, style = "ghost_arrow" }) then
+  if draw_ui_button("seq_left_" .. id_suffix, nil, ctrl_size, ctrl_size, NAV_LEFT_BUTTON_OPTS) then
     swap_seq_track_sample_neighbor(slot, -1)
     seq_open_minimap_popup(slot, true)
   end
@@ -364,7 +374,7 @@ function render_seq_track_sample_controls(slot, idx, opts)
     r.ImGui_BeginDisabled(ctx)
   end
   r.ImGui_SetCursorScreenPos(ctx, x, mid_y - ctrl_size * 0.5)
-  if draw_ui_button("seq_right_" .. id_suffix, nil, ctrl_size, ctrl_size, { icon = "chev_right", compact = true, style = "ghost_arrow" }) then
+  if draw_ui_button("seq_right_" .. id_suffix, nil, ctrl_size, ctrl_size, NAV_RIGHT_BUTTON_OPTS) then
     swap_seq_track_sample_neighbor(slot, 1)
     seq_open_minimap_popup(slot, true)
   end
@@ -483,7 +493,7 @@ function render_seq_tracks_panel()
         )
       end
 
-      local layout = seq_get_track_control_layout(row_x, row_y, ctrl_x1, row_y + row_h, slot, { hide_expand = true })
+      local layout = seq_get_track_control_layout(row_x, row_y, ctrl_x1, row_y + row_h, slot, PANEL_LAYOUT_OPTS)
       seq_draw_track_name_and_expand(dl, slot, layout, false, 255, nil, slot.name)
 
       local name_box = layout.name
@@ -536,14 +546,14 @@ function render_seq_tracks_panel()
 
       r.ImGui_SetCursorScreenPos(ctx, ctrl_x1 + gap, row_y)
       r.ImGui_PushID(ctx, "seq_panel_nav_" .. slot.id)
-      local nav = render_seq_track_sample_controls(slot, idx, {
-        id_suffix = "panel_" .. slot.id,
-        ctrl_size = ctrl_size,
-        icon_size = icon_size,
-        container_h = row_h,
-        y0 = row_y,
-        y1 = row_y + row_h,
-      })
+      local nav_opts = panel_nav_opts
+      nav_opts.id_suffix = "panel_" .. slot.id
+      nav_opts.ctrl_size = ctrl_size
+      nav_opts.icon_size = icon_size
+      nav_opts.container_h = row_h
+      nav_opts.y0 = row_y
+      nav_opts.y1 = row_y + row_h
+      local nav = render_seq_track_sample_controls(slot, idx, nav_opts)
       r.ImGui_PopID(ctx)
       if nav.row_drop_hovered then
         row_drop_hovered = true
