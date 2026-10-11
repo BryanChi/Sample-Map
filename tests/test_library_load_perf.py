@@ -367,6 +367,45 @@ end
 '''
 
 REF_MAP_LUA = r'''
+function REF_get_sample_dot_color(sample)
+  if not sample then
+    return build_color_rrgbbaa(96, 96, 96, 255)
+  end
+  if sample._render_color then
+    return sample._render_color
+  end
+
+  local color = build_color_rrgbbaa(extract_rgb(state.dot_color or 0x44AA55))
+  if sample.tags and type(sample.tags) == "table" and #sample.tags > 0 then
+    local best_tag = nil
+    local best_weight = 0
+    for _, tag_name in ipairs(sample.tags) do
+      local weight = TAG_KEYWORD_WEIGHT[tag_name]
+      if weight and weight > best_weight then
+        best_weight = weight
+        best_tag = tag_name
+      end
+    end
+    if best_tag and state.tag_colors[best_tag] then
+      local tr, tg, tb = extract_rgb(state.tag_colors[best_tag])
+      color = build_color_rrgbbaa(tr, tg, tb, 255)
+    end
+  end
+
+  if sample.channels == 1 then
+    local base_r, base_g, base_b = extract_rgb_rrgbbaa(color)
+    color = build_color_rrgbbaa(
+      math.min(255, math.floor(base_r * 1.5)),
+      math.min(255, math.floor(base_g * 1.5)),
+      math.min(255, math.floor(base_b * 1.5)),
+      255
+    )
+  end
+
+  sample._render_color = color
+  return color
+end
+
 function REF_sample_passes_filters(sample, needle, skip_tags)
   if not sample then return false end
 
@@ -695,6 +734,44 @@ def test_map_filter_rebuild_matches_original():
           if snaps[1] ~= snaps[2] then bad = bad + 1 end
         end
       end
+      return bad
+    ''')
+    assert bad == 0
+
+
+def test_dot_colors_match_original():
+    L = _runtime()
+    bad = L.execute(r'''
+      local R = math.random
+      math.randomseed(5)
+      local tags = { "kick", "snare", "hat", "loop", "pad", "808s", "fx", "other", "Kick" }
+      local bad = 0
+      for round = 1, 6 do
+        state.dot_color = ({ nil, 0x44AA55, 0xFF00FF, 0x123456, 16777215, 0 })[round]
+        state.tag_colors = {}
+        for _, t in ipairs(tags) do
+          if R(1, 4) > 1 then state.tag_colors[t] = ({ R(0, 0xFFFFFF), R(0, 0xFFFFFF) + 0.5, 0xFFFFFF, 0, 1e7 })[R(1, 5)] end
+        end
+        for _, t in ipairs(tags) do TAG_KEYWORD_WEIGHT[t] = R(1, 3) == 1 and nil or R(1, 5) end
+        for i = 1, 3000 do
+          local s = { channels = ({ 1, 2, nil, 1.0 })[R(1, 4)] }
+          if R(1, 5) > 1 then
+            s.tags = {}
+            for k = 1, R(0, 3) do s.tags[k] = tags[R(1, #tags)] end
+          end
+          local c = { channels = s.channels, tags = s.tags }
+          local a, b = REF_get_sample_dot_color(s), get_sample_dot_color(c)
+          if a ~= b or math.type(a) ~= math.type(b) or s._render_color ~= c._render_color then bad = bad + 1 end
+        end
+      end
+      -- Many distinct base colours (memo eviction), mono and stereo.
+      for i = 1, 5000 do
+        state.dot_color = R(0, 0xFFFFFF)
+        local s = { channels = (i % 2) + 1 }
+        local c = { channels = s.channels }
+        if REF_get_sample_dot_color(s) ~= get_sample_dot_color(c) then bad = bad + 1 end
+      end
+      if REF_get_sample_dot_color(nil) ~= get_sample_dot_color(nil) then bad = bad + 1 end
       return bad
     ''')
     assert bad == 0
