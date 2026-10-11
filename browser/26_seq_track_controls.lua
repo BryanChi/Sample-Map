@@ -462,6 +462,101 @@ function seq_place_sample_candidates(slot, x1, y0, y1, max_w)
   }
 end
 
+-- Candidate chip colours are pure functions of a few numbers that stay the
+-- same frame after frame, so they are memoized (bounded; cleared when full).
+-- Only non-NaN float inputs and integer colours are used as keys, so a hit
+-- is the value the function returns for exactly those arguments. (0.0 and
+-- -0.0 share a key; every memoized function clamps both to the same value.)
+local math_type = math.type
+local cand_color_memo = { hsv = {}, bands = {}, hue = {}, bright = {}, n = 0 }
+
+local function candidate_memo_room()
+  local m = cand_color_memo
+  if m.n >= 2048 then
+    m.hsv, m.bands, m.hue, m.bright, m.n = {}, {}, {}, {}, 0
+  end
+  m.n = m.n + 1
+end
+
+-- = seq_candidate_freq_hue(freq)
+local function candidate_freq_hue(freq)
+  if math_type(freq) ~= "float" or freq ~= freq then
+    return seq_candidate_freq_hue(freq)
+  end
+  local hue = cand_color_memo.hue[freq]
+  if hue == nil then
+    hue = seq_candidate_freq_hue(freq)
+    candidate_memo_room()
+    cand_color_memo.hue[freq] = hue
+  end
+  return hue
+end
+
+-- = seq_candidate_log_unit(value, 100.0, 2500.0)
+local function candidate_bright_unit(value)
+  if math_type(value) ~= "float" or value ~= value then
+    return seq_candidate_log_unit(value, 100.0, 2500.0)
+  end
+  local u = cand_color_memo.bright[value]
+  if u == nil then
+    u = seq_candidate_log_unit(value, 100.0, 2500.0)
+    candidate_memo_room()
+    cand_color_memo.bright[value] = u
+  end
+  return u
+end
+
+-- = seq_candidate_hsv_to_color(h, s, v, a)
+local function candidate_hsv_color(h, s, v, a)
+  if math_type(h) ~= "float" or math_type(s) ~= "float" or math_type(v) ~= "float" or math_type(a) ~= "float"
+      or h ~= h or s ~= s or v ~= v or a ~= a then
+    return seq_candidate_hsv_to_color(h, s, v, a)
+  end
+  local m1 = cand_color_memo.hsv[h]
+  local m2 = m1 and m1[s]
+  local m3 = m2 and m2[v]
+  local col = m3 and m3[a]
+  if col then
+    return col
+  end
+  col = seq_candidate_hsv_to_color(h, s, v, a)
+  candidate_memo_room()
+  local memo = cand_color_memo.hsv
+  m1 = memo[h]
+  if not m1 then m1 = {}; memo[h] = m1 end
+  m2 = m1[s]
+  if not m2 then m2 = {}; m1[s] = m2 end
+  m3 = m2[v]
+  if not m3 then m3 = {}; m2[v] = m3 end
+  m3[a] = col
+  return col
+end
+
+-- The gradient bands: band i (0-based) is blend_colors(top, bottom,
+-- (i + 0.5) / bands). nil (draw unmemoized) unless the inputs are integers
+-- in the ranges that make col_bot * 16 + bands a unique key.
+local function candidate_band_colors(col_top, col_bot, bands)
+  if math_type(col_top) ~= "integer" or math_type(col_bot) ~= "integer" or math_type(bands) ~= "integer"
+      or bands < 1 or bands > 15 or col_bot < 0 or col_bot > 0xFFFFFFFF then
+    return nil
+  end
+  local key = col_bot * 16 + bands
+  local by_top = cand_color_memo.bands[col_top]
+  local cols = by_top and by_top[key]
+  if cols then
+    return cols
+  end
+  cols = {}
+  for i = 0, bands - 1 do
+    cols[i + 1] = blend_colors(col_top, col_bot, (i + 0.5) / bands)
+  end
+  candidate_memo_room()
+  by_top = cand_color_memo.bands[col_top]
+  if not by_top then by_top = {}; cand_color_memo.bands[col_top] = by_top end
+  by_top[key] = cols
+  return cols
+end
+
 -- A colour with its alpha scaled by a (0..1).
 local function candidate_color_alpha(col, a)
   if not col then
@@ -496,9 +591,9 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
 
   if taken then
     local p_freq, p_brightness, p_weight = candidate_chip_props4(entry)
-    local hue = seq_candidate_freq_hue(p_freq)
+    local hue = candidate_freq_hue(p_freq)
     local bright_src = p_brightness or p_freq
-    local bright_g = seq_candidate_log_unit(bright_src, 100.0, 2500.0)
+    local bright_g = candidate_bright_unit(bright_src)
     local bright_t = bright_g
     local weight_t = p_weight
     if scale then
@@ -512,16 +607,16 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
     if is_active then
       bright_t = math.min(1.0, bright_t + 0.10)
     end
-    local col_top = seq_candidate_hsv_to_color(hue, sat, 0.52 + bright_t * 0.46, a)
-    local col_bot = seq_candidate_hsv_to_color(hue, math.min(1.0, sat + 0.08), 0.22 + bright_t * 0.28, a)
+    local col_top = candidate_hsv_color(hue, sat, 0.52 + bright_t * 0.46, a)
+    local col_bot = candidate_hsv_color(hue, math.min(1.0, sat + 0.08), 0.22 + bright_t * 0.28, a)
 
     -- MultiColor fills are square; clip rounded rects per band so the chip
     -- follows the same corner radius as the outline.
     local bands = math.max(4, math.min(10, math.floor(h + 0.5)))
     if r.ImGui_DrawList_PushClipRect then
+      local band_cols = candidate_band_colors(col_top, col_bot, bands)
       for i = 0, bands - 1 do
-        local t = (i + 0.5) / bands
-        local col = blend_colors(col_top, col_bot, t)
+        local col = band_cols and band_cols[i + 1] or blend_colors(col_top, col_bot, (i + 0.5) / bands)
         local y0 = y + (h * i) / bands
         local y1 = y + (h * (i + 1) / bands)
         r.ImGui_DrawList_PushClipRect(dl, x, y0, x + w, math.min(y + h, y1 + 0.5), true)

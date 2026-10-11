@@ -960,3 +960,257 @@ def test_track_control_layout_matches_previous_implementation():
       return table.concat(out, "\n")
     ''')
     assert bad == ""
+
+
+REF_SQUARE = r'''
+function ref_seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered, scale, slot_n, alpha)
+  if not dl or not box or box.w < 4 then
+    return
+  end
+  local x, y, w, h = box.x, box.y, box.w, box.h
+  local rounding = math.min(3.5, w * 0.22)
+  local taken = seq_candidate_entry_taken(entry)
+  local a = math.max(0.0, math.min(1.0, tonumber(alpha) or 1.0))
+  local function ca(col, mul)
+    if not col then
+      return col
+    end
+    local orig_a = (col % 256) / 255.0
+    return change_color_alpha(col, orig_a * a * (mul or 1.0))
+  end
+  local bg = is_active and (taken and 0x122016FF or UI_THEME.accent_fill) or (is_hovered and 0x161E1AFF or 0x0C1210FF)
+  local edge = UI_THEME.border
+  local edge_w = 1.0
+  if is_active then
+    edge = 0xFFFFFF80
+    edge_w = 1.8
+  elseif is_hovered then
+    edge = 0xE8EEEAFF
+  elseif taken then
+    edge = UI_THEME.border_hvr
+  end
+
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, ca(bg), rounding)
+
+  if taken then
+    local props = ref_seq_candidate_chip_props(entry)
+    local hue = seq_candidate_freq_hue(props.freq)
+    local bright_src = props.brightness or props.freq
+    local bright_g = seq_candidate_log_unit(bright_src, 100.0, 2500.0)
+    local bright_t = bright_g
+    local weight_t = props.weight
+    if scale then
+      bright_t = seq_candidate_unit_in_range(bright_src, scale.bright_lo, scale.bright_hi, bright_g)
+      weight_t = seq_candidate_unit_in_range(props.weight, scale.weight_lo, scale.weight_hi, props.weight)
+    end
+    local sat = 0.55 + weight_t * 0.40
+    if is_hovered then
+      bright_t = math.min(1.0, bright_t + 0.08)
+    end
+    if is_active then
+      bright_t = math.min(1.0, bright_t + 0.10)
+    end
+    local col_top = seq_candidate_hsv_to_color(hue, sat, 0.52 + bright_t * 0.46, a)
+    local col_bot = seq_candidate_hsv_to_color(hue, math.min(1.0, sat + 0.08), 0.22 + bright_t * 0.28, a)
+
+    -- MultiColor fills are square; clip rounded rects per band so the chip
+    -- follows the same corner radius as the outline.
+    local bands = math.max(4, math.min(10, math.floor(h + 0.5)))
+    if r.ImGui_DrawList_PushClipRect then
+      for i = 0, bands - 1 do
+        local t = (i + 0.5) / bands
+        local col = blend_colors(col_top, col_bot, t)
+        local y0 = y + (h * i) / bands
+        local y1 = y + (h * (i + 1) / bands)
+        r.ImGui_DrawList_PushClipRect(dl, x, y0, x + w, math.min(y + h, y1 + 0.5), true)
+        r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, col, rounding)
+        r.ImGui_DrawList_PopClipRect(dl)
+      end
+    else
+      r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, col_top, rounding)
+    end
+  end
+
+  if is_active then
+    r.ImGui_DrawList_AddRect(dl, x - 1.2, y - 1.2, x + w + 1.2, y + h + 1.2,
+      ca(0xFFFFFF40), rounding + 1.0, 0, 2.0)
+  end
+  r.ImGui_DrawList_AddRect(dl, x, y, x + w, y + h, ca(edge), rounding, 0, edge_w)
+
+  if state.seq_candidate_show_numbers ~= false and slot_n then
+    local label = tostring(slot_n)
+    local font = r.ImGui_GetFont and r.ImGui_GetFont(ctx) or nil
+    local base_sz = (r.ImGui_GetFontSize and r.ImGui_GetFontSize(ctx)) or 13.0
+    local sz = base_sz * 0.58
+    local tw, th = r.ImGui_CalcTextSize(ctx, label)
+    tw = (tw or 6) * (sz / math.max(1.0, base_sz))
+    th = (th or 10) * (sz / math.max(1.0, base_sz))
+    local tx = x + (w - tw) * 0.5
+    local ty = y + (h - th) * 0.5
+    local num_col = ca(taken and 0xFFFFFF72 or 0xC8D0C850)
+    local sh_col = ca(0x00000044)
+    if r.ImGui_DrawList_AddTextEx then
+      r.ImGui_DrawList_AddTextEx(dl, font, sz, tx + 0.5, ty + 0.5, sh_col, label)
+      r.ImGui_DrawList_AddTextEx(dl, font, sz, tx, ty, num_col, label)
+    else
+      r.ImGui_DrawList_AddText(dl, tx + 0.5, ty + 0.5, sh_col, label)
+      r.ImGui_DrawList_AddText(dl, tx, ty, num_col, label)
+    end
+  end
+end
+
+'''
+
+# Records every draw-list call (name and all arguments) into T_DRAWS.
+DRAW_RECORDER = r'''
+T_DRAWS = {}
+for _, name in ipairs({ "ImGui_DrawList_AddRectFilled", "ImGui_DrawList_AddRect", "ImGui_DrawList_PushClipRect",
+    "ImGui_DrawList_PopClipRect", "ImGui_DrawList_AddTextEx", "ImGui_DrawList_AddText" }) do
+  local f = r[name]
+  rawset(r, name, function(...)
+    T_DRAWS[#T_DRAWS + 1] = table.pack(name, ...)
+    return f(...)
+  end)
+end
+
+-- A local function reachable from fn through upvalues (depth-first).
+function T_upvalue(fn, name, seen)
+  seen = seen or {}
+  if seen[fn] then return nil end
+  seen[fn] = true
+  for i = 1, 255 do
+    local n, v = debug.getupvalue(fn, i)
+    if n == nil then break end
+    if n == name then return v end
+    if type(v) == "function" then
+      local found = T_upvalue(v, name, seen)
+      if found ~= nil then return found end
+    end
+  end
+  return nil
+end
+'''
+
+
+def test_candidate_colour_memos_match_direct_calls():
+    # The memoized colour helpers must return exactly what the functions they
+    # wrap return, on hits, misses and after the memo is cleared when full,
+    # for every number subtype (non-float and NaN inputs bypass the memo).
+    L = _runtime()
+    L.execute(DRAW_RECORDER)
+    bad = L.execute(r'''
+      math.randomseed(31)
+      local sq = seq_draw_sample_candidate_square
+      local hue = T_upvalue(sq, "candidate_freq_hue")
+      local bright = T_upvalue(sq, "candidate_bright_unit")
+      local hsv = T_upvalue(sq, "candidate_hsv_color")
+      local bands = T_upvalue(sq, "candidate_band_colors")
+      local memo = T_upvalue(hsv, "cand_color_memo")
+      assert(hue and bright and hsv and bands and memo, "memo functions not found")
+      local out = {}
+      local function check(e, what)
+        if e then
+          out[#out + 1] = what .. ": " .. e
+        end
+      end
+      local POOL = { 0.0, -0.0, 0, 1, 1.0, 0.5, 2.0, -3.0, 60.0, 120.0, 359.9, 360.0, 440.0, 440,
+        1e9, 1/0, -1/0, 0/0, 100.0, 2500.0, 0.03, 9999.5, 20000.0, "7.5", "x", nil, true }
+      local function num()
+        local k = math.random(1, 4)
+        if k == 1 then return POOL[math.random(1, #POOL)] end
+        if k == 2 then return math.random() * 3 end
+        if k == 3 then return math.random() * 12000 - 500 end
+        return math.floor(math.random() * 40) / 8
+      end
+      local resets, peak, prev_n = 0, 0, memo.n
+      for trial = 1, 12000 do
+        local f = num()
+        check(T_same(seq_candidate_freq_hue(f), hue(f), "hue"), "hue(" .. tostring(f) .. ")")
+        local v = num()
+        check(T_same(seq_candidate_log_unit(v, 100.0, 2500.0), bright(v), "bright"), "bright(" .. tostring(v) .. ")")
+        local h, s_, v_, a = num(), num(), num(), num()
+        local okd, d = pcall(seq_candidate_hsv_to_color, h, s_, v_, a)
+        local okm, m = pcall(hsv, h, s_, v_, a)
+        check((okd ~= okm) and "error mismatch" or (okd and T_same(d, m, "hsv")),
+          ("hsv(%s, %s, %s, %s)"):format(tostring(h), tostring(s_), tostring(v_), tostring(a)))
+        local top = T_pick({ 0x80A0C0FF, 0x00000000, 0xFFFFFFFF, math.random(0, 0xFFFFFFFF), 255.0, -5 })
+        local bot = T_pick({ 0x203040FF, 0xFFFFFF00, math.random(0, 0xFFFFFFFF), 1 << 61, 4096.0 })
+        local nb = T_pick({ 4, 7, 10, 0, 16, 4.0, math.random(1, 15) })
+        local okb, cols = pcall(bands, top, bot, nb)
+        if not okb then
+          check(pcall(blend_colors, top, bot, 0.5 / nb) and "memo errors, direct call does not" or nil,
+            ("bands(%s, %s, %s)"):format(tostring(top), tostring(bot), tostring(nb)))
+        elseif cols ~= nil then
+          for i = 0, nb - 1 do
+            check(T_same(blend_colors(top, bot, (i + 0.5) / nb), cols[i + 1], "band"),
+              ("bands(%s, %s, %s)[%d]"):format(tostring(top), tostring(bot), tostring(nb), i))
+          end
+          check(cols[nb + 1] ~= nil and "extra band" or nil, "bands")
+        end
+        if memo.n < prev_n then resets = resets + 1 end
+        prev_n = memo.n
+        if memo.n > peak then peak = memo.n end
+        if #out > 10 then break end
+      end
+      check(resets < 3 and ("memo cleared only " .. resets .. " times") or nil, "reset")
+      check(peak > 2048 and ("memo grew to " .. peak) or nil, "bound")
+      return table.concat(out, "\n")
+    ''')
+    assert bad == ""
+
+
+def test_candidate_square_draws_match_previous_implementation():
+    L = _runtime()
+    L.execute(REF_CANDIDATES)
+    L.execute(GEN_CANDIDATES)
+    L.execute(REF_SQUARE)
+    L.execute(DRAW_RECORDER)
+    bad = L.execute(r'''
+      math.randomseed(37)
+      local out = {}
+      local FIXED = {}
+      for i = 1, 8 do
+        FIXED[i] = { path = "/ext/f" .. i .. ".wav", dominant_freq = 50.0 * i * i, brightness = T_pick({ 0.3, nil }),
+          sub_weight = 0.1 * i, effective_duration = 0.2 }
+      end
+      local function rnd_entry()
+        local k = math.random(1, 4)
+        if k == 1 then return T_pick(FIXED) end
+        if k == 2 then return T_pick({ nil, {}, { path = "" }, { path = "/lib/s" .. math.random(1, 6) .. ".wav" } }) end
+        return { path = "/ext/r.wav", dominant_freq = T_pick({ math.random() * 12000, math.random(1, 9000), 0, -1.0, 0/0, nil }),
+          brightness = T_pick({ math.random() * 3000, math.random(), 0, 7, nil }),
+          sub_weight = T_pick({ math.random() * 2 - 0.5, 1, nil }), effective_duration = 0.1 }
+      end
+      local function rnd_scale()
+        if math.random(1, 3) == 1 then return nil end
+        return { bright_lo = T_pick({ 100.0, 0.1, nil }), bright_hi = T_pick({ 2500.0, 0.9, 0.1, nil }),
+          weight_lo = T_pick({ 0.0, 0.5, nil }), weight_hi = T_pick({ 1.0, 0.5, 2 }) }
+      end
+      local saved_numbers = state.seq_candidate_show_numbers
+      for trial = 1, 6000 do
+        local box = seq_box(math.random() * 400, T_pick({ 3.0, 10.5, math.random() * 50 }),
+          T_pick({ 3.5, 4, 12.0, math.random() * 30 }), T_pick({ 3.0, 4.4, 9.6, 12.0, 24, math.random() * 30 }))
+        local entry = rnd_entry()
+        local active, hovered = math.random(1, 3) == 1, math.random(1, 3) == 1
+        local scale = rnd_scale()
+        local slot_n = T_pick({ nil, 1, 7, 12 })
+        local alpha = T_pick({ nil, 1.0, 1, 0, 0.35, math.random(), 1.7, -2, "0.5", "x" })
+        state.seq_candidate_show_numbers = T_pick({ true, false, nil })
+        T_DRAWS = {}
+        local okr, er = pcall(ref_seq_draw_sample_candidate_square, {}, box, T_deep_copy(entry), active, hovered,
+          T_deep_copy(scale), slot_n, alpha)
+        local want = T_DRAWS
+        T_DRAWS = {}
+        local okn, en = pcall(seq_draw_sample_candidate_square, {}, box, T_deep_copy(entry), active, hovered,
+          T_deep_copy(scale), slot_n, alpha)
+        local e = (okr ~= okn) and ("error mismatch " .. tostring(er) .. " / " .. tostring(en))
+          or T_same(want, T_DRAWS, "draws")
+        if e then
+          out[#out + 1] = ("trial %d: %s"):format(trial, e)
+          if #out > 10 then break end
+        end
+      end
+      state.seq_candidate_show_numbers = saved_numbers
+      return table.concat(out, "\n")
+    ''')
+    assert bad == ""
