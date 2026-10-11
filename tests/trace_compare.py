@@ -360,6 +360,95 @@ state.seq_layering_slot_id = 4
 frames("layering open", pos)
 state.seq_tracks[4].layers.sustain.blend = { 0.2, 0.3, 0.5 }
 frames("layering edit", pos)
+-- ==== Track panel block (sequencer track panel perf pass) ================
+-- The track label/mix column in both views: hovers, clicks and fader drags
+-- on M/S/vol/pan/MIDI/layering/overlap/envelope/candidate squares/nav,
+-- candidate rows that are full, have a hole or are missing, solo/overlap,
+-- an active envelope, layering forced on/off and malformed, MIDI learn,
+-- alt-click removal (slide animation) and a sample dragged over squares.
+-- In the stub every panel row sits at the same place, so a click hits that
+-- control on every track.
+do
+  -- Clicks below save the config (after a delay) and the library cache next
+  -- to the script; keep those writes in this run's temp folder so the
+  -- checkout stays clean and the next run starts the same.
+  CONFIG_PATH = RES .. "/SampleMapBrowser.json"
+  DATA_PATH = RES .. "/SampleMapData.json"
+  DATA_LUA_PATH = RES .. "/SampleMapData.cache.lua"
+  state.seq_layering_slot_id = nil
+  ALT_DOWN = false
+  rawset(reaper, "JS_Mouse_GetState", function() return ALT_DOWN and 16 or 0 end)
+  -- SetTooltip goes through the hint card, which the stub never draws; put
+  -- the requested text in the trace so tooltips are compared too.
+  local raw_hint_request = hint_request
+  hint_request = function(c, text, ...)
+    if TRACE_ON then TRACE[#TRACE + 1] = "HINT " .. tostring(text):gsub("\n", "\\n") end
+    return raw_hint_request(c, text, ...)
+  end
+  local tr = state.seq_tracks
+  tr[5].sample_candidates = {}
+  for i = 1, 12 do tr[5].sample_candidates[i] = { path = samples[100 + i].path, brightness = i * 0.07 } end
+  tr[5].sample_candidate_idx = 12
+  tr[6].sample_candidates = { { path = samples[60].path }, {}, { path = samples[61].path }, { path = "" } }
+  tr[6].sample_candidate_idx = 3
+  tr[7].sample_candidates = nil
+  tr[7]._cand_norm = nil
+  tr[3].solo = true
+  tr[8].overlap = true
+  tr[9].env = { points = { { t = 0.0, amp = 0.2 }, { t = 0.05, amp = 1.4, curve = 0.4 }, { t = 0.4, amp = 0.0 } } }
+  tr[10].layers = { output = "layered", linked = true,
+    transient = { verts = { {}, { path = samples[70].path, len = 0.2 }, {} }, blend = { 1 / 3, 1 / 3, 1 / 3 }, gain = 2 },
+    unlinked_sustain = { blend = { 0.7, 0.2, 0.1 } } }
+  tr[9].layers = { output = "original", tail_end = 0.3 }
+  tr[8].layers = "bad"
+  tr[7].layers = { transient = { verts = { { path = samples[7].path }, { path = samples[71].path } }, blend = { 0.2, 0.8, 0 } } }
+
+  state.active_view = "sample_map"
+  local panel = { { 10, 30 }, { 28, 30 }, { 200, 30 }, { 500, 30 }, { 680, 30 }, { 705, 30 }, { 725, 30 },
+    { 300, 50 }, { 670, 10 }, { 690, 10 }, { 705, 10 }, { 725, 10 }, { 100, 10 }, { 745, 30 }, { 770, 30 }, { 790, 30 } }
+  frames("panel hover", panel)
+  frames("panel click mute", { { 10, 30 } }, { clicked = true })
+  frames("panel click solo", { { 28, 30 } }, { clicked = true })
+  frames("panel click overlap", { { 725, 30 } }, { clicked = true })
+  frames("panel click cand", { { 725, 10 } }, { clicked = true })
+  frames("panel after clicks", panel)
+  frames("panel vol drag", { { 200, 30 }, { 230, 30 }, { 260, 30 }, { 120, 30 } }, { down = true })
+  frames("panel vol release", { { 120, 30 } })
+  frames("panel pan drag", { { 500, 30 }, { 450, 30 } }, { down = true })
+  frames("panel pan release", still)
+  state.seq_midi_learn_slot_id = tr[2].id
+  frames("panel midi learn", { { 680, 30 }, { -100, -100 } })
+  state.seq_midi_learn_slot_id = nil
+  ALT_DOWN = true
+  frames("panel alt hover", { { 670, 10 } })
+  frames("panel alt click", { { 690, 10 } }, { clicked = true })
+  ALT_DOWN = false
+  frames("panel slide", { { 670, 10 }, { 670, 10 }, { 690, 10 }, { 690, 10 }, { -100, -100 }, { -100, -100 } })
+  state.pending_waveform_drop = samples[90]
+  frames("panel drag over", { { 690, 10 }, { 705, 10 }, { 770, 30 } })
+  state.pending_waveform_drop = nil
+  state.seq_candidate_drop = nil
+  state.seq_drop_target_idx = nil
+  state.seq_drum_drop = nil
+  frames("panel click env", { { 300, 50 } }, { clicked = true })
+  frames("panel env open", { { 300, 50 } })
+  frames("panel click env again", { { 300, 50 } }, { clicked = true })
+  frames("panel click layering", { { 705, 30 } }, { clicked = true })
+  frames("panel layering open", panel)
+
+  state.active_view = "sequencer"
+  local lane = { { 10, 32 }, { 24, 32 }, { 55, 32 }, { 90, 32 }, { 125, 32 }, { 146, 32 }, { 160, 32 },
+    { 110, 15 }, { 127, 15 }, { 144, 15 }, { 160, 15 }, { 50, 15 }, { 10, 234 }, { 55, 234 }, { 127, 217 } }
+  frames("lane hover", lane)
+  frames("lane click mute", { { 10, 32 } }, { clicked = true })
+  frames("lane click overlap", { { 160, 32 } }, { clicked = true })
+  frames("lane click cand", { { 160, 15 } }, { clicked = true })
+  frames("lane vol drag", { { 55, 32 }, { 70, 32 }, { 40, 32 } }, { down = true })
+  frames("lane after", lane)
+  state.seq_layering_slot_id = nil
+  hint_request = raw_hint_request
+end
+-- ==== end track panel block ==============================================
 state.seq_layering_slot_id = nil
 ARRANGE_END = 10
 state.seq_view_start_qn = 0
