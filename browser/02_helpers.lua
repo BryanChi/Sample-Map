@@ -555,19 +555,28 @@ function build_color(r, g, b, a)
   return 0xFF000000 | (math.floor(r) << 16) | (math.floor(g) << 8) | math.floor(b)
 end
 
+-- The colour helpers run thousands of times per frame, so they use local
+-- math functions and, for integer colours (the usual case), bit operations.
+-- Both give the same results as the float arithmetic they replace.
+local floor = math.floor
+local math_type = math.type
+
 -- Extract RGB components from RRGGBBAA format color
 function extract_rgb_rrgbbaa(color)
   if not color then return 0, 0, 0 end
-  local r = math.floor((color / 16777216) % 256)   -- Extract red (first byte)
-  local g = math.floor((color / 65536) % 256)     -- Extract green
-  local b = math.floor((color / 256) % 256)       -- Extract blue
+  if math_type(color) == "integer" then
+    return (color >> 24) & 255, (color >> 16) & 255, (color >> 8) & 255
+  end
+  local r = floor((color / 16777216) % 256)   -- Extract red (first byte)
+  local g = floor((color / 65536) % 256)     -- Extract green
+  local b = floor((color / 256) % 256)       -- Extract blue
   return r, g, b
 end
 
 -- Build RRGGBBAA color from RGB components (0-255) and alpha (0-255, default 255)
 function build_color_rrgbbaa(r, g, b, a)
   a = a or 255
-  return (math.floor(r) * 16777216) + (math.floor(g) * 65536) + (math.floor(b) * 256) + math.floor(a)
+  return (floor(r) * 16777216) + (floor(g) * 65536) + (floor(b) * 256) + floor(a)
 end
 
 -- Extract RGB from RRGGBB color (24-bit)
