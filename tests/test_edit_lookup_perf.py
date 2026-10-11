@@ -599,3 +599,134 @@ def test_json_encode_same_bytes_through_cache_resets():
       return table.concat(bad, ", ")
     ''')
     assert out == ""
+
+
+# The undo deep compare before key counts of snapshot tables were recorded.
+OLD_UNDO_EQUAL = r'''
+local function old_numbers_equal(a, b)
+  if a ~= a or b ~= b then
+    return a ~= a and b ~= b
+  end
+  return math.abs(a - b) < 0.000000001
+end
+function old_undo_values_equal(a, b)
+  if a == b then
+    return true
+  end
+  local ta = type(a)
+  if ta ~= type(b) then
+    return false
+  end
+  if ta == "number" then
+    return old_numbers_equal(a, b)
+  end
+  if ta ~= "table" then
+    return false
+  end
+  for k, v in pairs(a) do
+    local w = b[k]
+    if v ~= w then
+      local tv = type(v)
+      if tv == "table" then
+        if type(w) ~= "table" or not old_undo_values_equal(v, w) then
+          return false
+        end
+      elseif tv ~= "number" or type(w) ~= "number" or not old_numbers_equal(v, w) then
+        return false
+      end
+    end
+  end
+  for k in pairs(b) do
+    if a[k] == nil then
+      return false
+    end
+  end
+  return true
+end
+'''
+
+
+def test_undo_compare_matches_old_compare_on_snapshots_and_live_tables():
+    # Snapshot tables get their key counts recorded at capture; compares
+    # against them walk the other side only. Random documents, captured and
+    # then edited in every way that matters to the compare (tiny and real
+    # number changes, NaN, signed zero, infinities, integer/float, integer
+    # wrap-around, type changes, added and removed keys, nesting), compared at
+    # every level and in both argument orders against the old compare.
+    L = _runtime(False)
+    out = run(L, OLD_UNDO_EQUAL + r'''
+      math.randomseed(77)
+      local leaves = { 0, 0.0, -0.0, 1, 1.0, 2, 0.25, 1e-10, 0.000000001, 0/0, math.huge, -math.huge,
+        math.maxinteger, math.mininteger, -1, "a", "b", true, false }
+      local function rleaf() return leaves[math.random(1, #leaves)] end
+      local function rtable(depth)
+        local t = {}
+        for i = 1, math.random(0, 6) do
+          local k = math.random() < 0.5 and ("k" .. math.random(1, 9)) or math.random(1, 9)
+          if depth < 3 and math.random() < 0.4 then t[k] = rtable(depth + 1) else t[k] = rleaf() end
+        end
+        return t
+      end
+      local function tables_in(t, acc)
+        acc[#acc + 1] = t
+        for _, v in pairs(t) do if type(v) == "table" then tables_in(v, acc) end end
+        return acc
+      end
+      local function mutate(root)
+        local all = tables_in(root, {})
+        local t = all[math.random(1, #all)]
+        local keys = {}
+        for k in pairs(t) do keys[#keys + 1] = k end
+        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+        local k = keys[math.random(1, math.max(1, #keys))]
+        local p = math.random(1, 10)
+        if k == nil or p == 1 then
+          t["new" .. math.random(1, 3)] = rleaf()
+        elseif p == 2 then
+          t[k] = nil
+        elseif p == 3 and type(t[k]) == "number" then
+          t[k] = t[k] + ({ 1e-10, 0.000000001, 1e-8 })[math.random(1, 3)]
+        elseif p == 4 and type(t[k]) == "number" then
+          t[k] = (math.type(t[k]) == "integer") and (t[k] + 0.0) or t[k]
+        elseif p == 5 then
+          t[k] = rtable(2)
+        elseif p == 6 and type(t[k]) == "number" then
+          t[k] = -t[k]
+        else
+          t[k] = rleaf()
+        end
+      end
+      local bad, checked = {}, 0
+      local function check(a, b, where)
+        checked = checked + 1
+        local n, o = seq_undo_values_equal(a, b), old_undo_values_equal(a, b)
+        if n ~= o then bad[#bad + 1] = where end
+        if type(a) == "table" and type(b) == "table" then
+          for k, v in pairs(a) do
+            if type(v) == "table" and type(b[k]) == "table" then check(v, b[k], where .. "." .. tostring(k)) end
+          end
+        end
+      end
+      for trial = 1, 250 do
+        local doc = {}
+        for pid = 1, math.random(1, 4) do doc[tostring(pid)] = { notes = rtable(0), name = "p" .. pid } end
+        state.seq_patterns = doc
+        state.seq_tracks = { rtable(1) }
+        local snap = capture_seq_document_snapshot(nil)
+        for i = 1, math.random(0, 3) do mutate(doc) end
+        if math.random() < 0.3 then mutate(state.seq_tracks) end
+        check(snap.seq_patterns, doc, trial .. ":snap/live")
+        check(doc, snap.seq_patterns, trial .. ":live/snap")
+        check(snap.seq_tracks, state.seq_tracks, trial .. ":tracks")
+        local snap2 = capture_seq_document_snapshot(snap)
+        check(snap, snap2, trial .. ":snap/snap2")
+        check(snap2, snap, trial .. ":snap2/snap")
+        local other = clone_table_deep(doc)
+        if math.random() < 0.5 then mutate(other) end
+        check(other, doc, trial .. ":plain")
+        check(snap2.seq_patterns, other, trial .. ":snap2/plain")
+      end
+      return #bad == 0 and ("ok " .. checked) or table.concat(bad, " ")
+    ''')
+    assert out.startswith("ok "), out
+    assert int(out.split()[1]) > 2000

@@ -542,6 +542,76 @@ local function seq_undo_numbers_equal(a, b)
   return math.abs(a - b) < 0.000000001
 end
 
+-- Key counts of snapshot tables, taken when capture clones them. Snapshots are
+-- never mutated after capture, so the count stays right for as long as the
+-- table lives (weak keys: dropped with it).
+local seq_undo_snapshot_key_count = setmetatable({}, { __mode = "k" })
+
+-- Records the key counts of a freshly cloned snapshot table and every table
+-- inside it; parts shared with an earlier snapshot are already recorded.
+local function seq_undo_count_snapshot_keys(t)
+  if type(t) ~= "table" or seq_undo_snapshot_key_count[t] then
+    return
+  end
+  local n = 0
+  for _, v in next, t do
+    n = n + 1
+    if type(v) == "table" then
+      seq_undo_count_snapshot_keys(v)
+    end
+  end
+  seq_undo_snapshot_key_count[t] = n
+end
+
+-- Two distinct tables: every key of one is in the other with an equal value
+-- (numbers within 1e-9), and both have as many keys. Equality is symmetric,
+-- so when one side's key count is recorded the other side is the one walked
+-- and the recorded count replaces the second pass over its keys.
+local seq_undo_tables_equal
+local seq_undo_abs = math.abs
+seq_undo_tables_equal = function(a, b)
+  local counts = seq_undo_snapshot_key_count
+  local nb = counts[b]
+  if nb == nil then
+    local na = counts[a]
+    if na ~= nil then
+      a, b, nb = b, a, na
+    end
+  end
+  local n = 0
+  for k, v in next, a do
+    n = n + 1
+    local w = b[k]
+    if v ~= w then
+      local tv = type(v)
+      if tv == "table" then
+        if type(w) ~= "table" or not seq_undo_tables_equal(v, w) then
+          return false
+        end
+      elseif tv ~= "number" or type(w) ~= "number" then
+        return false
+      elseif v ~= v or w ~= w then
+        -- NaN only equals NaN.
+        if v == v or w == w then
+          return false
+        end
+      elseif seq_undo_abs(v - w) >= 0.000000001 then
+        return false
+      end
+    end
+  end
+  if nb ~= nil then
+    return n == nb
+  end
+  for _ in next, b do
+    n = n - 1
+    if n < 0 then
+      return false
+    end
+  end
+  return n == 0
+end
+
 -- Deep equality, numbers within 1e-9. Leaf values are compared inline: this
 -- runs over the whole sequencer document on every undoable edit.
 function seq_undo_values_equal(a, b)
@@ -558,25 +628,7 @@ function seq_undo_values_equal(a, b)
   if ta ~= "table" then
     return false
   end
-  for k, v in pairs(a) do
-    local w = b[k]
-    if v ~= w then
-      local tv = type(v)
-      if tv == "table" then
-        if type(w) ~= "table" or not seq_undo_values_equal(v, w) then
-          return false
-        end
-      elseif tv ~= "number" or type(w) ~= "number" or not seq_undo_numbers_equal(v, w) then
-        return false
-      end
-    end
-  end
-  for k in pairs(b) do
-    if a[k] == nil then
-      return false
-    end
-  end
-  return true
+  return seq_undo_tables_equal(a, b)
 end
 
 SEQ_UNDO_SNAPSHOT_TABLES = { "seq_tracks", "seq_regions", "seq_kit_history", "seq_razors" }
@@ -605,6 +657,7 @@ function capture_seq_document_snapshot(base)
       snap[key] = prev
     else
       snap[key] = clone_table_deep(live)
+      seq_undo_count_snapshot_keys(snap[key])
       same = false
     end
   end
@@ -628,9 +681,12 @@ function capture_seq_document_snapshot(base)
       end
     end
     snap.seq_patterns = reused_all and prev_patterns or patterns
+    -- Counts the cloned patterns and the new pattern map; shared ones are done.
+    seq_undo_count_snapshot_keys(snap.seq_patterns)
     same = same and reused_all
   else
     snap.seq_patterns = clone_table_deep(live_patterns)
+    seq_undo_count_snapshot_keys(snap.seq_patterns)
     same = same and live_patterns == nil and prev_patterns == nil
   end
   for _, key in ipairs(SEQ_UNDO_SNAPSHOT_SCALARS) do
@@ -645,7 +701,9 @@ function capture_seq_document_snapshot(base)
   return snap
 end
 
-function restore_seq_document_snapshot(snap)
+-- same (optional): live pattern -> snapshot pattern pairs already known to be
+-- equal (seq_undo_plan_resync), so they are not compared again.
+function restore_seq_document_snapshot(snap, same)
   if type(snap) ~= "table" then
     return
   end
@@ -660,7 +718,7 @@ function restore_seq_document_snapshot(snap)
   local patterns = {}
   for pid, pat in pairs(snap.seq_patterns or {}) do
     local cur = type(live_patterns) == "table" and live_patterns[pid] or nil
-    if cur ~= nil and seq_undo_values_equal(cur, pat) then
+    if cur ~= nil and ((same and same[cur] == pat) or seq_undo_values_equal(cur, pat)) then
       patterns[pid] = cur
     else
       patterns[pid] = clone_table_deep(pat)
@@ -743,7 +801,9 @@ end
 
 -- Compare live sequencer state to a snapshot and return the cheapest arrange update.
 -- full: rebuild every region. Otherwise delete items for remove_ids and recreate sync_ids.
-function seq_undo_plan_resync(from_state, to_snap)
+-- same (optional table): gets same[from_pattern] = to_pattern for every
+-- pattern pair found equal, for restore_seq_document_snapshot to reuse.
+function seq_undo_plan_resync(from_state, to_snap, same)
   local remove_ids = {}
   local sync_ids = {}
   local mix = false
@@ -771,15 +831,20 @@ function seq_undo_plan_resync(from_state, to_snap)
   local from_regs = seq_undo_index_by_id(from_state.seq_regions)
   local to_regs = seq_undo_index_by_id(to_snap.seq_regions)
   local changed_patterns = {}
+  -- Each pattern id is compared once, however many regions use it.
+  local considered = {}
   local function consider_pattern(pid)
-    if not pid or changed_patterns[pid] then
+    if not pid or considered[pid] then
       return
     end
+    considered[pid] = true
     local key = tostring(pid)
     local from_pat = from_state.seq_patterns and from_state.seq_patterns[key]
     local to_pat = to_snap.seq_patterns and to_snap.seq_patterns[key]
     if not seq_undo_values_equal(from_pat, to_pat) then
       changed_patterns[pid] = true
+    elseif same and type(from_pat) == "table" and type(to_pat) == "table" then
+      same[from_pat] = to_pat
     end
   end
   for _, reg in ipairs(from_state.seq_regions or {}) do
@@ -866,8 +931,9 @@ function apply_seq_undo_snapshot(snap, label)
 end
 
 function seq_apply_undo_snapshot_body(snap, label, guard)
-  local remove_ids, sync_ids, mix, full = seq_undo_plan_resync(state, snap)
-  restore_seq_document_snapshot(snap)
+  local same_patterns = {}
+  local remove_ids, sync_ids, mix, full = seq_undo_plan_resync(state, snap, same_patterns)
+  restore_seq_document_snapshot(snap, same_patterns)
   seq_undo_begin_reaper()
   guard.block = true
   if r.PreventUIRefresh then
