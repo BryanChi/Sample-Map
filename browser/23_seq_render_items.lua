@@ -188,15 +188,21 @@ function seq_note_lod_length_qn(note, step_qn)
 end
 
 function seq_active_cell_has_visual_start(active, start_qn, col, step_qn)
-  local pack = seq_active_cell_notes(active)
-  if not pack then
+  if not active then
     return false
   end
+  -- seq_active_cell_notes(active), without allocating { active } for a
+  -- one-note cell.
+  local pack = active.pack
   step_qn = step_qn or 0.25
   local cell_qn = (start_qn or 0.0) + (col or 0) * step_qn
   local cell_end = cell_qn + step_qn
-  for i = 1, #pack do
-    local vis = seq_entry_vis_qn(pack[i])
+  for i = 1, pack and #pack or 1 do
+    local entry = active
+    if pack then
+      entry = pack[i]
+    end
+    local vis = seq_entry_vis_qn(entry)
     if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
       return true
     end
@@ -354,7 +360,7 @@ function seq_note_draw_length_qn(region, pattern, slot, track_id, step_idx, note
 end
 
 function seq_note_draw_length_qn_uncached(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
-  local len = seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
+  local len, trig = seq_effective_note_length_trig_qn(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn)
   local decay_qn = tonumber(note and note.decay_qn)
   if type(decay_qn) == "number" and decay_qn > 1e-9 then
     return len
@@ -369,7 +375,21 @@ function seq_note_draw_length_qn_uncached(region, pattern, slot, track_id, step_
   if sample_qn and sample_qn > grid_qn + 1e-9 then
     len = math.max(len or 0, grid_qn)
   end
-  return seq_cap_length_to_region_end_qn(len, region, step_idx, note, grid_qn)
+  -- seq_cap_length_to_region_end_qn(len, region, step_idx, note, grid_qn),
+  -- reusing the trigger seq_effective_note_length_trig_qn already computed
+  -- with the same arguments.
+  if not region or not len or len <= 0 then
+    return len
+  end
+  local start_qn = trig
+  if start_qn == nil then
+    start_qn = seq_note_trigger_qn(region, step_idx, note, grid_qn)
+  end
+  local remain = seq_region_end_qn(region) - start_qn
+  if remain <= 0 then
+    return len
+  end
+  return math.min(len, remain)
 end
 
 function seq_note_head_end_x(qn_to_x, note_abs_qn, note, step_qn)

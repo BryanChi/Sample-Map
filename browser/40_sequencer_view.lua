@@ -939,12 +939,13 @@ function render_sequencer_map()
 
       local note_clip = push_timeline_clip(row_y0, row_y1)
       if not seq_lod_skip_cell_grid then
-        for col = vis_col0, vis_col1 do
-          if col % 2 == 1 then
-            local cx0 = col_x0(col)
-            local cx1 = col_x1(col)
-            r.ImGui_DrawList_AddRectFilled(dl, cx0, row_y0, cx1, row_y1, seq_lane_color_with_alpha(lane_style.accent, 16), 0)
-          end
+        -- Odd columns only; col_x0/col_x1 inlined, colour built once per row.
+        local grid_fill = seq_lane_color_with_alpha(lane_style.accent, 16)
+        local add_rect_filled = r.ImGui_DrawList_AddRectFilled
+        for col = vis_col0 + ((vis_col0 % 2 == 1) and 0 or 1), vis_col1, 2 do
+          local cx0 = timeline_x0 + (((start_qn + col * step_qn) - view_start_qn) / qn_span) * timeline_w
+          local cx1 = timeline_x0 + (((start_qn + (col + 1) * step_qn) - view_start_qn) / qn_span) * timeline_w
+          add_rect_filled(dl, cx0, row_y0, cx1, row_y1, grid_fill, 0)
         end
       end
       -- Shift insert preview is drawn under notes so a later hit stays on top.
@@ -984,27 +985,14 @@ function render_sequencer_map()
         (slot.sample_path and find_sample_by_path(slot.sample_path))
         or seq_effective_slot_sample(slot, region)
       )
-      local slot_cells = active_cells[slot.id]
-      for col = vis_col0, vis_col1 do
-        local active = slot_cells and slot_cells[col]
-        if active and seq_active_cell_has_visual_start(active, start_qn, col, step_qn) then
-          seq_draw_unfocused_note_marks(
-            dl, active, row_y0, row_y1, selected_region_id, step_qn, qn_to_x, start_qn, col, track_note_color
-          )
-          if seq_lod_simple_notes then
-            seq_draw_lane_notes_lod(
-              dl, active, row_y0, row_y1, selected_region_id, step_qn, qn_to_x, start_qn, col, track_note_color
-            )
-          else
-            seq_draw_lane_packed_notes(
-              dl, slot, active, row_y0, row_y1, col_x0(col), col_x1(col),
-              selected_region_id, now_t, step_qn, qn_to_x,
-              edit_def, edit_style, mx, my, hover_on_razor,
-              row_hover_qn, start_qn, col
-            )
-          end
-        end
-      end
+      -- Per column: seq_active_cell_has_visual_start, seq_draw_unfocused_note_marks,
+      -- then seq_draw_lane_notes_lod / seq_draw_lane_packed_notes.
+      seq_draw_note_row_cells(
+        dl, slot, active_cells[slot.id], vis_col0, vis_col1, row_y0, row_y1, selected_region_id,
+        now_t, step_qn, start_qn, qn_to_x, timeline_x0, view_start_qn, qn_span, timeline_w,
+        seq_lod_simple_notes, track_note_color,
+        edit_def, edit_style, mx, my, hover_on_razor, row_hover_qn
+      )
       seq_draw_lane_delete_anims(
         dl, slot, row_y0, row_y1, now_t, step_qn, qn_to_x,
         timeline_x0, timeline_x1, selected_region_id
@@ -1057,28 +1045,14 @@ function render_sequencer_map()
       end
 
       local param_clip = push_timeline_clip(row_y0, row_y1)
-      local slot_cells = active_cells[slot.id]
-      for col = vis_col0, vis_col1 do
-        local cx0 = col_x0(col)
-        local cx1 = col_x1(col)
-        if not seq_lod_skip_cell_grid and col % 2 == 1 then
-          r.ImGui_DrawList_AddRectFilled(dl, cx0, row_y0, cx1, row_y1, seq_lane_color_with_alpha(lane_style.accent, 16), 0)
-        end
-        local active = slot_cells and slot_cells[col]
-        if active and seq_active_cell_has_visual_start(active, start_qn, col, step_qn) then
-          if seq_lod_simple_notes then
-            seq_draw_param_lane_notes_lod(
-              dl, ctx, active, def, selected_region_id, start_qn, col, step_qn,
-              qn_to_x, lane_top, lane_bot, is_stutter_lane, lane_style
-            )
-          else
-            seq_draw_param_lane_packed_notes(
-              dl, ctx, slot, active, def, selected_region_id, start_qn, col, step_qn,
-              qn_to_x, cx0, cx1, lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region
-            )
-          end
-        end
-      end
+      -- Per column: odd-column grid fill, seq_active_cell_has_visual_start, then
+      -- seq_draw_param_lane_notes_lod / seq_draw_param_lane_packed_notes.
+      seq_draw_param_row_cells(
+        dl, ctx, slot, active_cells[slot.id], vis_col0, vis_col1, def, row_y0, row_y1,
+        selected_region_id, start_qn, step_qn, qn_to_x, timeline_x0, view_start_qn, qn_span, timeline_w,
+        seq_lod_simple_notes, (not seq_lod_skip_cell_grid) and seq_lane_color_with_alpha(lane_style.accent, 16) or nil,
+        lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region
+      )
       pop_timeline_clip(param_clip)
     else
       r.ImGui_DrawList_AddText(dl, x0 + 8, row_y0 + 8, UI_THEME.text_dim, "No sequencer tracks configured")

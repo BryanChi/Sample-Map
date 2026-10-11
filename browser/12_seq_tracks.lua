@@ -901,6 +901,28 @@ function seq_clone_region_track_samples(src)
 end
 
 function seq_effective_slot_sample_path(slot, region)
+  -- While the sequencer rows draw (seq_trigger_memo set; tracks, regions and
+  -- notes are only read there) every drawn note of a row asks this for the
+  -- same slot and region; remember the last answer.
+  local memo = seq_trigger_memo
+  if memo then
+    local last = memo.eff_path
+    if last then
+      if last[1] == slot and last[2] == region then
+        return last[3], last[4]
+      end
+    else
+      last = {}
+      memo.eff_path = last
+    end
+    local path, name = seq_effective_slot_sample_path_uncached(slot, region)
+    last[1], last[2], last[3], last[4] = slot, region, path, name
+    return path, name
+  end
+  return seq_effective_slot_sample_path_uncached(slot, region)
+end
+
+function seq_effective_slot_sample_path_uncached(slot, region)
   local rec = seq_get_region_track_sample(region, slot and slot.id)
   if rec then
     return rec.path, rec.name

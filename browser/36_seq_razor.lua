@@ -743,6 +743,29 @@ function seq_note_item_x_range(note, slot, region, pattern, step_idx, cell_qn, s
   if not note or not qn_to_x then
     return nil, nil
   end
+  -- While rows draw (seq_trigger_memo set; notes are read-only there) every
+  -- parameter lane of a track asks for the same note's range with the same
+  -- arguments (cell_x1 is not used).
+  local memo = seq_trigger_memo
+  if memo and type(note) == "table" then
+    local by_note = memo.item_x
+    if not by_note then
+      by_note = {}
+      memo.item_x = by_note
+    end
+    local e = by_note[note]
+    if e and e[1] == slot and e[2] == region and e[3] == pattern and e[4] == step_idx
+        and e[5] == cell_qn and e[6] == step_qn and e[7] == qn_to_x then
+      return e[8], e[9]
+    end
+    local x0, x1 = seq_note_item_x_range_uncached(note, slot, region, pattern, step_idx, cell_qn, step_qn, qn_to_x)
+    by_note[note] = { slot, region, pattern, step_idx, cell_qn, step_qn, qn_to_x, x0, x1 }
+    return x0, x1
+  end
+  return seq_note_item_x_range_uncached(note, slot, region, pattern, step_idx, cell_qn, step_qn, qn_to_x)
+end
+
+function seq_note_item_x_range_uncached(note, slot, region, pattern, step_idx, cell_qn, step_qn, qn_to_x)
   local _, resolved_sample = seq_resolve_note_sample(note, slot, nil, region, slot and slot.id, step_idx)
   local note_qn = cell_qn
   if region then
@@ -859,13 +882,24 @@ function seq_draw_param_lane_notes_lod(dl, ctx, active, def, selected_region_id,
   end
 end
 
-function seq_draw_param_lane_packed_notes(dl, ctx, slot, active, def, selected_region_id, start_qn, col, step_qn, qn_to_x, cx0, cx1, lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region)
-  local pack = seq_active_cell_notes(active)
-  if not pack then
+-- row_ctx (optional, from seq_draw_param_row_cells): one table per row holding
+-- region = get_seq_region_by_id(selected_region_id), which is every drawn
+-- note's own region lookup (only selected-region notes are drawn); the
+-- pattern of that region is then looked up once per row (get_seq_pattern only
+-- fills in a missing notes table, so later calls change nothing).
+function seq_draw_param_lane_packed_notes(dl, ctx, slot, active, def, selected_region_id, start_qn, col, step_qn, qn_to_x, cx0, cx1, lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region, row_ctx)
+  if not active then
     return
   end
-  for pi = 1, #pack do
-    local entry = pack[pi]
+  -- seq_active_cell_notes(active) without allocating: a cell without .pack
+  -- stands for { active }.
+  local pack = active.pack
+  local pack_n = pack and #pack or 1
+  for pi = 1, pack_n do
+    local entry = active
+    if pack then
+      entry = pack[pi]
+    end
     local note = entry.note
     if type(note) == "table" and entry.region_id == selected_region_id then
       local cell_selected = true
@@ -881,10 +915,25 @@ function seq_draw_param_lane_packed_notes(dl, ctx, slot, active, def, selected_r
       if note_qn < cell_qn - 1e-9 then
         -- Occupancy-only cell for a spanning stutter; draw from the start cell.
       else
-      local cell_reg = get_seq_region_by_id(entry.region_id) or seq_region_at_qn(note_qn) or region
-      local pattern = get_seq_pattern(cell_reg and cell_reg.pattern_id, false)
+      local cell_reg
+      if row_ctx then
+        cell_reg = row_ctx.region or seq_region_at_qn(note_qn) or region
+      else
+        cell_reg = get_seq_region_by_id(entry.region_id) or seq_region_at_qn(note_qn) or region
+      end
+      local pattern
+      if row_ctx and row_ctx.has_pattern and cell_reg == row_ctx.pattern_region then
+        pattern = row_ctx.pattern
+      else
+        pattern = get_seq_pattern(cell_reg and cell_reg.pattern_id, false)
+        if row_ctx and cell_reg ~= nil and cell_reg == row_ctx.region then
+          row_ctx.has_pattern = true
+          row_ctx.pattern_region, row_ctx.pattern = cell_reg, pattern
+        end
+      end
+      -- The last argument (cell_x1) is not used by seq_note_item_x_range.
       local item_x0, item_x1 = seq_note_item_x_range(
-        note, slot, cell_reg, pattern, entry.key, note_qn, step_qn, qn_to_x, qn_to_x(note_qn + step_qn)
+        note, slot, cell_reg, pattern, entry.key, note_qn, step_qn, qn_to_x, nil
       )
       if not item_x0 then
         item_x0, item_x1 = cx0 + 2, cx1 - 2
@@ -909,6 +958,117 @@ function seq_draw_param_lane_packed_notes(dl, ctx, slot, active, def, selected_r
       if note_fx and note_fx.kind == "sync" then
         draw_seq_note_sync_flash(dl, item_x0, lane_top, item_x1, lane_bot, note_fx.t)
       end
+      end
+    end
+  end
+end
+
+-- One parameter row's cells, exactly as render_sequencer_map used to draw them
+-- column by column: the odd-column grid fill (grid_fill; nil when the grid is
+-- skipped), then for each cell holding a note start (the
+-- seq_active_cell_has_visual_start test) seq_draw_param_lane_notes_lod (lod)
+-- or seq_draw_param_lane_packed_notes. The value-bar colours and baseline
+-- are built once per row and qn_to_x / col_x0 / col_x1 are inlined with the
+-- closures' own expressions (tx0 + ((qn - view_qn) / span_qn) * tw).
+function seq_draw_param_row_cells(dl, ctx, slot, slot_cells, col_lo, col_hi, def, row_y0, row_y1,
+    selected_region_id, start_qn, step_qn, qn_to_x, tx0, view_qn, span_qn, tw, lod, grid_fill,
+    lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region)
+  local add_rect_filled = r.ImGui_DrawList_AddRectFilled
+  local math_max, math_min, math_abs = math.max, math.min, math.abs
+  local accent = lane_style.accent
+  local key, default = def.key, def.default
+  -- Row-invariant parts of draw_seq_param_value_bar(..., def, value, step_qn, accent, true).
+  local bar_bipolar, bar_base_y, bar_fill, bar_fill_neg, bar_cap
+  if lod and not is_stutter_lane then
+    bar_bipolar = def.min < 0
+    bar_base_y = lane_bot
+    if bar_bipolar then
+      bar_base_y = seq_param_y_from_value(def, 0.0, lane_top, lane_bot, step_qn)
+    end
+    bar_fill, bar_cap = seq_lane_param_fill_colors(accent, false, nil)
+    bar_fill_neg = seq_lane_param_fill_colors(accent, true, -1)
+  end
+  local row_ctx = nil
+  for col = col_lo, col_hi do
+    local cx0, cx1
+    if grid_fill and col % 2 == 1 then
+      cx0 = tx0 + (((start_qn + col * step_qn) - view_qn) / span_qn) * tw
+      cx1 = tx0 + (((start_qn + (col + 1) * step_qn) - view_qn) / span_qn) * tw
+      add_rect_filled(dl, cx0, row_y0, cx1, row_y1, grid_fill, 0)
+    end
+    local active = slot_cells and slot_cells[col]
+    if active then
+      -- seq_active_cell_notes(active) without allocating: a cell without
+      -- .pack stands for { active }.
+      local pack = active.pack
+      local n = pack and #pack or 1
+      local cell_qn = start_qn + col * step_qn
+      local cell_end = cell_qn + step_qn
+      local starts = false
+      for i = 1, n do
+        local e = active
+        if pack then
+          e = pack[i]
+        end
+        local vis = e and ((e.abs_qn or 0.0) + ((e.note and e.note.offset_qn) or 0.0)) or 0.0
+        if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+          starts = true
+          break
+        end
+      end
+      if starts then
+        if lod then
+          -- seq_draw_param_lane_notes_lod
+          for pi = 1, n do
+            local entry = active
+            if pack then
+              entry = pack[pi]
+            end
+            local note = entry and entry.note
+            if type(note) == "table" and entry.region_id == selected_region_id then
+              local vis = (entry.abs_qn or 0.0) + ((entry.note and entry.note.offset_qn) or 0.0)
+              if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+                local value = note[key]
+                if value == nil then value = default end
+                local item_x0 = tx0 + ((vis - view_qn) / span_qn) * tw
+                local end_qn = vis + seq_note_lod_length_qn(note, step_qn)
+                local item_x1 = math_max(item_x0 + 1.0, tx0 + ((end_qn - view_qn) / span_qn) * tw)
+                if is_stutter_lane then
+                  draw_seq_stutter_lane_cell(dl, ctx, item_x0, item_x1, lane_top, lane_bot, seq_param_value_for_drag(def, value, step_qn), accent)
+                else
+                  -- draw_seq_param_value_bar(dl, item_x0, item_x1, lane_top, lane_bot, def, value, step_qn, accent, true)
+                  value = seq_param_value_for_drag(def, value, step_qn)
+                  local py = seq_param_y_from_value(def, value, lane_top, lane_bot, step_qn)
+                  local fill_x1 = item_x1
+                  if fill_x1 <= item_x0 then
+                    fill_x1 = item_x0 + 1
+                  end
+                  local top_y = math_min(py, bar_base_y)
+                  local bot_y = math_max(py, bar_base_y)
+                  if math_abs(bot_y - top_y) < 2 then
+                    top_y = math_min(top_y, bot_y - 2)
+                  end
+                  local fill_col = (bar_bipolar and value ~= nil and value < 0) and bar_fill_neg or bar_fill
+                  add_rect_filled(dl, item_x0, top_y, fill_x1, bot_y, fill_col, 2.0)
+                  local cap_y = (py <= bar_base_y) and top_y or bot_y
+                  add_rect_filled(dl, item_x0, cap_y - 1, fill_x1, cap_y + 1, bar_cap, 1.0)
+                end
+              end
+            end
+          end
+        else
+          if not cx0 then
+            cx0 = tx0 + (((start_qn + col * step_qn) - view_qn) / span_qn) * tw
+            cx1 = tx0 + (((start_qn + (col + 1) * step_qn) - view_qn) / span_qn) * tw
+          end
+          if not row_ctx then
+            row_ctx = { region = get_seq_region_by_id(selected_region_id) }
+          end
+          seq_draw_param_lane_packed_notes(
+            dl, ctx, slot, active, def, selected_region_id, start_qn, col, step_qn,
+            qn_to_x, cx0, cx1, lane_top, lane_bot, base_y, bipolar, is_stutter_lane, lane_style, region, row_ctx
+          )
+        end
       end
     end
   end
@@ -1015,8 +1175,49 @@ function draw_seq_lock_spans(dl, slot, row_y0, row_y1, start_qn, step_qn, step_c
     end
     run_start = nil
   end
+  -- seq_visible_cell_is_locked per column (same tests, same order), with the
+  -- row's active cells and each region's locked-cell table looked up once:
+  -- nothing in this loop edits notes, patterns or regions. get_seq_pattern
+  -- only repairs a missing notes table, so calling it once per region is the
+  -- same as once per column.
+  local row_cells = slot and active_cells and active_cells[slot.id]
+  local reg_cells = nil
   for col = 0, step_count - 1 do
-    if seq_visible_cell_is_locked(slot, col, start_qn, step_qn, active_cells) then
+    local locked = false
+    if slot then
+      local active = row_cells and row_cells[col]
+      if active then
+        local pack = active.pack
+        if pack then
+          for i = 1, #pack do
+            if seq_note_is_locked(pack[i].note) then
+              locked = true
+              break
+            end
+          end
+        elseif seq_note_is_locked(active.note) then
+          locked = true
+        end
+      end
+      if not locked then
+        local cell_qn = start_qn + col * step_qn
+        local lock_reg = seq_region_at_qn(cell_qn)
+        if lock_reg then
+          if not reg_cells then
+            reg_cells = {}
+          end
+          local cells = reg_cells[lock_reg]
+          if cells == nil then
+            cells = seq_track_locked_cells(get_seq_pattern(lock_reg.pattern_id, false), slot.id, false) or false
+            reg_cells[lock_reg] = cells
+          end
+          if cells then
+            locked = cells[seq_region_step_key(lock_reg, cell_qn, step_qn)] == true
+          end
+        end
+      end
+    end
+    if locked then
       if not run_start then
         run_start = col
       end
