@@ -2311,14 +2311,19 @@ function save_samples()
   -- Compact JSON for companion scripts (Quick Swap, etc.)
   local function encode_samples_lines(list)
     local out = {"["}
-    for i, row in ipairs(list) do
-      out[#out + 1] = SampleCacheCodec.encode_row_json(row)
-      if i < #list then
-        out[#out + 1] = ",\n"
+    local n = 1
+    local count = #list
+    local encode_row_into = SampleCacheCodec.encode_row_json_into
+    for i = 1, count do
+      n = encode_row_into(list[i], out, n)
+      if i < count then
+        n = n + 1
+        out[n] = ",\n"
       end
     end
-    out[#out + 1] = "]"
-    return table.concat(out)
+    n = n + 1
+    out[n] = "]"
+    return table.concat(out, "", 1, n)
   end
 
   local ok_json_enc, json_str = pcall(function() return table.concat({
