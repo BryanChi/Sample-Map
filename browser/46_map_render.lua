@@ -21,10 +21,12 @@ end
 -- carry the scale labels, so the plot area itself stays clean.
 MAP_CANVAS = {
   plot_bg      = 0x0C100DFF,
+  plot_bg_deep = 0x09141AFF,
   gutter_bg    = 0x090C0AFF,
   gutter_edge  = 0x222B25FF,
   frame        = 0x26302AFF,
   glow         = 0x1EFF5E06,
+  glow_deep    = 0x3FD6E00E,
   grid_major   = 0x8FB39A1E,
   grid_minor   = 0x8FB39A0C,
   tick         = 0x5F6962FF,
@@ -60,11 +62,41 @@ function map_format_seconds(sec)
   return string.format("%.1fs", sec)
 end
 
--- Rounded canvas fill with a soft accent glow, drawn before the grid.
+function map_lerp_color(a, b, t)
+  local function ch(c, shift)
+    return (c >> shift) & 0xFF
+  end
+  local out = 0
+  for _, shift in ipairs({ 24, 16, 8, 0 }) do
+    local v = math.floor(ch(a, shift) + (ch(b, shift) - ch(a, shift)) * t + 0.5)
+    out = out | (math.max(0, math.min(255, v)) << shift)
+  end
+  return out
+end
+
+-- 0 at the widest view, 1 at full zoom (log scale, so each doubling of the
+-- zoom moves the look by the same amount).
+function map_zoom_depth()
+  local z = math.max(MAP_ZOOM_MIN or 1.0, state.zoom or 1.0)
+  local zmin = MAP_ZOOM_MIN or 1.0
+  local zmax = MAP_ZOOM_MAX or 16.0
+  if zmax <= zmin then
+    return 0.0
+  end
+  return math.max(0.0, math.min(1.0, math.log(z / zmin) / math.log(zmax / zmin)))
+end
+
+-- Rounded canvas fill with a soft accent glow, drawn before the grid. The
+-- canvas shifts with zoom so the depth reads without looking at a number:
+-- zoomed out it is a neutral green-black with a wide, faint glow; zooming in
+-- cools it towards deep teal, tightens and brightens the glow, and darkens
+-- the edges like a lens vignette.
 function draw_map_canvas_backdrop(dl, x0, y0, width, height, padded_x0, padded_y0)
   local C = MAP_CANVAS
   local rounding = UI_METRICS.radius_panel
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + height, C.plot_bg, rounding)
+  local depth = map_zoom_depth()
+  local bg = map_lerp_color(C.plot_bg, C.plot_bg_deep, depth)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + height, bg, rounding)
   local px1, py1 = x0 + width, y0 + height
   local pw, ph = px1 - padded_x0, py1 - padded_y0
   if pw > 8 and ph > 8 then
@@ -72,9 +104,20 @@ function draw_map_canvas_backdrop(dl, x0, y0, width, height, padded_x0, padded_y
       r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, px1, py1, true)
     end
     local cx, cy = padded_x0 + pw * 0.5, padded_y0 + ph * 0.5
-    local rad = math.max(pw, ph) * 0.55
+    local glow = map_lerp_color(C.glow, C.glow_deep, depth)
+    local rad = math.max(pw, ph) * (0.55 - 0.17 * depth)
     for i = 1, 3 do
-      r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, rad * (1.0 - (i - 1) * 0.28), C.glow, 48)
+      r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, rad * (1.0 - (i - 1) * 0.28), glow, 48)
+    end
+    -- Edge vignette, only once zoomed in a little
+    local vig_a = math.floor(depth * 0x16 + 0.5)
+    if vig_a > 0 then
+      local band = math.max(6, math.min(pw, ph) * 0.035)
+      for i = 0, 3 do
+        local inset = band * (i + 0.5)
+        r.ImGui_DrawList_AddRect(dl, padded_x0 + inset - band * 0.5, padded_y0 + inset - band * 0.5,
+          px1 - inset + band * 0.5, py1 - inset + band * 0.5, (vig_a * (4 - i)) // 4, 0, 0, band)
+      end
     end
     if r.ImGui_DrawList_PopClipRect then
       r.ImGui_DrawList_PopClipRect(dl)

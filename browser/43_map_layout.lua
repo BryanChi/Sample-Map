@@ -326,7 +326,7 @@ function render_map_y_axis_combo()
   end
 end
 
-function render_filter_input()
+function render_filter_input(reserve_right)
   local function draw_search_icon(dl, x, y, height, color)
     local size = math.min(height - 4, 16)
     local lens_r = size * 0.32
@@ -368,7 +368,12 @@ function render_filter_input()
 
   local avail_x = r.ImGui_GetContentRegionAvail(ctx)
   local loop_reserve = 132
-  local filter_height = 26
+  if reserve_right and reserve_right > 0 then
+    -- The caller keeps room on this row for controls pinned to the right.
+    avail_x = math.max(220, avail_x - reserve_right)
+    loop_reserve = 0
+  end
+  local filter_height = UI_METRICS.toolbar_h
   local icon_pad = 22
   local right_pad = 6
   local min_input_width = 72
@@ -478,7 +483,7 @@ function render_filter_input()
     draw_search_icon(dl, x0 + 6, y0 + 3, filter_height - 6, hovered_field and UI_THEME.text_dim or UI_THEME.text_mute)
 
     r.ImGui_SetCursorPosX(ctx, icon_pad)
-    r.ImGui_SetCursorPosY(ctx, 3)
+    r.ImGui_SetCursorPosY(ctx, 4)
     r.ImGui_SetNextItemWidth(ctx, input_width)
     r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBg(), 0x00000000)
     r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBgHovered(), 0x00000000)

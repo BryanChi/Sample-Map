@@ -245,8 +245,90 @@ function render_sample_map_tab_bar()
   end
 end
 
-function render_sample_map_toolbar()
-  if draw_ui_button("map_layout_edit", "Layout", nil, UI_METRICS.toolbar_h, {
+-- Sample Map toolbar, two rows:
+--   1. search (with active tags and folder chips) on the left; the view
+--      controls (Y axis, layout edit) pinned to the right edge.
+--   2. a hairline, then the tag filters (loop/one-shot, Drum, Melodic, ...).
+MAP_Y_AXIS_SHORT = {
+  brightness = "Bright",
+  dominant_freq = "Pitch",
+  weight = "Weight",
+}
+
+function map_toolbar_right_cluster_width()
+  local seg_pad = 10
+  local w = 0
+  local caption_w = select(1, r.ImGui_CalcTextSize(ctx, "Y")) or 8
+  w = w + 3 + caption_w + 10
+  for _, id in ipairs(MAP_Y_AXIS_OPTIONS) do
+    w = w + (select(1, r.ImGui_CalcTextSize(ctx, MAP_Y_AXIS_SHORT[id] or id)) or 30) + seg_pad * 2 + 2
+  end
+  w = w + 3
+  return w + UI_METRICS.toolbar_gap + UI_METRICS.toolbar_h
+end
+
+-- Y-axis picker as a segmented control: one click per axis instead of a
+-- combo, with the active axis lit like the view tabs.
+function render_map_y_axis_segmented()
+  local h = UI_METRICS.toolbar_h
+  local seg_pad = 10
+  local track_pad = 3
+  local axis = map_y_axis_id()
+  local caption = "Y"
+  local cap_w = select(1, r.ImGui_CalcTextSize(ctx, caption)) or 8
+  local widths, total = {}, track_pad + cap_w + 10
+  for i, id in ipairs(MAP_Y_AXIS_OPTIONS) do
+    widths[i] = (select(1, r.ImGui_CalcTextSize(ctx, MAP_Y_AXIS_SHORT[id] or id)) or 30) + seg_pad * 2
+    total = total + widths[i] + (i > 1 and 2 or 0)
+  end
+  total = total + track_pad
+  local tx, ty = r.ImGui_GetCursorScreenPos(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  ui_draw_panel(dl, tx, ty, tx + total, ty + h, 9.0, UI_THEME.bg_panel, UI_THEME.border, false, false)
+  local _, th = r.ImGui_CalcTextSize(ctx, caption)
+  -- Muted "Y" caption so the control names its axis.
+  local cx = tx + track_pad + 4
+  r.ImGui_DrawList_AddText(dl, cx, ty + (h - th) * 0.5, UI_THEME.text_mute, caption)
+  r.ImGui_SetCursorScreenPos(ctx, tx + track_pad + cap_w + 10, ty)
+  for i, id in ipairs(MAP_Y_AXIS_OPTIONS) do
+    if i > 1 then
+      r.ImGui_SameLine(ctx, 0, 2)
+    end
+    local label = MAP_Y_AXIS_SHORT[id] or id
+    local clicked = r.ImGui_InvisibleButton(ctx, "##map_y_axis_" .. id, widths[i], h)
+    local hovered = r.ImGui_IsItemHovered(ctx)
+    local pressed = r.ImGui_IsItemActive(ctx)
+    local x0, y0 = r.ImGui_GetItemRectMin(ctx)
+    local x1, y1 = r.ImGui_GetItemRectMax(ctx)
+    local active = id == axis
+    local text_col = UI_THEME.text_dim
+    if active then
+      ui_draw_panel(dl, x0, y0 + 3, x1, y1 - 3, (h - 6) * 0.5, UI_THEME.accent_fill, UI_THEME.accent, hovered, pressed)
+      text_col = UI_THEME.text
+    elseif hovered then
+      ui_draw_panel(dl, x0, y0 + 3, x1, y1 - 3, (h - 6) * 0.5, UI_THEME.surface_hvr, UI_THEME.border_hvr, hovered, pressed)
+      text_col = UI_THEME.text
+    end
+    local lw, lh = r.ImGui_CalcTextSize(ctx, label)
+    r.ImGui_DrawList_AddText(dl, x0 + (widths[i] - lw) * 0.5, y0 + (h - lh) * 0.5 + (pressed and 1 or 0), text_col, label)
+    if clicked and not active then
+      apply_map_y_axis(id)
+    end
+    if hovered then
+      local tips = {
+        brightness = "Y axis: brightness (dark at the bottom, clicky at the top)",
+        dominant_freq = "Y axis: dominant frequency (pitch)",
+        weight = "Y axis: weight (heavy sub/body at the bottom, thin/clicky at the top)",
+      }
+      r.ImGui_SetTooltip(ctx, tips[id] or map_y_axis_label(id))
+    end
+  end
+end
+
+function render_map_layout_toggle()
+  local h = UI_METRICS.toolbar_h
+  if draw_ui_button("map_layout_edit", nil, h, h, {
+    icon = "layout",
     compact = true,
     selected = state.map_ui_edit == true,
     style = state.map_ui_edit and "primary" or "default",
@@ -258,16 +340,42 @@ function render_sample_map_toolbar()
   end
   if r.ImGui_IsItemHovered(ctx) then
     if state.map_ui_edit then
-      r.ImGui_SetTooltip(ctx, "Layout edit mode is on.\nDrag a module to move it, drag its edges to resize.\nDouble-click a module to reset the layout (asks first).")
+      r.ImGui_SetTooltip(ctx, "Layout edit mode is on.\nDrag a module to move it, drag its edges to resize.\nDouble-click a module to reset the layout (asks first).\nClick to finish.")
     else
       r.ImGui_SetTooltip(ctx, "Edit Sample Map layout.\nMove modules and resize their edges.")
     end
   end
-  ui_toolbar_divider()
-  render_map_y_axis_combo()
-  ui_toolbar_divider()
-  render_filter_input()
+end
+
+function render_sample_map_toolbar()
+  local cluster_w = map_toolbar_right_cluster_width()
+  local row_x0 = r.ImGui_GetCursorScreenPos(ctx)
+  local row_y0 = select(2, r.ImGui_GetCursorScreenPos(ctx))
+  render_filter_input(cluster_w + UI_METRICS.toolbar_gap)
   render_folder_filter_chips()
+
+  -- Right cluster: pinned to the window's right edge on the search row when
+  -- it fits there, otherwise it wraps onto its own line.
+  local right_x = imgui_window_right_x()
+  local last_x1 = select(1, r.ImGui_GetItemRectMax(ctx))
+  local cluster_x = right_x - cluster_w
+  if cluster_x >= last_x1 + UI_METRICS.toolbar_gap then
+    r.ImGui_SameLine(ctx)
+    r.ImGui_SetCursorScreenPos(ctx, cluster_x, row_y0)
+  end
+  render_map_y_axis_segmented()
+  r.ImGui_SameLine(ctx, 0, UI_METRICS.toolbar_gap)
+  render_map_layout_toggle()
+
+  -- Tag filters get their own band under a hairline.
+  if state.tag_list and #state.tag_list > 0 then
+    r.ImGui_Dummy(ctx, 1, 1)
+    local lx, ly = r.ImGui_GetCursorScreenPos(ctx)
+    local dl = r.ImGui_GetWindowDrawList(ctx)
+    r.ImGui_DrawList_AddLine(dl, math.min(lx, row_x0), ly + 0.5, right_x, ly + 0.5, UI_THEME.border_soft, 1.0)
+    r.ImGui_Dummy(ctx, 1, 3)
+  end
+  r.ImGui_Dummy(ctx, 0, 0)
   render_tag_filters()
   render_tag_delete_popup()
   render_library_tag_path_menu()
