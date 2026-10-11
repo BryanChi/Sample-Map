@@ -447,6 +447,16 @@ do
   state.seq_follow_arrange = false
   state.seq_view_span_qn = 3
   frames("grid offset view", pos)
+  -- A second note in the locked note's cell (multi-note pack with a lock).
+  nset(1, 1, 30, { qn_offset = 1.1 })
+  state.seq_view_start_qn = 0
+  frames("grid locked pack", pos)
+  p1.notes["1"]["30"] = nil
+  -- Columns past the last region (no region under the cell).
+  state.seq_view_start_qn = state.seq_regions[#state.seq_regions].start_qn
+    + get_seq_region_length_qn(state.seq_regions[#state.seq_regions]) - 2
+  state.seq_view_span_qn = 4
+  frames("grid past end", pos)
   state.seq_follow_arrange = true
   state.seq_regions[4].pool_id = 4; state.seq_regions[4].pattern_id = 4
   state.selected_seq_region_id = 2
