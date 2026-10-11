@@ -366,6 +366,118 @@ function REF_rebuild_samples_path_index()
 end
 '''
 
+REF_MAP_LUA = r'''
+function REF_sample_passes_filters(sample, needle, skip_tags)
+  if not sample then return false end
+
+  if needle == nil then
+    needle = (state.filter ~= "" and string.lower(state.filter)) or ""
+  end
+  if needle ~= "" then
+    -- Lowercased name/path are memoized on the sample (underscore fields are
+    -- never written to the library cache) and refreshed if either changes.
+    local src_name, src_path = sample.name or "", sample.path or ""
+    if sample._lc_src_name ~= src_name or sample._lc_src_path ~= src_path then
+      sample._lc_src_name = src_name
+      sample._lc_src_path = src_path
+      sample._lc_name = string.lower(src_name)
+      sample._lc_path = string.lower(src_path)
+    end
+    if not string.find(sample._lc_name, needle, 1, true) and not string.find(sample._lc_path, needle, 1, true) then
+      return false
+    end
+  end
+
+  if not skip_tags and state.active_tags and next(state.active_tags) ~= nil then
+    local matched = false
+    local set = sample._tag_set
+    if set then
+      for tag, on in pairs(state.active_tags) do
+        if on and set[tag] then
+          matched = true
+          break
+        end
+      end
+    elseif sample.tags then
+      for _, tag in ipairs(sample.tags) do
+        if state.active_tags[tag] then
+          matched = true
+          break
+        end
+      end
+    end
+    if not matched then
+      return false
+    end
+  end
+
+  -- Check folder path filter (sample matches if it is under any selected folder)
+  if not folder_filter_matches_sample(sample.path) then
+    return false
+  end
+
+  return true
+end
+
+function REF_build_map_spatial(filtered)
+  local spatial = {}
+  for i = 1, #filtered do
+    local s = filtered[i]
+    local cell_x = math.max(0, math.min(MAP_GRID_RES - 1, math.floor((s.x or 0.5) * MAP_GRID_RES)))
+    local cell_y = math.max(0, math.min(MAP_GRID_RES - 1, math.floor((s.y or 0.5) * MAP_GRID_RES)))
+    local key = map_spatial_cell_key(cell_x, cell_y)
+    local bucket = spatial[key]
+    if not bucket then
+      bucket = {}
+      spatial[key] = bucket
+    end
+    bucket[#bucket + 1] = s
+  end
+  return spatial
+end
+function REF_map_duration_bounds(filtered)
+  local duration_min, duration_max = nil, nil
+  for i = 1, #filtered do
+    local map_dur = sample_map_duration(filtered[i])
+    if map_dur > 0 then
+      if not duration_min then
+        duration_min = map_dur
+        duration_max = map_dur
+      else
+        duration_min = math.min(duration_min, map_dur)
+        duration_max = math.max(duration_max, map_dur)
+      end
+    end
+  end
+  return duration_min, duration_max
+end
+function REF_rebuild_map_base_cache()
+  local filtered = {}
+  local filtered_set = {}
+  local needle = (state.filter ~= "" and string.lower(state.filter)) or ""
+  local samples = state.samples or {}
+  for i = 1, #samples do
+    local s = samples[i]
+    -- skip_tags: base cache ignores active tag filters
+    if type(s) == "table" and s.x and REF_sample_passes_filters(s, needle, true) then
+      if not s._render_color then
+        s._render_color = get_sample_dot_color(s)
+      end
+      s._folder_unavailable = sample_scan_folder_unavailable(s)
+      filtered[#filtered + 1] = s
+      filtered_set[s] = true
+    end
+  end
+
+  map_base_cache.filtered = filtered
+  map_base_cache.filtered_set = filtered_set
+  map_base_cache.filtered_count = #filtered
+  map_base_cache.spatial = REF_build_map_spatial(filtered)
+  map_base_cache.duration_min, map_base_cache.duration_max = REF_map_duration_bounds(filtered)
+  map_base_cache.key = compute_map_base_filter_key()
+end
+'''
+
 COMPARE_LUA = r'''
 local R = math.random
 local WORDS = { "Cymatics", "Lofi", "Pack", "Drums", "KICKS", "snare", "Splice", "vendor", "Deep House",
@@ -487,6 +599,7 @@ def _runtime():
     ''')
     assert err is None, err
     L.execute(REF_LUA)
+    L.execute(REF_MAP_LUA)
     L.execute(COMPARE_LUA)
     return L
 
@@ -520,3 +633,68 @@ def test_load_passes_match_original():
       return n
     """)
     assert discovered > 0  # the ranking/matching path is exercised
+
+
+def test_map_filter_rebuild_matches_original():
+    L = _runtime()
+    bad = L.execute(r'''
+      local function snapshot(samples)
+        local idx = {}
+        for i, s in ipairs(samples) do idx[s] = i end
+        local f = {}
+        for i, s in ipairs(map_base_cache.filtered) do f[i] = idx[s] end
+        local set_n = 0
+        for s in pairs(map_base_cache.filtered_set) do set_n = set_n + 1 end
+        local cells = {}
+        for key, bucket in pairs(map_base_cache.spatial) do
+          local b = {}
+          for i, s in ipairs(bucket) do b[i] = idx[s] end
+          cells[#cells + 1] = key .. ":" .. table.concat(b, ",")
+        end
+        table.sort(cells)
+        local side = {}
+        for i, s in ipairs(samples) do
+          side[i] = table.concat({ tostring(s._render_color), tostring(s._folder_unavailable), tostring(s._lc_name),
+            tostring(s._lc_path), tostring(s._lc_src_name), tostring(s._lc_src_path) }, "|")
+        end
+        return table.concat(f, ",") .. "#" .. set_n .. "#" .. map_base_cache.filtered_count .. "#" ..
+          tostring(map_base_cache.duration_min) .. "#" .. tostring(map_base_cache.duration_max) .. "#" ..
+          table.concat(cells, ";") .. "#" .. table.concat(side, ";") .. "#" .. tostring(map_base_cache.key)
+      end
+      local bad = 0
+      local filters = { "", "k", "KICK", "ick_1", "/pack", "zzz", "é", ".wav" }
+      for seed = 1, 6 do
+        local base = make_library(700, seed)
+        for i, s in ipairs(base) do
+          if i % 9 == 0 then s.x = nil end
+          if i % 5 == 0 then s.effective_duration = (i % 3) * 0.4 end
+          if i % 4 == 0 then s.duration = i * 0.01 end
+          if i % 13 == 0 then s.x = -1 elseif i % 17 == 0 then s.y = 2 end
+          if i % 23 == 0 then s.channels = 1 end
+        end
+        state.folders = { "/Users/me/Samples" }
+        state.folder_filter_paths = (seed % 2 == 0) and { "/Users/me/Samples/Lofi" } or nil
+        state.missing_volumes = (seed % 3 == 0) and { ["/Volumes/Drive"] = true } or {}
+        state.missing_scan_folders = (seed == 5) and { ["/Users/me/Samples"] = true } or {}
+        for _, f in ipairs(filters) do
+          local snaps = {}
+          for pass = 1, 2 do
+            local samples = {}
+            for i, s in ipairs(base) do
+              local c = {}
+              for k, v in pairs(s) do c[k] = v end
+              samples[i] = c
+            end
+            -- Stale memo fields on some samples, as after a rename.
+            for i = 1, #samples, 7 do samples[i]._lc_src_name = "old"; samples[i]._lc_name = "old" end
+            state.samples = samples
+            state.filter = f
+            if pass == 1 then REF_rebuild_map_base_cache() else rebuild_map_base_cache() end
+            snaps[pass] = snapshot(samples)
+          end
+          if snaps[1] ~= snaps[2] then bad = bad + 1 end
+        end
+      end
+      return bad
+    ''')
+    assert bad == 0

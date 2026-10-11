@@ -105,11 +105,13 @@ end
 
 function build_map_spatial(filtered)
   local spatial = {}
+  local res = MAP_GRID_RES
+  local floor, max, min = math.floor, math.max, math.min
   for i = 1, #filtered do
     local s = filtered[i]
-    local cell_x = math.max(0, math.min(MAP_GRID_RES - 1, math.floor((s.x or 0.5) * MAP_GRID_RES)))
-    local cell_y = math.max(0, math.min(MAP_GRID_RES - 1, math.floor((s.y or 0.5) * MAP_GRID_RES)))
-    local key = map_spatial_cell_key(cell_x, cell_y)
+    local cell_x = max(0, min(res - 1, floor((s.x or 0.5) * res)))
+    local cell_y = max(0, min(res - 1, floor((s.y or 0.5) * res)))
+    local key = cell_y * res + cell_x -- map_spatial_cell_key
     local bucket = spatial[key]
     if not bucket then
       bucket = {}
@@ -122,15 +124,16 @@ end
 
 function map_duration_bounds(filtered)
   local duration_min, duration_max = nil, nil
+  local map_duration, min, max = sample_map_duration, math.min, math.max
   for i = 1, #filtered do
-    local map_dur = sample_map_duration(filtered[i])
+    local map_dur = map_duration(filtered[i])
     if map_dur > 0 then
       if not duration_min then
         duration_min = map_dur
         duration_max = map_dur
       else
-        duration_min = math.min(duration_min, map_dur)
-        duration_max = math.max(duration_max, map_dur)
+        duration_min = min(duration_min, map_dur)
+        duration_max = max(duration_max, map_dur)
       end
     end
   end
@@ -142,16 +145,36 @@ function rebuild_map_base_cache()
   local filtered_set = {}
   local needle = (state.filter ~= "" and string.lower(state.filter)) or ""
   local samples = state.samples or {}
+  -- With no folder filter, sample_passes_filters(s, needle, true) is just the
+  -- text match; with nothing missing, sample_scan_folder_unavailable is false.
+  local no_folder_filter = #folder_filter_list() == 0
+  local missing_volumes, missing_folders = state.missing_volumes, state.missing_scan_folders
+  local none_missing = type(missing_volumes) == "table" and type(missing_folders) == "table"
+    and next(missing_volumes) == nil and next(missing_folders) == nil
+  local n = 0
   for i = 1, #samples do
     local s = samples[i]
     -- skip_tags: base cache ignores active tag filters
-    if type(s) == "table" and s.x and sample_passes_filters(s, needle, true) then
-      if not s._render_color then
-        s._render_color = get_sample_dot_color(s)
+    if type(s) == "table" and s.x then
+      local pass
+      if no_folder_filter then
+        pass = needle == "" or sample_matches_filter_text(s, needle)
+      else
+        pass = sample_passes_filters(s, needle, true)
       end
-      s._folder_unavailable = sample_scan_folder_unavailable(s)
-      filtered[#filtered + 1] = s
-      filtered_set[s] = true
+      if pass then
+        if not s._render_color then
+          s._render_color = get_sample_dot_color(s)
+        end
+        if none_missing then
+          s._folder_unavailable = false
+        else
+          s._folder_unavailable = sample_scan_folder_unavailable(s)
+        end
+        n = n + 1
+        filtered[n] = s
+        filtered_set[s] = true
+      end
     end
   end
 

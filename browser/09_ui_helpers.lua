@@ -3,6 +3,21 @@
 local r = reaper
 
 -- --- UI helpers --------------------------------------------------------------
+-- Text half of sample_passes_filters: does the (lowercased, non-empty) needle
+-- occur in the sample's name or path?
+function sample_matches_filter_text(sample, needle)
+  -- Lowercased name/path are memoized on the sample (underscore fields are
+  -- never written to the library cache) and refreshed if either changes.
+  local src_name, src_path = sample.name or "", sample.path or ""
+  if sample._lc_src_name ~= src_name or sample._lc_src_path ~= src_path then
+    sample._lc_src_name = src_name
+    sample._lc_src_path = src_path
+    sample._lc_name = string.lower(src_name)
+    sample._lc_path = string.lower(src_path)
+  end
+  return string.find(sample._lc_name, needle, 1, true) ~= nil or string.find(sample._lc_path, needle, 1, true) ~= nil
+end
+
 -- skip_tags: caller already restricted the candidate set via samples_by_tag
 function sample_passes_filters(sample, needle, skip_tags)
   if not sample then return false end
@@ -11,16 +26,7 @@ function sample_passes_filters(sample, needle, skip_tags)
     needle = (state.filter ~= "" and string.lower(state.filter)) or ""
   end
   if needle ~= "" then
-    -- Lowercased name/path are memoized on the sample (underscore fields are
-    -- never written to the library cache) and refreshed if either changes.
-    local src_name, src_path = sample.name or "", sample.path or ""
-    if sample._lc_src_name ~= src_name or sample._lc_src_path ~= src_path then
-      sample._lc_src_name = src_name
-      sample._lc_src_path = src_path
-      sample._lc_name = string.lower(src_name)
-      sample._lc_path = string.lower(src_path)
-    end
-    if not string.find(sample._lc_name, needle, 1, true) and not string.find(sample._lc_path, needle, 1, true) then
+    if not sample_matches_filter_text(sample, needle) then
       return false
     end
   end
