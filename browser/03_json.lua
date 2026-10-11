@@ -65,10 +65,13 @@ end
 -- under a hundred distinct values. Integers and floats are kept apart (1 and
 -- 1.0 are one table key but print as "1" and "1.0"), and float zero, NaN and
 -- the infinities are never cached (0.0 and -0.0 are one key but print
--- differently), so a cache miss always goes through json_number_text.
+-- differently), so a cache miss always goes through json_number_text. Float
+-- zero (every note's pan) takes its text by sign instead.
 local json_num_int, json_num_float, json_num_n = {}, {}, 0
 local json_math_type, json_floor, json_huge = math.type, math.floor, math.huge
 local json_find = string.find
+local json_float_zero = 0.0
+local json_zero_text, json_neg_zero_text = tostring(json_float_zero), tostring(-json_float_zero)
 
 local function json_number_text(val)
   local kind = json_math_type(val)
@@ -137,6 +140,8 @@ local function json_encode_into(val, buf, n)
           local s
           if json_math_type(v) == "integer" then
             s = json_num_int[v]
+          elseif v == 0 then
+            s = (1 / v > 0) and json_zero_text or json_neg_zero_text
           else
             s = json_num_float[v]
           end
