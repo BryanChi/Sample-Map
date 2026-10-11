@@ -1153,7 +1153,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
             u = math.max(0.08, math.min(0.92, (mx - time_to_x(t0)) / span_x))
           end
           a.curve = seq_env_seg_curve_for_amp(a.amp, b.amp, u, y_to_amp(my))
-          tip = string.format("Curve %+.2f  ·  double-click to flatten", a.curve)
+          tip = string.format("Curve: %+.2f", a.curve)
           changed = true
         end
       else
@@ -1264,8 +1264,13 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
   knob(e_fi_x, edge_hot == "fi", fade_col)
   knob(e_fo_x, edge_hot == "fo", end_col)
 
+  -- Value readouts show only while dragging; hover hints go to the caller's tip.
+  local drag_live = state.seq_env_graph_drag and state.seq_env_graph_drag.slot_id == slot.id
+    and r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0)
   local edge_label = nil
-  if edge_hot == "fi" then
+  if not drag_live then
+    edge_label = nil
+  elseif edge_hot == "fi" then
     edge_label = string.format("Fade in %.0f ms", (ed.fi and ed.fi_len or 0.0) * 1000.0)
   elseif edge_hot == "fo" then
     edge_label = string.format("Fade out %.0f ms", (ed.k and ed.fo_len or 0.0) * 1000.0)
@@ -1283,8 +1288,8 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     r.ImGui_DrawList_AddText(dl, bx + 5.0, by + 2.0, UI_THEME.text, edge_label)
   end
 
-  -- Value readout on the point being dragged (or hovered), kept inside the graph.
-  local readout_p = (not edge_hot) and active_idx and points[active_idx]
+  -- Value readout on the point being dragged, kept inside the graph.
+  local readout_p = drag_live and (not edge_hot) and active_idx and points[active_idx]
   if readout_p and not panning then
     local label = seq_env_format_point_tip(readout_p.t, readout_p.amp)
     local tw, th = r.ImGui_CalcTextSize(ctx, label)
@@ -1317,26 +1322,26 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
 
   if not tip and edge_hot and not dragging then
     if edge_hot == "fi" then
-      tip = "Drag: fade in length · Double-click: remove the fade"
+      tip = "Drag: fade in · Dbl-click: remove"
     elseif edge_hot == "fo" then
-      tip = "Drag: fade out length · Double-click: hard cut"
+      tip = "Drag: fade out · Dbl-click: hard cut"
     else
-      tip = "Drag: where the hit ends · Double-click: play to the sample end"
+      tip = "Drag: end of hit · Dbl-click: full length"
     end
   end
   if not tip and hovered then
     if nearest_idx then
       local p = points[nearest_idx]
-      tip = seq_env_format_point_tip(p.t, p.amp) .. "  ·  Alt/RMB delete"
+      tip = "Drag: move · Shift: 0 dB · Alt/Right-click: delete"
     elseif nearest_seg then
       local c = points[nearest_seg].curve or 0.0
       if math.abs(c) > 0.001 then
-        tip = string.format("Drag to reshape  ·  %.2f  ·  double-click: flatten", c)
+        tip = "Drag: bend · Dbl-click: straighten"
       else
-        tip = "Drag segment to change curve  ·  double-click: flatten"
+        tip = "Drag: bend · Dbl-click: straighten"
       end
     else
-      tip = "Click: add point  ·  Drag segment: curve  ·  Scroll: zoom"
+      tip = "Click: add point · Scroll: zoom · Shift+scroll: pan · Dbl-click: full view"
     end
   end
 

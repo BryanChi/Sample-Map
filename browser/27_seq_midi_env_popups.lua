@@ -264,17 +264,51 @@ SEQ_ENV_POPUP = {
   pad = 8.0,
   header_h = 22.0,
   graph_h = 190.0,
-  footer_h = 22.0,
+  footer_h = 18.0,
   gap = 6.0,
 }
 
 SEQ_ENV_PRESETS = {
-  { key = "flat",  label = "Flat",  tip = "Flat\nNo shaping: the whole hit at 0 dB" },
-  { key = "punch", label = "Punch", tip = "Punch\nBoost the transient, then settle at 0 dB" },
-  { key = "tight", label = "Tight", tip = "Tight\nKeep the body, then gate the tail" },
-  { key = "fade",  label = "Fade",  tip = "Fade\nFast exponential fade over the whole hit" },
-  { key = "swell", label = "Swell", tip = "Swell\nSoften the attack" },
+  { key = "flat",  label = "Flat",  tip = "Flat\nNo shaping: the whole hit at 0 dB", hint = "Flat: no shaping, 0 dB" },
+  { key = "punch", label = "Punch", tip = "Punch\nBoost the transient, then settle at 0 dB", hint = "Punch: boost the transient" },
+  { key = "tight", label = "Tight", tip = "Tight\nKeep the body, then gate the tail", hint = "Tight: keep the body, gate the tail" },
+  { key = "fade",  label = "Fade",  tip = "Fade\nFast exponential fade over the whole hit", hint = "Fade: fast fade over the hit" },
+  { key = "swell", label = "Swell", tip = "Swell\nSoften the attack", hint = "Swell: soft attack" },
 }
+
+-- One line of hint text: "Key: action" pieces separated by " · ", keys a
+-- little brighter, clipped to the line.
+function seq_env_draw_hint_line(dl, x, y, w, h, text)
+  if r.ImGui_DrawList_PushClipRect then
+    r.ImGui_DrawList_PushClipRect(dl, x, y, x + w, y + h, true)
+  end
+  local cx = x
+  local first = true
+  for piece in (text .. " · "):gmatch("(.-) · ") do
+    if not first then
+      local sw, sh = r.ImGui_CalcTextSize(ctx, "  ·  ")
+      r.ImGui_DrawList_AddText(dl, cx, y + (h - sh) * 0.5, UI_THEME.text_mute, "  ·  ")
+      cx = cx + sw
+    end
+    first = false
+    local key, rest = piece:match("^([^:]+:)(.*)$")
+    if key then
+      local kw, kh = r.ImGui_CalcTextSize(ctx, key)
+      r.ImGui_DrawList_AddText(dl, cx, y + (h - kh) * 0.5, UI_THEME.text, key)
+      cx = cx + kw
+      piece = rest
+    end
+    local pw, ph = r.ImGui_CalcTextSize(ctx, piece)
+    r.ImGui_DrawList_AddText(dl, cx, y + (h - ph) * 0.5, UI_THEME.text_dim, piece)
+    cx = cx + pw
+    if cx > x + w then
+      break
+    end
+  end
+  if r.ImGui_DrawList_PopClipRect then
+    r.ImGui_DrawList_PopClipRect(dl)
+  end
+end
 
 function seq_env_popup_height()
   local P = SEQ_ENV_POPUP
@@ -549,25 +583,41 @@ function render_seq_env_editor_popup()
     r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, UI_THEME.popup_bg, 8.0)
     r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, UI_THEME.border, 8.0, 0, 1.0)
 
-    -- Title row: icon, "Volume envelope", track name, close.
+    -- Top row: shape presets, close. No hover tooltips in the card: the
+    -- bottom line says what the hovered control does.
     local hx, hy = x0 + P.pad, y0 + P.pad
     local hh = P.header_h
-    ui_button_draw_icon(dl, "decay", hx + hh * 0.5, hy + hh * 0.5, hh, UI_THEME.accent)
-    local title = "Volume envelope"
-    local tw, th = r.ImGui_CalcTextSize(ctx, title)
-    local tx = hx + hh + 4.0
-    r.ImGui_DrawList_AddText(dl, tx, hy + (hh - th) * 0.5, UI_THEME.text, title)
+    local hint = nil
     local close_x = x1 - P.pad - hh
-    local name_x = tx + tw + 8.0
-    local name_w = close_x - 8.0 - name_x
-    if name_w > 24 then
-      local name = seq_truncate_text_to_width(slot.name or "Track", name_w)
-      r.ImGui_DrawList_AddText(dl, name_x, hy + (hh - th) * 0.5, UI_THEME.text_dim, name)
-    end
     local close_clicked, close_hot = seq_env_popup_button("##seq_env_close", dl, close_x, hy, hh, hh,
       { icon = "close" })
-    if close_hot and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, "Close (Esc)")
+    if close_hot then
+      hint = "Close · Esc"
+    end
+    local fx = hx
+    local preset_hit = nil
+    for i, preset in ipairs(SEQ_ENV_PRESETS) do
+      local lw = r.ImGui_CalcTextSize(ctx, preset.label)
+      local bw = lw + 30.0
+      if fx + bw > close_x - 6.0 then
+        break
+      end
+      local clicked, hot = seq_env_popup_button("##seq_env_preset_" .. i, dl, fx, hy, bw, hh, {
+        glyph = function(gdl, cx, cy, size, col)
+          local gw, gh = 14.0, size * 0.42
+          local gx0 = cx - bw * 0.5 + 7.0
+          seq_env_preset_glyph(gdl, preset.key, gx0, cy - gh * 0.5, gw, gh, col)
+          local _, lh = r.ImGui_CalcTextSize(ctx, preset.label)
+          r.ImGui_DrawList_AddText(gdl, gx0 + gw + 5.0, cy - lh * 0.5, col, preset.label)
+        end,
+      })
+      if hot then
+        hint = preset.hint
+      end
+      if clicked then
+        preset_hit = preset
+      end
+      fx = fx + bw + 4.0
     end
 
     -- Graph
@@ -578,48 +628,14 @@ function render_seq_env_editor_popup()
       dl, slot, graph_x, graph_y, graph_w - P.pad * 2, P.graph_h,
       { show_waveform = true, shaped_waveform = true }
     )
-    local point_drag = state.seq_env_graph_drag and state.seq_env_graph_drag.slot_id == slot.id
-      and type(state.seq_env_graph_drag.handle) == "number"
-    if (env_hot or tip) and tip and not point_drag and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, tip)
+    if env_hot and tip then
+      hint = tip
     end
 
-    -- Presets row
+    -- Bottom line: hint for whatever is hovered.
     local fy = graph_y + P.graph_h + P.gap
-    local fx = x0 + P.pad
-    local cap = "Shape"
-    local cw, ch = r.ImGui_CalcTextSize(ctx, cap)
-    r.ImGui_DrawList_AddText(dl, fx, fy + (P.footer_h - ch) * 0.5, UI_THEME.text_mute, cap)
-    fx = fx + cw + 8.0
-    local preset_hit = nil
-    for i, preset in ipairs(SEQ_ENV_PRESETS) do
-      local lw = r.ImGui_CalcTextSize(ctx, preset.label)
-      local bw = lw + 30.0
-      if fx + bw > x1 - P.pad then
-        break
-      end
-      local clicked, hot = seq_env_popup_button("##seq_env_preset_" .. i, dl, fx, fy, bw, P.footer_h, {
-        glyph = function(gdl, cx, cy, size, col)
-          local gw, gh = 14.0, size * 0.42
-          local gx0 = cx - bw * 0.5 + 7.0
-          seq_env_preset_glyph(gdl, preset.key, gx0, cy - gh * 0.5, gw, gh, col)
-          local _, lh = r.ImGui_CalcTextSize(ctx, preset.label)
-          r.ImGui_DrawList_AddText(gdl, gx0 + gw + 5.0, cy - lh * 0.5, col, preset.label)
-        end,
-      })
-      if hot and r.ImGui_SetTooltip then
-        r.ImGui_SetTooltip(ctx, preset.tip .. "\nClick: apply")
-      end
-      if clicked then
-        preset_hit = preset
-      end
-      fx = fx + bw + 4.0
-    end
-    local hint = "Shift: 0 dB"
-    local hw2, hh2 = r.ImGui_CalcTextSize(ctx, hint)
-    if x1 - P.pad - hw2 > fx + 6.0 then
-      r.ImGui_DrawList_AddText(dl, x1 - P.pad - hw2, fy + (P.footer_h - hh2) * 0.5, UI_THEME.text_mute, hint)
-    end
+    seq_env_draw_hint_line(dl, x0 + P.pad, fy, graph_w - P.pad * 2, P.footer_h,
+      hint or "Click: add point · Scroll: zoom · Shift+scroll: pan · Dbl-click: full view")
 
     r.ImGui_SetCursorScreenPos(ctx, x0, y0)
     r.ImGui_Dummy(ctx, graph_w, graph_h)
