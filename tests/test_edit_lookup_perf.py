@@ -561,3 +561,41 @@ def test_index_lookups_match_full_scans_under_random_edits():
       return table.concat(bad, " ")
     ''')
     assert out == ""
+
+
+def test_json_encode_same_bytes_through_cache_resets():
+    # json_encode keeps number text and ',"key":' pieces across calls in
+    # bounded caches. Push both well past their bounds, mixing values that
+    # share a table key but print differently (1 / 1.0, 0 / 0.0 / -0.0), and
+    # compare every result with the old uncached encoder.
+    from test_perf_caches import OLD_JSON_ENCODE
+    L = _runtime(False)
+    out = run(L, OLD_JSON_ENCODE + r'''
+      math.randomseed(31)
+      local tricky = { 0, 0.0, -0.0, 1, 1.0, -1, -1.0, 0.5, 1e300, -1e-300, 2^53, 2^63, math.mininteger,
+        math.maxinteger, 0/0, math.huge, -math.huge, 1/3 }
+      local bad = {}
+      for round = 1, 12 do
+        local t = { list = {}, map = {} }
+        for i = 1, 1500 do
+          local v
+          local p = math.random(1, 4)
+          if p == 1 then v = math.random(-1e9, 1e9)
+          elseif p == 2 then v = math.random() * 10 ^ math.random(-8, 8)
+          elseif p == 3 then v = tricky[math.random(1, #tricky)]
+          else v = (math.random(0, 64) / 4) + 0.0 end
+          t.list[i] = v
+          local k = math.random() < 0.5 and ("k" .. math.random(1, 20000)) or math.random(-50, 20000)
+          t.map[k] = { v, x = v, s = tostring(v) .. "\"", b = v == v and v > 0 }
+        end
+        local a, b = json_encode(t), old_json_encode(t)
+        if a ~= b then bad[#bad + 1] = "round " .. round end
+        -- Same table again, now from warm caches.
+        if json_encode(t) ~= b then bad[#bad + 1] = "warm round " .. round end
+      end
+      build_song(5)
+      local payload = build_seq_project_state_payload()
+      if json_encode(payload) ~= old_json_encode(payload) then bad[#bad + 1] = "project payload" end
+      return table.concat(bad, ", ")
+    ''')
+    assert out == ""
