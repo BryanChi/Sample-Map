@@ -372,3 +372,591 @@ def test_layer_gain_clamp_follows_globals():
       return table.concat(out, "\n")
     ''')
     assert bad == ""
+
+
+REF_CANDIDATES = r'''
+function ref_seq_compact_sample_candidates(slot)
+  local src = slot and slot.sample_candidates
+  if type(src) ~= "table" then
+    return false
+  end
+  local old_idx = tonumber(slot.sample_candidate_idx)
+  local dense = {}
+  local mapped = nil
+  local had_hole = false
+  local seen_empty = false
+  for i = 1, SEQ_SAMPLE_CANDIDATES_MAX do
+    local entry = src[i]
+    if seq_candidate_entry_taken(entry) then
+      if seen_empty then
+        had_hole = true
+      end
+      dense[#dense + 1] = entry
+      if old_idx and i == old_idx then
+        mapped = #dense
+      end
+    elseif #dense > 0 then
+      seen_empty = true
+    end
+  end
+  if not had_hole then
+    return false
+  end
+  slot.sample_candidates = dense
+  if mapped then
+    slot.sample_candidate_idx = mapped
+  else
+    local idx = old_idx or 1
+    if idx < 1 then
+      idx = 1
+    end
+    slot.sample_candidate_idx = math.max(1, math.min(idx, math.max(1, #dense)))
+  end
+  return true
+end
+
+function ref_seq_candidate_highest_taken(slot)
+  local list = slot and slot.sample_candidates
+  local high = 0
+  if type(list) == "table" then
+    for i = 1, SEQ_SAMPLE_CANDIDATES_MAX do
+      if seq_candidate_entry_taken(list[i]) then
+        high = i
+      end
+    end
+  end
+  return high
+end
+
+function ref_seq_candidate_visible_count(slot)
+  local visible = SEQ_SAMPLE_CANDIDATES_MIN
+  local high = ref_seq_candidate_highest_taken(slot)
+  visible = math.max(visible, high)
+  local list = slot and slot.sample_candidates
+  local all_taken = high > 0
+  if all_taken then
+    for i = 1, visible do
+      if not seq_candidate_entry_taken(list and list[i]) then
+        all_taken = false
+        break
+      end
+    end
+  end
+  if all_taken then
+    visible = math.min(SEQ_SAMPLE_CANDIDATES_MAX, visible + 1)
+  end
+  return visible
+end
+
+function ref_seq_normalize_slot_candidates(slot)
+  if not slot then
+    return
+  end
+  if slot._cand_norm and type(slot.sample_candidates) == "table" then
+    ref_seq_compact_sample_candidates(slot)
+    return
+  end
+  local src = slot.sample_candidates
+  local list = {}
+  local old_idx = tonumber(slot.sample_candidate_idx)
+  local mapped = nil
+  if type(src) == "table" then
+    for i = 1, SEQ_SAMPLE_CANDIDATES_MAX do
+      local entry = src[i]
+      if type(entry) == "table" and type(entry.path) == "string" and entry.path ~= "" then
+        list[#list + 1] = {
+          path = entry.path,
+          name = (type(entry.name) == "string" and entry.name ~= "" and entry.name) or basename(entry.path),
+          x = tonumber(entry.x) or 0.5,
+          y = tonumber(entry.y) or 0.5,
+          dominant_freq = tonumber(entry.dominant_freq),
+          brightness = tonumber(entry.brightness),
+          sub_weight = tonumber(entry.sub_weight),
+          effective_duration = tonumber(entry.effective_duration),
+        }
+        if old_idx and i == old_idx then
+          mapped = #list
+        end
+      end
+    end
+  end
+  slot.sample_candidates = list
+  local idx = mapped
+  if not idx then
+    idx = old_idx
+    if not idx or idx < 1 or idx > SEQ_SAMPLE_CANDIDATES_MAX then
+      idx = 1
+    end
+    idx = math.max(1, math.min(idx, math.max(1, #list)))
+  end
+  slot.sample_candidate_idx = idx
+  if not seq_candidate_entry_taken(list[1]) and type(slot.sample_path) == "string" and slot.sample_path ~= "" then
+    local sample = find_sample_by_path(slot.sample_path) or {
+      path = slot.sample_path,
+      name = slot.sample_name,
+    }
+    list[1] = seq_candidate_entry_from_sample(sample)
+  end
+  slot._cand_norm = true
+end
+
+
+function ref_seq_box(x, y, w, h)
+  w = math.max(0, w or 0)
+  h = math.max(0, h or 0)
+  return { x = x, y = y, w = w, h = h, x1 = x + w, y1 = y + h }
+end
+
+function ref_seq_fit_mix_strip(avail_w, btn, gap, vol_w, pan_w, midi_w)
+  vol_w = vol_w or 52.0
+  pan_w = pan_w or 40.0
+  midi_w = midi_w or 28.0
+  btn = btn or 14.0
+  gap = gap or 3.0
+  local function width()
+    return seq_mix_strip_width(btn, gap, vol_w, pan_w, midi_w)
+  end
+  while width() > avail_w do
+    if vol_w > 34 then
+      vol_w = vol_w - 2
+    elseif pan_w > 26 then
+      pan_w = pan_w - 2
+    elseif midi_w > 22 then
+      midi_w = midi_w - 2
+    elseif btn > 12 then
+      btn = btn - 1
+    else
+      break
+    end
+  end
+  return btn, vol_w, pan_w, midi_w, width()
+end
+
+function ref_seq_place_mix_strip(layout, x, y, btn, gap, vol_w, pan_w, midi_w, row_h)
+  local by = y + (row_h - btn) * 0.5
+  layout.mute = ref_seq_box(x, by, btn, btn)
+  x = x + btn
+  layout.solo = ref_seq_box(x, by, btn, btn)
+  x = x + btn + SEQ_TCP_GROUP_GAP
+  layout.vol = ref_seq_box(x, y, vol_w, row_h)
+  x = x + vol_w + gap
+  layout.pan = ref_seq_box(x, y, pan_w, row_h)
+  x = x + pan_w + SEQ_TCP_GROUP_GAP
+  layout.midi = ref_seq_box(x, by, midi_w, btn)
+  x = x + midi_w
+  layout.gear = ref_seq_box(x, by, btn, btn)
+  x = x + btn
+  layout.overlap = ref_seq_box(x, by, btn, btn)
+  return layout.overlap.x1
+end
+
+function ref_seq_place_sample_candidates(slot, x1, y0, y1, max_w)
+  local empty = { boxes = {}, w = 0, hit = ref_seq_box(0, 0, 0, 0), sq = 0 }
+  x1, y0, y1 = x1 or 0, y0 or 0, y1 or 0
+  max_w = max_w or 0
+  local avail_h = y1 - y0
+  if avail_h < 12.0 or max_w < 12.0 then
+    return empty
+  end
+  local gap = 2.0
+  local count = ref_seq_candidate_visible_count(slot)
+  local sq = math.max(12.0, math.min(avail_h, 24.0))
+  local rows = 1
+  local cols = count
+  local function dims(size, n, r)
+    r = math.max(1, r)
+    local c = math.ceil(n / r)
+    return r, c, c * size + (c - 1) * gap, math.min(n, r) * size + (math.min(n, r) - 1) * gap
+  end
+  local _, _, grid_w, grid_h = dims(sq, count, rows)
+  if grid_w > max_w then
+    local rows_fit = math.max(1, math.floor((avail_h + gap) / (sq + gap)))
+    if rows_fit > 1 then
+      rows = math.min(rows_fit, count)
+      _, cols, grid_w, grid_h = dims(sq, count, rows)
+    end
+  end
+  while grid_w > max_w and sq > 12.0 do
+    sq = sq - 1.0
+    _, cols, grid_w, grid_h = dims(sq, count, rows)
+  end
+  if grid_w > max_w then
+    local fit_cols = math.max(1, math.floor((max_w + gap) / (sq + gap)))
+    count = math.max(1, math.min(count, fit_cols * rows))
+    rows, cols, grid_w, grid_h = dims(sq, count, rows)
+  end
+  if grid_w > max_w or grid_w <= 0 then
+    return empty
+  end
+  local left = x1 - grid_w
+  local top = y0 + (avail_h - grid_h) * 0.5
+  local boxes = {}
+  local i = 1
+  for row = 1, rows do
+    for col = 1, cols do
+      if i > count then
+        break
+      end
+      boxes[i] = ref_seq_box(left + (col - 1) * (sq + gap), top + (row - 1) * (sq + gap), sq, sq)
+      i = i + 1
+    end
+  end
+  return {
+    boxes = boxes,
+    w = grid_w,
+    hit = ref_seq_box(left, top, grid_w, grid_h),
+    sq = sq,
+  }
+end
+
+function ref_seq_layout_place_name_candidates(layout, slot, inner_x0, inner_x1, top_y, name_h, expand_w, gap)
+  layout.expand = ref_seq_box(inner_x0, top_y, expand_w, name_h)
+  local name_x = inner_x0 + expand_w
+  local name_w = math.max(0.0, inner_x1 - name_x)
+  local cand = ref_seq_place_sample_candidates(slot, inner_x1, top_y, top_y + name_h, math.max(0.0, name_w - 36.0))
+  if cand.w > 0 then
+    layout.candidates = cand.hit
+    layout.candidate_boxes = cand.boxes
+    name_w = math.max(0.0, cand.hit.x - (gap or 3.0) - name_x)
+  end
+  layout.name = ref_seq_box(name_x, top_y, name_w, name_h)
+end
+
+function ref_seq_get_track_control_layout(x0, y0, x1, y1, slot, opts)
+  x0, y0, x1, y1 = x0 or 0, y0 or 0, x1 or 0, y1 or 0
+  if x1 < x0 then x1 = x0 end
+  if y1 < y0 then y1 = y0 end
+  opts = opts or {}
+  local lane_h = y1 - y0
+  local pad = (lane_h >= 64.0) and 4.0 or 3.0
+  local gap = 3.0
+  local expand_w = opts.hide_expand and 0.0 or 18.0
+  local inner_x0 = x0 + pad
+  local inner_x1 = x1 - pad
+  local inner_w = math.max(0.0, inner_x1 - inner_x0)
+  local mode = "tiny"
+  if lane_h >= 100.0 then
+    mode = "mixer"
+  elseif lane_h >= 64.0 then
+    mode = "stack"
+  elseif lane_h >= 38.0 then
+    mode = "split"
+  end
+
+  local layout = {
+    mode = mode,
+    lane_h = lane_h,
+    expand = ref_seq_box(0, 0, 0, 0),
+    name = ref_seq_box(0, 0, 0, 0),
+    gear = ref_seq_box(0, 0, 0, 0),
+    vol = ref_seq_box(0, 0, 0, 0),
+    pan = ref_seq_box(0, 0, 0, 0),
+    midi = ref_seq_box(0, 0, 0, 0),
+    mute = ref_seq_box(0, 0, 0, 0),
+    solo = ref_seq_box(0, 0, 0, 0),
+    overlap = ref_seq_box(0, 0, 0, 0),
+    env = ref_seq_box(0, 0, 0, 0),
+    mix_hit = ref_seq_box(0, 0, 0, 0),
+    candidates = ref_seq_box(0, 0, 0, 0),
+    candidate_boxes = {},
+  }
+
+  if mode == "tiny" then
+    local btn = math.max(12.0, math.min(15.0, lane_h - 8.0))
+    local row_h = btn
+    local mid_y = y0 + (lane_h - row_h) * 0.5
+    local name_min = 28.0
+    local btn2, vol_w, pan_w, midi_w, mix_w = ref_seq_fit_mix_strip(
+      math.max(80.0, inner_w - expand_w - name_min - gap), btn, gap, 48.0, 36.0, 26.0
+    )
+    btn = btn2
+    row_h = btn
+    mid_y = y0 + (lane_h - row_h) * 0.5
+    local mix_x = inner_x1 - mix_w
+    local name_x = inner_x0 + expand_w
+    local mid_space = math.max(0.0, mix_x - gap - name_x)
+    local env_w = 0.0
+    if mid_space >= name_min + gap + 40.0 then
+      env_w = math.min(SEQ_ENV_PREVIEW_W or 80.0, mid_space - name_min - gap)
+      if env_w < 36.0 then env_w = 0.0 end
+    end
+    local name_w = math.max(0.0, mid_space - (env_w > 0 and (env_w + gap) or 0.0))
+    layout.expand = ref_seq_box(inner_x0, mid_y, expand_w, row_h)
+    layout.name = ref_seq_box(name_x, mid_y, name_w, row_h)
+    if env_w > 0 then
+      layout.env = ref_seq_box(name_x + name_w + gap, mid_y, env_w, row_h)
+    end
+    ref_seq_place_mix_strip(layout, mix_x, mid_y, btn, gap, vol_w, pan_w, midi_w, row_h)
+    local hit_x0 = (env_w > 0) and layout.env.x or layout.mute.x
+    layout.mix_hit = ref_seq_box(hit_x0, mid_y, inner_x1 - hit_x0, row_h)
+
+  elseif mode == "split" then
+    local name_h = math.max(14.0, math.min(17.0, 14.0 + (lane_h - 38.0) * 0.12))
+    local btn = math.max(13.0, math.min(17.0, 13.0 + (lane_h - 38.0) * 0.16))
+    local row_h = btn
+    local gap_v = 2.0
+    local block_h = name_h + gap_v + row_h
+    local top_y = y0 + math.max(pad, (lane_h - block_h) * 0.5)
+    local ctrl_y = top_y + name_h + gap_v
+    ref_seq_layout_place_name_candidates(layout, slot, inner_x0, inner_x1, top_y, name_h, expand_w, gap)
+
+    local env_reserve = 0.0
+    if inner_w >= 210.0 then
+      env_reserve = math.max(40.0, math.min(88.0, inner_w * 0.24))
+    end
+    local mix_avail = inner_w - (env_reserve > 0 and (env_reserve + gap) or 0.0)
+    local btn2, vol_w, pan_w, midi_w, mix_w = ref_seq_fit_mix_strip(mix_avail, btn, gap, 52.0, 40.0, 28.0)
+    btn = btn2
+    row_h = math.max(row_h, btn)
+    ctrl_y = top_y + name_h + gap_v
+    local leftover = inner_w - mix_w - gap
+    local env_w = 0.0
+    if leftover >= 36.0 then
+      if leftover > 92.0 then
+        local grow = leftover - 92.0
+        vol_w = vol_w + grow * 0.62
+        pan_w = pan_w + grow * 0.38
+        mix_w = seq_mix_strip_width(btn, gap, vol_w, pan_w, midi_w)
+        leftover = inner_w - mix_w - gap
+      end
+      env_w = leftover
+    end
+    ref_seq_place_mix_strip(layout, inner_x0, ctrl_y, btn, gap, vol_w, pan_w, midi_w, row_h)
+    if env_w >= 36.0 then
+      layout.env = ref_seq_box(layout.overlap.x1 + gap, ctrl_y, env_w, row_h)
+    end
+    layout.mix_hit = ref_seq_box(inner_x0, ctrl_y, inner_w, row_h)
+
+  elseif mode == "stack" then
+    local name_h = 16.0
+    local rest = lane_h - pad * 2 - name_h - 4.0
+    local row_h = math.max(14.0, math.min(20.0, rest * 0.42))
+    local env_h = math.max(12.0, rest - row_h - 3.0)
+    local btn = math.max(14.0, math.min(row_h, 18.0))
+    local top_y = y0 + pad
+    local mix_y = top_y + name_h + 3.0
+    local env_y = mix_y + row_h + 3.0
+    if env_y + env_h > y1 - pad then
+      env_h = math.max(12.0, (y1 - pad) - env_y)
+    end
+    ref_seq_layout_place_name_candidates(layout, slot, inner_x0, inner_x1, top_y, name_h, expand_w, gap)
+
+    local btn2, vol_w, pan_w, midi_w, mix_w = ref_seq_fit_mix_strip(inner_w, btn, gap, 56.0, 42.0, 30.0)
+    btn = btn2
+    if inner_w > mix_w then
+      local grow = inner_w - mix_w
+      vol_w = vol_w + grow * 0.62
+      pan_w = pan_w + grow * 0.38
+    end
+    ref_seq_place_mix_strip(layout, inner_x0, mix_y, btn, gap, vol_w, pan_w, midi_w, row_h)
+    layout.env = ref_seq_box(inner_x0, env_y, inner_w, env_h)
+    layout.mix_hit = ref_seq_box(inner_x0, mix_y, inner_w, (y1 - pad) - mix_y)
+
+  else
+    local name_h = math.max(15.0, math.min(20.0, 15.0 + (lane_h - 100.0) * 0.05))
+    local btn = math.max(15.0, math.min(20.0, 15.0 + (lane_h - 100.0) * 0.05))
+    local rest = lane_h - pad * 2 - name_h - btn - 9.0
+    local bar_h = math.max(15.0, math.min(26.0, (rest - 6.0) / 3.0))
+    local env_h = math.max(14.0, rest - bar_h * 2.0 - 6.0)
+    local y = y0 + pad
+    ref_seq_layout_place_name_candidates(layout, slot, inner_x0, inner_x1, y, name_h, expand_w, gap)
+    y = y + name_h + 3.0
+    local midi_w = math.max(32.0, math.min(52.0, btn * 2.4))
+    local cx = inner_x0
+    layout.mute = ref_seq_box(cx, y, btn, btn); cx = cx + btn
+    layout.solo = ref_seq_box(cx, y, btn, btn); cx = cx + btn + SEQ_TCP_GROUP_GAP
+    layout.midi = ref_seq_box(cx, y, midi_w, btn); cx = cx + midi_w
+    layout.gear = ref_seq_box(cx, y, btn, btn); cx = cx + btn
+    layout.overlap = ref_seq_box(cx, y, btn, btn)
+    y = y + btn + 3.0
+    layout.vol = ref_seq_box(inner_x0, y, inner_w, bar_h)
+    y = y + bar_h + 3.0
+    layout.pan = ref_seq_box(inner_x0, y, inner_w, bar_h)
+    y = y + bar_h + 3.0
+    env_h = math.max(12.0, (y1 - pad) - y)
+    layout.env = ref_seq_box(inner_x0, y, inner_w, env_h)
+    layout.mix_hit = ref_seq_box(inner_x0, layout.mute.y, inner_w, (y1 - pad) - layout.mute.y)
+  end
+
+  return layout
+end
+
+function ref_seq_candidate_chip_props(entry)
+  local sample = entry and entry.path and find_sample_by_path(entry.path) or nil
+  local function num(key, fallback)
+    if sample and type(sample[key]) == "number" then
+      return sample[key]
+    end
+    if entry and type(entry[key]) == "number" then
+      return entry[key]
+    end
+    return fallback
+  end
+  local dur = nil
+  if sample and sample_map_duration then
+    dur = sample_map_duration(sample)
+  end
+  if type(dur) ~= "number" or dur <= 0 then
+    dur = num("effective_duration", num("duration", nil))
+  end
+  return {
+    freq = num("dominant_freq", 440.0),
+    brightness = num("brightness", nil),
+    weight = math.max(0.0, math.min(1.0, num("sub_weight", 0.45))),
+    duration = dur,
+  }
+end
+
+function ref_seq_candidate_slot_scale(slot)
+  if not slot then
+    return nil
+  end
+  ref_seq_normalize_slot_candidates(slot)
+  local n = 0
+  local b_lo, b_hi = 1e9, -1e9
+  local w_lo, w_hi = 1e9, -1e9
+  local d_lo, d_hi = 1e9, -1e9
+  local list = slot.sample_candidates
+  if type(list) ~= "table" then
+    return nil
+  end
+  for i = 1, SEQ_SAMPLE_CANDIDATES_MAX do
+    if seq_candidate_entry_taken(list[i]) then
+      local p = ref_seq_candidate_chip_props(list[i])
+      local bright = p.brightness or p.freq
+      n = n + 1
+      if type(bright) == "number" then
+        b_lo = math.min(b_lo, bright)
+        b_hi = math.max(b_hi, bright)
+      end
+      w_lo = math.min(w_lo, p.weight)
+      w_hi = math.max(w_hi, p.weight)
+      if type(p.duration) == "number" and p.duration > 0 then
+        d_lo = math.min(d_lo, p.duration)
+        d_hi = math.max(d_hi, p.duration)
+      end
+    end
+  end
+  if n < 2 then
+    return nil
+  end
+  return {
+    bright_lo = b_lo, bright_hi = b_hi,
+    weight_lo = w_lo, weight_hi = w_hi,
+    dur_lo = d_lo, dur_hi = d_hi,
+  }
+end
+
+'''
+
+# A few library samples (so chip props read the library) and random,
+# often malformed, candidate lists.
+GEN_CANDIDATES = r'''
+state.samples = {}
+for i = 1, 6 do
+  state.samples[i] = { path = "/lib/s" .. i .. ".wav", name = "s" .. i .. ".wav", x = 0.1 * i, y = 0.5,
+    dominant_freq = (i % 2 == 0) and 80 * i or nil, brightness = (i % 3 == 0) and nil or 0.15 * i,
+    sub_weight = (i == 4) and 1.7 or 0.1 * i, effective_duration = (i == 5) and 0 or 0.05 * i, duration = 0.3 }
+end
+rebuild_samples_path_index()
+local ENTRIES = {
+  function() return nil end,
+  function() return {} end,
+  function() return { path = "" } end,
+  function() return "x" end,
+  function() return { path = 5 } end,
+  function() return { path = "/lib/s" .. math.random(1, 6) .. ".wav" } end,
+  function() return { path = "/ext/e" .. math.random(1, 4) .. ".wav", dominant_freq = math.random() * 9000,
+    brightness = T_pick({ 0.2, nil, 0.9 }), sub_weight = T_pick({ -0.5, 0.3, 2 }),
+    effective_duration = T_pick({ 0.1, 0, nil }), duration = T_pick({ 0.4, nil }) } end,
+}
+function T_rnd_cand_slot()
+  local slot = { id = math.random(1, 50), sample_path = T_pick({ "/lib/s1.wav", "/ext/x.wav", "", nil }) }
+  if math.random(1, 8) > 1 then
+    local list = {}
+    local n = math.random(0, 14)
+    for i = 1, n do list[i] = T_pick(ENTRIES)() end
+    slot.sample_candidates = list
+  else
+    slot.sample_candidates = T_pick({ nil, "bad" })
+  end
+  slot.sample_candidate_idx = T_pick({ nil, 0, 1, 2, 3, 5, 12, 13, "3", 2.0, -1 })
+  slot._cand_norm = T_pick({ true, nil })
+  return slot
+end
+'''
+
+
+def test_candidate_helpers_match_previous_implementation():
+    L = _runtime()
+    L.execute(REF_CANDIDATES)
+    L.execute(GEN_CANDIDATES)
+    bad = L.execute(r'''
+      math.randomseed(17)
+      local out = {}
+      local fns = {
+        { "compact", seq_compact_sample_candidates, ref_seq_compact_sample_candidates },
+        { "highest", seq_candidate_highest_taken, ref_seq_candidate_highest_taken },
+        { "visible", seq_candidate_visible_count, ref_seq_candidate_visible_count },
+        { "normalize", seq_normalize_slot_candidates, ref_seq_normalize_slot_candidates },
+        { "scale", seq_candidate_slot_scale, ref_seq_candidate_slot_scale },
+        { "props", function(s) return seq_candidate_chip_props(type(s.sample_candidates) == "table" and s.sample_candidates[1] or nil) end,
+          function(s) return ref_seq_candidate_chip_props(type(s.sample_candidates) == "table" and s.sample_candidates[1] or nil) end },
+      }
+      for trial = 1, 3000 do
+        local seed_slot = T_rnd_cand_slot()
+        for _, f in ipairs(fns) do
+          local a, b = T_deep_copy(seed_slot), T_deep_copy(seed_slot)
+          local okn, rn = pcall(f[2], a)
+          local okr, rr = pcall(f[3], b)
+          local e = (okn ~= okr) and ("error mismatch " .. tostring(rn) .. " / " .. tostring(rr))
+            or T_same(rr, rn, "ret") or T_same(b, a, "slot")
+          if e then
+            out[#out + 1] = ("%s trial %d: %s"):format(f[1], trial, e)
+            if #out > 10 then return table.concat(out, "\n") end
+          end
+        end
+      end
+      return table.concat(out, "\n")
+    ''')
+    assert bad == ""
+
+
+def test_track_control_layout_matches_previous_implementation():
+    L = _runtime()
+    L.execute(REF_CANDIDATES)
+    L.execute(GEN_CANDIDATES)
+    bad = L.execute(r'''
+      math.randomseed(23)
+      local out = {}
+      -- seq_box on odd sizes (number subtypes matter: x1 = x + w).
+      for _, w in ipairs({ 0, 0.0, -0.0, -3, 5, 5.5, 0/0, 1/0, -1/0, nil, false }) do
+        for _, h in ipairs({ 0, 2.0, -1.5, nil }) do
+          local e = T_same(ref_seq_box(1, 2.5, w, h), seq_box(1, 2.5, w, h), "box " .. tostring(w) .. "," .. tostring(h))
+          if e then out[#out + 1] = e end
+        end
+      end
+      for trial = 1, 3000 do
+        local slot = T_rnd_cand_slot()
+        if math.random(1, 4) > 1 then ref_seq_normalize_slot_candidates(slot) end
+        local x0 = T_pick({ 0, 3.5, 100, nil })
+        local y0 = T_pick({ 0, 10.25, 200 })
+        local lane_h = T_pick({ 14, 20, 30, 37.9, 38, 45, 50.5, 63.9, 64, 80, 99.9, 100, 120, 160, math.random() * 180 })
+        local width = T_pick({ 40, 120, 180, 209, 210, 260, 400, 734, math.random() * 900 })
+        local x1 = x0 and (x0 + width) or width
+        local y1 = y0 + lane_h
+        if math.random(1, 20) == 1 then x1 = (x0 or 0) - 5 end
+        local opts = T_pick({ nil, { hide_expand = true }, {} })
+        local a, b = T_deep_copy(slot), T_deep_copy(slot)
+        local okn, ln = pcall(seq_get_track_control_layout, x0, y0, x1, y1, a, opts)
+        local okr, lr = pcall(ref_seq_get_track_control_layout, x0, y0, x1, y1, b, opts)
+        local e = (okn ~= okr) and ("error mismatch " .. tostring(ln) .. " / " .. tostring(lr))
+          or T_same(lr, ln, "layout") or T_same(b, a, "slot")
+        if e then
+          out[#out + 1] = ("trial %d (h %s w %s): %s"):format(trial, tostring(lane_h), tostring(width), e)
+          if #out > 10 then break end
+        end
+      end
+      return table.concat(out, "\n")
+    ''')
+    assert bad == ""
