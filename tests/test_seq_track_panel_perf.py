@@ -1365,3 +1365,255 @@ def test_role_text_memo_matches_previous_implementation():
       return table.concat(out, "\n")
     ''')
     assert bad == ""
+
+
+# Previous seq_layering_rand_role / _rand_label / _build_pieces. They used
+# file-local helpers of 28_drum_layering.lua: corner() is restated here on the
+# reference normalizer; env_key and piece_end_at are taken from the module.
+REF_LAYER_USERS = r'''
+local function corner(slot, side_key, idx)
+  ref_seq_normalize_slot_layers(slot)
+  local side = slot.layers[side_key]
+  return side and side.verts[idx], side
+end
+local env_key = seq_layer_corner_env_key
+local piece_end_at
+for i = 1, 255 do
+  local n, v = debug.getupvalue(seq_layering_build_pieces, i)
+  if n == nil then break end
+  if n == "piece_end_at" then piece_end_at = v end
+end
+assert(env_key and piece_end_at, "module helpers not found")
+function ref_seq_layering_rand_role(slot, side_key, idx)
+  local v = corner(slot, side_key, idx)
+  if v and v.rand and v.rand.role then
+    return v.rand.role, true
+  end
+  return seq_layering_track_role(slot), false
+end
+
+function ref_seq_layering_rand_label(slot, side_key, idx)
+  local v = corner(slot, side_key, idx)
+  local labels = SEQ_ROLE_LABELS or {}
+  local role, own = ref_seq_layering_rand_role(slot, side_key, idx)
+  local bits = { role and (labels[role] or role) or "Any" }
+  local tags = v and v.rand and v.rand.tags or {}
+  if #tags > 0 then
+    bits[#bits + 1] = table.concat(tags, ", ")
+  end
+  return table.concat(bits, " · "), own or #tags > 0
+end
+
+function ref_seq_layering_build_pieces(slot, opts)
+  ref_seq_normalize_slot_layers(slot)
+  opts = opts or {}
+  if not opts.all and not ref_seq_layering_geometry_active(slot) then
+    return {}
+  end
+  local pieces = {}
+  local function add(path, v, weight, fields, owners)
+    local p = {
+      path = path,
+      sample = find_sample_by_path(path) or { path = path, name = v and v.name },
+      weight = weight,
+      startoffs = 0.0,
+      time_offset_sec = 0.0,
+      length_sec = nil,
+      fade_in = 0.0,
+      fade_out = 0.0,
+      owners = owners,
+    }
+    for k, val in pairs(fields or {}) do p[k] = val end
+    pieces[#pieces + 1] = p
+    return p
+  end
+
+  if slot.layers.linked then
+    local side = slot.layers.transient
+    for i = 1, 3 do
+      local v, w = side.verts[i], side.blend[i] or 0.0
+      local path = (w >= 0.02 and v and v.path) and normalize_path(v.path) or nil
+      if path then
+        add(path, v, w * seq_layer_vert_vol(v) * side.gain, { lane = i - 1 },
+          { { side = "transient", idx = i }, { side = "sustain", idx = i } })
+      end
+    end
+  else
+    local tside = slot.layers.transient
+    local sside = slot.layers.sustain
+    local split = seq_layering_split_sec(slot)
+    local pre, post = seq_layering_xfade_window(slot, split)
+    for i = 1, 3 do
+      local tv, tw = tside.verts[i], tside.blend[i] or 0.0
+      local sv, sw = sside.verts[i], sside.blend[i] or 0.0
+      local tpath = (tw >= 0.02 and tv and tv.path) and normalize_path(tv.path) or nil
+      local spath = (sw >= 0.02 and sv and sv.path) and normalize_path(sv.path) or nil
+      local tgain = tw * seq_layer_vert_vol(tv) * tside.gain
+      local sgain = sw * seq_layer_vert_vol(sv) * sside.gain
+      if tpath and spath and tpath == spath and math.abs(tgain - sgain) < 0.05
+          and tv.len == sv.len and tv.fade == sv.fade and env_key(tv) == env_key(sv) then
+        -- Same sample at the same level on both sides: play it whole.
+        add(tpath, tv, (tgain + sgain) * 0.5, { lane = i - 1 },
+          { { side = "transient", idx = i }, { side = "sustain", idx = i } })
+      else
+        if tpath then
+          local sample = find_sample_by_path(tpath) or { path = tpath, name = tv and tv.name }
+          local offs = seq_layering_piece_times(sample, "transient", slot)
+          add(tpath, tv, tgain, {
+            sample = sample,
+            lane = i - 1,
+            startoffs = offs or 0.0,
+            length_sec = split + post,
+            fade_out = pre + post,
+          }, { { side = "transient", idx = i } })
+        end
+        if spath then
+          local sample = find_sample_by_path(spath) or { path = spath, name = sv and sv.name }
+          local offs, slen = seq_layering_piece_times(sample, "sustain", slot)
+          offs = offs or 0.0
+          -- Start early by the fade's lead-in (as far as the sample allows).
+          local lead = math.min(pre, offs)
+          add(spath, sv, sgain, {
+            sample = sample,
+            lane = i - 1,
+            startoffs = offs - lead,
+            time_offset_sec = split - lead,
+            length_sec = slen + lead,
+            fade_in = lead + post,
+          }, { { side = "sustain", idx = i } })
+        end
+      end
+    end
+  end
+
+  -- Corner lengths / fades, then the whole-hit tail.
+  local layers = slot.layers
+  local tail_on = not opts.no_tail and (layers.tail_end or layers.tail_fade)
+  local natural_end = nil
+  if tail_on and not layers.tail_end then
+    natural_end = seq_layering_natural_end(slot)
+  end
+  local kept = {}
+  for _, p in ipairs(pieces) do
+    local o = p.owners[#p.owners]
+    local cv = layers[p.owners[1].side].verts[p.owners[1].idx]
+    p.env = seq_layer_corner_env(cv)
+    if p.env and not opts.no_corner_cut then
+      -- Silence after the envelope's end: the piece stops there.
+      local e = seq_layering_env_edges(p.env)
+      if e and e.end_t then
+        local _, _, startoffs, t_off = seq_layering_piece_span(p)
+        piece_end_at(p, t_off + math.max(0.001, e.end_t - startoffs), nil)
+      end
+    end
+    if not opts.no_corner_cut then
+      local v = layers[o.side].verts[o.idx]
+      if v.len or v.fade then
+        local _, _, _, t_off, len = seq_layering_piece_span(p)
+        local end_t = v.len or (t_off + len)
+        piece_end_at(p, v.len, v.fade and (math.min(end_t, t_off + len) - v.fade) or nil)
+      end
+    end
+    local keep = true
+    if tail_on then
+      local _, _, _, t_off, len = seq_layering_piece_span(p)
+      local end_t = layers.tail_end or natural_end or (t_off + len)
+      if t_off >= end_t - 0.0005 then
+        keep = false
+      else
+        piece_end_at(p, layers.tail_end, layers.tail_fade and (end_t - layers.tail_fade) or nil)
+      end
+    end
+    if keep then kept[#kept + 1] = p end
+  end
+  return seq_layering_remap_piece_lanes(kept)
+end
+
+'''
+
+
+def test_layer_repeat_normalize_lemma():
+    # layers_renormalize_repeat must do exactly what a second
+    # seq_normalize_slot_layers does right after a first one.
+    L = _runtime()
+    L.execute(REF_LAYERS)
+    L.execute(GEN_LAYERS)
+    bad = L.execute(r'''
+      math.randomseed(43)
+      local repeat_fn
+      for i = 1, 255 do
+        local n, v = debug.getupvalue(seq_layering_is_active, i)
+        if n == nil then break end
+        if n == "layers_renormalize_repeat" then repeat_fn = v end
+      end
+      assert(repeat_fn, "layers_renormalize_repeat not found")
+      local out = {}
+      for trial = 1, 6000 do
+        local a = T_rnd_slot()
+        local b = T_deep_copy(a)
+        local ok_a = pcall(ref_seq_normalize_slot_layers, a)
+        local ok_b = pcall(ref_seq_normalize_slot_layers, b)
+        if ok_a and ok_b then
+          for rep = 1, math.random(1, 3) do
+            ref_seq_normalize_slot_layers(a)
+            repeat_fn(b.layers)
+          end
+          local e = T_same(a, b, "slot")
+          if e then
+            out[#out + 1] = ("trial %d: %s"):format(trial, e)
+            if #out > 10 then break end
+          end
+        elseif ok_a ~= ok_b then
+          out[#out + 1] = ("trial %d: error mismatch"):format(trial)
+        end
+      end
+      return table.concat(out, "\n")
+    ''')
+    assert bad == ""
+
+
+def test_layer_users_match_previous_implementation():
+    L = _runtime()
+    L.execute(REF_LAYERS)
+    L.execute(GEN_LAYERS)
+    L.execute(REF_LAYER_USERS)
+    bad = L.execute(r'''
+      math.randomseed(47)
+      local out = {}
+      local SIDES = { "transient", "sustain", "unlinked_sustain", "nope" }
+      local fns = {
+        { "rand_role", function(s, k, i) return seq_layering_rand_role(s, k, i) end,
+          function(s, k, i) return ref_seq_layering_rand_role(s, k, i) end },
+        { "rand_label", function(s, k, i) return seq_layering_rand_label(s, k, i) end,
+          function(s, k, i) return ref_seq_layering_rand_label(s, k, i) end },
+        { "build_pieces", function(s, k, i, o) return seq_layering_build_pieces(s, o) end,
+          function(s, k, i, o) return ref_seq_layering_build_pieces(s, o) end },
+      }
+      local OPTS = { false, {}, { all = true }, { no_tail = true }, { no_corner_cut = true }, { all = true, no_tail = true } }
+      for trial = 1, 3000 do
+        local seed_slot = T_rnd_slot()
+        if math.random(1, 3) == 1 and type(seed_slot.layers) == "table" then
+          -- Some corners with their own drum type.
+          local side = seed_slot.layers.transient
+          if type(side) == "table" and type(side.verts) == "table" and type(side.verts[2]) == "table" then
+            side.verts[2].rand = { role = T_pick({ "clap", "hat" }), tags = T_pick({ {}, { "dry" } }) }
+          end
+        end
+        local side_key = T_pick(SIDES)
+        local idx = T_pick({ 1, 2, 3, 4 })
+        local opts = T_pick(OPTS) or nil
+        for _, f in ipairs(fns) do
+          local a, b = T_deep_copy(seed_slot), T_deep_copy(seed_slot)
+          local okn, n1, n2 = pcall(f[2], a, side_key, idx, opts)
+          local okr, r1, r2 = pcall(f[3], b, side_key, idx, opts)
+          local e = (okn ~= okr) and ("error mismatch " .. tostring(n1) .. " / " .. tostring(r1))
+            or T_same({ r1, r2 }, { n1, n2 }, "ret") or T_same(b, a, "slot")
+          if e then
+            out[#out + 1] = ("%s trial %d (%s %s): %s"):format(f[1], trial, tostring(side_key), tostring(idx), e)
+            if #out > 10 then return table.concat(out, "\n") end
+          end
+        end
+      end
+      return table.concat(out, "\n")
+    ''')
+    assert bad == ""

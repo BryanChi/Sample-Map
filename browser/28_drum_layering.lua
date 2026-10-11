@@ -604,14 +604,18 @@ local function corner(slot, side_key, idx)
   return side and side.verts[idx], side
 end
 
--- Drum type a corner draws from: its own choice, else the track's. The
--- second value is true when the corner chose it.
-function seq_layering_rand_role(slot, side_key, idx)
-  local v = corner(slot, side_key, idx)
+-- seq_layering_rand_role for the vert its corner() lookup found.
+local function rand_role_of(slot, v)
   if v and v.rand and v.rand.role then
     return v.rand.role, true
   end
   return seq_layering_track_role(slot), false
+end
+
+-- Drum type a corner draws from: its own choice, else the track's. The
+-- second value is true when the corner chose it.
+function seq_layering_rand_role(slot, side_key, idx)
+  return rand_role_of(slot, (corner(slot, side_key, idx)))
 end
 
 -- role: a drum type, or nil for the track's own. Changing the type drops tags
@@ -670,7 +674,10 @@ end
 function seq_layering_rand_label(slot, side_key, idx)
   local v = corner(slot, side_key, idx)
   local labels = SEQ_ROLE_LABELS or {}
-  local role, own = seq_layering_rand_role(slot, side_key, idx)
+  -- = seq_layering_rand_role(slot, side_key, idx): its corner() normalize is a
+  -- repeat (see layers_renormalize_repeat) and finds the same vert.
+  layers_renormalize_repeat(slot.layers)
+  local role, own = rand_role_of(slot, v)
   local bits = { role and (labels[role] or role) or "Any" }
   local tags = v and v.rand and v.rand.tags or {}
   if #tags > 0 then
@@ -1261,8 +1268,15 @@ end
 function seq_layering_build_pieces(slot, opts)
   seq_normalize_slot_layers(slot)
   opts = opts or {}
-  if not opts.all and not seq_layering_geometry_active(slot) then
-    return {}
+  if not opts.all then
+    -- = seq_layering_geometry_active(slot): its normalize is a repeat.
+    if not slot then
+      return {}
+    end
+    layers_renormalize_repeat(slot.layers)
+    if not layering_geometry_active_normalized(slot) then
+      return {}
+    end
   end
   local pieces = {}
   local function add(path, v, weight, fields, owners)
