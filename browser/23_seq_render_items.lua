@@ -188,15 +188,21 @@ function seq_note_lod_length_qn(note, step_qn)
 end
 
 function seq_active_cell_has_visual_start(active, start_qn, col, step_qn)
-  local pack = seq_active_cell_notes(active)
-  if not pack then
+  if not active then
     return false
   end
+  -- seq_active_cell_notes(active), without allocating { active } for a
+  -- one-note cell.
+  local pack = active.pack
   step_qn = step_qn or 0.25
   local cell_qn = (start_qn or 0.0) + (col or 0) * step_qn
   local cell_end = cell_qn + step_qn
-  for i = 1, #pack do
-    local vis = seq_entry_vis_qn(pack[i])
+  for i = 1, pack and #pack or 1 do
+    local entry = active
+    if pack then
+      entry = pack[i]
+    end
+    local vis = seq_entry_vis_qn(entry)
     if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
       return true
     end

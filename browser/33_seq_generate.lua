@@ -619,6 +619,96 @@ function seq_draw_lane_notes_lod(dl, active, row_y0, row_y1, selected_region_id,
   end
 end
 
+-- One note row's cells, exactly as render_sequencer_map used to draw them
+-- column by column: for every column in col_lo..col_hi whose cell holds a note
+-- start (the seq_active_cell_has_visual_start test), seq_draw_unfocused_note_marks
+-- and then seq_draw_lane_notes_lod (lod) or seq_draw_lane_packed_notes. The
+-- row colours are built once per row and qn_to_x is inlined where it is hot
+-- (tx0 + ((qn - view_qn) / span_qn) * tw, the closure's own expression).
+function seq_draw_note_row_cells(dl, slot, slot_cells, col_lo, col_hi, row_y0, row_y1, selected_region_id,
+    now_t, step_qn, start_qn, qn_to_x, tx0, view_qn, span_qn, tw, lod, base_color,
+    edit_def, edit_style, mx, my, hover_on_razor, hover_qn)
+  if not slot_cells then
+    return
+  end
+  local add_rect_filled = r.ImGui_DrawList_AddRectFilled
+  local math_max = math.max
+  local br, bg, bb = extract_rgb_rrgbbaa(base_color or get_sample_dot_color(nil))
+  local mark = build_color_rrgbbaa(br, bg, bb, 88)
+  local lod_color = build_color_rrgbbaa(br, bg, bb, 220)
+  local y0 = row_y0 + 4.0
+  local y1 = row_y1 - 4.0
+  for col = col_lo, col_hi do
+    local active = slot_cells[col]
+    if active then
+      -- seq_active_cell_notes(active) without allocating: a cell without
+      -- .pack stands for { active }.
+      local pack = active.pack
+      local n = pack and #pack or 1
+      local cell_qn = start_qn + col * step_qn
+      local cell_end = cell_qn + step_qn
+      local starts = false
+      for i = 1, n do
+        local e = active
+        if pack then
+          e = pack[i]
+        end
+        local vis = e and ((e.abs_qn or 0.0) + ((e.note and e.note.offset_qn) or 0.0)) or 0.0
+        if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+          starts = true
+          break
+        end
+      end
+      if starts then
+        -- seq_draw_unfocused_note_marks
+        for pi = 1, n do
+          local entry = active
+          if pack then
+            entry = pack[pi]
+          end
+          if type(entry) == "table" and type(entry.note) == "table"
+              and entry.region_id ~= selected_region_id then
+            local vis = (entry.abs_qn or 0.0) + ((entry.note and entry.note.offset_qn) or 0.0)
+            if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+              local x0 = (tx0 + ((vis - view_qn) / span_qn) * tw) + 1.0
+              local x1 = (tx0 + ((cell_end - view_qn) / span_qn) * tw) - 1.0
+              if x1 > x0 + 1.0 then
+                add_rect_filled(dl, x0, y0, x1, y1, mark, 0)
+              end
+            end
+          end
+        end
+        if lod then
+          -- seq_draw_lane_notes_lod
+          for pi = 1, n do
+            local entry = active
+            if pack then
+              entry = pack[pi]
+            end
+            local note = entry and entry.note
+            if type(note) == "table" and entry.region_id == selected_region_id then
+              local vis = (entry.abs_qn or 0.0) + ((entry.note and entry.note.offset_qn) or 0.0)
+              if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+                local draw_x0 = tx0 + ((vis - view_qn) / span_qn) * tw
+                local end_qn = vis + seq_note_lod_length_qn(note, step_qn)
+                local draw_x1 = math_max(draw_x0 + 1.0, tx0 + ((end_qn - view_qn) / span_qn) * tw)
+                add_rect_filled(dl, draw_x0, y0, draw_x1, y1, lod_color, 0)
+              end
+            end
+          end
+        else
+          seq_draw_lane_packed_notes(
+            dl, slot, active, row_y0, row_y1, qn_to_x(start_qn + col * step_qn), qn_to_x(start_qn + (col + 1) * step_qn),
+            selected_region_id, now_t, step_qn, qn_to_x,
+            edit_def, edit_style, mx, my, hover_on_razor,
+            hover_qn, start_qn, col
+          )
+        end
+      end
+    end
+  end
+end
+
 function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, selected_region_id, now_t, step_qn, qn_to_x, edit_def, edit_style, mx, my, hover_on_razor, hover_qn, start_qn, col)
   local pack = seq_active_cell_notes(active)
   if not pack then
