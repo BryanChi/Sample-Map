@@ -456,14 +456,29 @@ function map_find_hover_entry(cache, entries, mx, my, snap_r)
       end
     end
   else
-    for i = 1, #entries do
-      local e = entries[i]
-      if not e.unavailable then
-        local dx = mx - e.px
-        local dy = my - e.py
+    local n = #entries
+    local pxs, pys = cache.draw_px, cache.draw_py
+    if pxs and cache.draw_arrays_for == entries and cache.draw_arrays_n == n then
+      -- Same scan over the flat position arrays; the availability test only
+      -- runs for dots within reach.
+      for i = 1, n do
+        local dx = mx - pxs[i]
+        local dy = my - pys[i]
         local dist_sq = dx * dx + dy * dy
-        if dist_sq <= snap_r_sq and (not best_d or dist_sq < best_d) then
+        if dist_sq <= snap_r_sq and (not best_d or dist_sq < best_d) and not entries[i].unavailable then
           best_i, best_d = i, dist_sq
+        end
+      end
+    else
+      for i = 1, n do
+        local e = entries[i]
+        if not e.unavailable then
+          local dx = mx - e.px
+          local dy = my - e.py
+          local dist_sq = dx * dx + dy * dy
+          if dist_sq <= snap_r_sq and (not best_d or dist_sq < best_d) then
+            best_i, best_d = i, dist_sq
+          end
         end
       end
     end
@@ -540,8 +555,50 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   if clip_dots then
     r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, padded_x0 + padded_width, padded_y0 + padded_height, true)
   end
-  if not playing_path and next(highlight_info) == nil then
+  local n_entries = #entries
+  local pxs, pys, cols = cache.draw_px, cache.draw_py, cache.draw_col
+  -- The flat arrays mirror these entries unless something rebuilt one without
+  -- the other; then use the entries directly.
+  local flat = pxs ~= nil and cache.draw_arrays_for == entries and cache.draw_arrays_n == n_entries
+  if flat and not playing_path and next(highlight_info) == nil then
     -- Common case (nothing playing, no hovered track): plain dot loop.
+    for i = 1, n_entries do
+      add_circle_filled(dl, pxs[i], pys[i], dot_radius, cols[i], segments)
+    end
+  elseif flat and not cache.draw_dup_paths then
+    -- Same result as the scan below: the playing dot is skipped here and drawn
+    -- last; highlighted dots are drawn here and again (bigger) afterwards, in
+    -- entry order. Paths are unique, so both are found through the index.
+    local by_path = cache.draw_index_by_path
+    local skip = 0
+    if playing_path then
+      local pi = by_path[playing_path]
+      if pi and not entries[pi].unavailable then
+        skip = pi
+        playing_entry = entries[pi]
+      end
+    end
+    if next(highlight_info) ~= nil then
+      local idxs = {}
+      for path, info in pairs(highlight_info) do
+        local i = info and by_path[path]
+        if i and i ~= skip and not entries[i].unavailable then
+          idxs[#idxs + 1] = i
+        end
+      end
+      table.sort(idxs)
+      for k = 1, #idxs do
+        local e = entries[idxs[k]]
+        assigned_entries[k] = { e = e, info = highlight_info[e.s.path] }
+      end
+    end
+    for i = 1, skip - 1 do
+      add_circle_filled(dl, pxs[i], pys[i], dot_radius, cols[i], segments)
+    end
+    for i = skip + 1, n_entries do
+      add_circle_filled(dl, pxs[i], pys[i], dot_radius, cols[i], segments)
+    end
+  elseif not playing_path and next(highlight_info) == nil then
     for i = 1, #entries do
       local e = entries[i]
       add_circle_filled(dl, e.px, e.py, dot_radius, e.color, segments)

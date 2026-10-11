@@ -365,6 +365,39 @@ ARRANGE_END = 10
 state.seq_view_start_qn = 0
 state.active_view = "sample_map"
 frames("map again", pos)
+
+-- [map view] Hovering a track row in the tracks panel highlights its samples
+-- (the stub puts every row at y 0..row height, so a low mouse y hovers one),
+-- with and without a playing sample.
+local track_rows = { { 120.5, 6.5 }, { 400.5, 12.5 }, { 700.5, 3.5 } }
+frames("map track hover", track_rows)
+preview_sample_obj = samples[state.seq_tracks[#state.seq_tracks].sample_path and 9 or 9]
+frames("map track hover playing", track_rows)
+preview_sample_obj = samples[44]
+frames("map playing assigned", track_rows)
+preview_sample_obj = nil
+
+-- [map view] Panning and zooming every frame with the mouse over the dots:
+-- the visible list, entries and hover search are rebuilt each frame.
+do
+  local hover_pts = grid_positions(6, 200, 120, 760, 580)
+  local steps = {
+    { 1.0, 0, 0 }, { 1.0, 13.5, -7.25 }, { 1.7, 40, 22 }, { 1.7, -95.5, 60 },
+    { 3.0, 210, -140 }, { 3.0, 215.25, -141 }, { 6.0, -480, 300 }, { 6.0, 512.5, -333 },
+    { 11.0, 900, 700 }, { 2.2, 0.125, 0.0625 },
+  }
+  for i, st in ipairs(steps) do
+    state.zoom, state.pan_x, state.pan_y = st[1], st[2], st[3]
+    frames("map pan " .. i, { hover_pts[(i % #hover_pts) + 1] })
+  end
+  preview_sample_obj = samples[77]
+  for i, st in ipairs(steps) do
+    state.zoom, state.pan_x, state.pan_y = st[1], -st[2], -st[3]
+    frames("map pan playing " .. i, { hover_pts[((i + 2) % #hover_pts) + 1], { 120.5, 6.5 } })
+  end
+  preview_sample_obj = nil
+  state.zoom, state.pan_x, state.pan_y = 1.0, 0, 0
+end
 for _, m in ipairs(msgs) do
   if m:find("ERROR") or m:find("rror") then frames_out[#frames_out + 1] = "MSG\n" .. m:sub(1, 400) end
 end
