@@ -107,8 +107,40 @@ function draw_seq_vary_filter_spans(dl, ctx, slot, row_y0, row_y1, start_qn, ste
     end
     run_start, run_key, run_text, run_editing = nil, nil, nil, false
   end
+  -- When the open filter edit cannot cover this row, seq_vary_filter_cell_key
+  -- reduces to seq_cell_vary_filter(region, slot.id, key) with no note, which
+  -- is nil whenever the region's pattern has no filter cells for this track.
+  -- Look that up once per region (nothing here edits patterns or regions;
+  -- get_seq_pattern only repairs a missing notes table).
+  local fast = false
+  if slot and not (edit and tostring(edit.track_id) == tostring(slot.id)
+      and type(edit.col_min) == "number" and type(edit.col_max) == "number") then
+    fast = true
+  end
+  local reg_has_cells = nil
   for col = 0, step_count - 1 do
-    local key, editing, text = seq_vary_filter_cell_key(slot, col, start_qn, step_qn)
+    local key, editing, text = nil, false, nil
+    local full = true
+    if fast then
+      local cell_qn = (start_qn or 0.0) + (col or 0) * (step_qn or 0.25)
+      local reg = seq_region_at_qn(cell_qn)
+      if not reg then
+        full = false
+      else
+        if not reg_has_cells then
+          reg_has_cells = {}
+        end
+        local has = reg_has_cells[reg]
+        if has == nil then
+          has = seq_track_vary_filters(get_seq_pattern(reg.pattern_id, false), slot.id, false) ~= nil
+          reg_has_cells[reg] = has
+        end
+        full = has
+      end
+    end
+    if full then
+      key, editing, text = seq_vary_filter_cell_key(slot, col, start_qn, step_qn)
+    end
     if key then
       if run_start and key ~= run_key then
         flush(col - 1)
