@@ -1214,3 +1214,154 @@ def test_candidate_square_draws_match_previous_implementation():
       return table.concat(out, "\n")
     ''')
     assert bad == ""
+
+
+REF_ROLES = r'''
+function ref_classify_seq_role_text(text)
+  local s = tostring(text or ""):lower()
+  if s == "" then
+    return nil
+  end
+  if s:find("kick", 1, true) or s:find("kck", 1, true) then
+    return "kick"
+  end
+  if s:find("snare", 1, true) or s:find("snr", 1, true) then
+    return "snare"
+  end
+  if s:find("clap", 1, true) then
+    return "clap"
+  end
+  if s:find("rim", 1, true) or s:find("snap", 1, true) then
+    return "rim"
+  end
+  if s:find("tom", 1, true) then
+    return "tom"
+  end
+  if s:find("ride", 1, true) then
+    return "ride"
+  end
+  if s:find("crash", 1, true) or s:find("cymbal", 1, true) then
+    return "crash"
+  end
+  if s:find("hihat", 1, true) or s:find("hi hat", 1, true) or s:find("hat", 1, true)
+      or s:find("hh", 1, true) then
+    return "hat"
+  end
+  if s:find("808", 1, true) then
+    return "808"
+  end
+  if s:find("sub", 1, true) or s:find("bass", 1, true) then
+    return "bass"
+  end
+  if s:find("perc", 1, true) or s:find("percussion", 1, true) or s:find("shaker", 1, true)
+      or s:find("tamb", 1, true) or s:find("cowbell", 1, true) then
+    return "perc"
+  end
+  if s:find("riser", 1, true) or s:find("impact", 1, true) or s:find("sweep", 1, true)
+      or s:find("whoosh", 1, true) or s:find("sfx", 1, true) or s:find("fx", 1, true) then
+    return "fx"
+  end
+  if s:find("vocal", 1, true) or s:find("vox", 1, true) or s:find("voice", 1, true) then
+    return "vocal"
+  end
+  if s:find("swell", 1, true) then
+    return "swell"
+  end
+  return nil
+end
+
+function ref_infer_seq_track_role(slot)
+  if not slot then
+    return "other"
+  end
+
+  local role = ref_classify_seq_role_text(slot.sample_tag)
+  if role then
+    return role
+  end
+
+  local sample = slot.sample_path and find_sample_by_path(slot.sample_path) or nil
+  if sample and type(sample.tags) == "table" then
+    for _, tag in ipairs(sample.tags) do
+      role = ref_classify_seq_role_text(tag)
+      if role then
+        return role
+      end
+    end
+  end
+
+  role = ref_classify_seq_role_text(sample and sample.name)
+      or ref_classify_seq_role_text(sample and sample.path)
+      or ref_classify_seq_role_text(slot.sample_name)
+      or ref_classify_seq_role_text(slot.name)
+
+  return role or "other"
+end
+
+'''
+
+
+def test_role_text_memo_matches_previous_implementation():
+    # classify_seq_role_text memoizes by the lowered text: hits, misses,
+    # clears (more than 1024 distinct texts), non-string inputs and
+    # __tostring tables (called every time, like before) must all behave
+    # as the previous implementation did.
+    L = _runtime()
+    L.execute(REF_ROLES)
+    bad = L.execute(r'''
+      math.randomseed(41)
+      local out = {}
+      local WORDS = { "Kick", "KCK", "snare", "SNR", "clap", "Rim", "snap", "TOM", "ride", "Crash", "cymbal",
+        "HiHat", "hi hat", "hat", "HH", "808", "sub", "BASS", "perc", "Percussion", "shaker", "tamb", "cowbell",
+        "riser", "impact", "sweep", "whoosh", "SFX", "fx", "vocal", "vox", "voice", "swell", "drum", "loop",
+        "", " ", "/", "_", "-", "01", "\0", "\xC4\xB1", "I", "\xFF" }
+      local calls = 0
+      local meta = { __tostring = function(t) calls = calls + 1; return t.label end }
+      local function rnd_text()
+        local k = math.random(1, 9)
+        if k == 1 then return ({ nil, false, true, 0, 808, -1.5, 1e300, 0/0 })[math.random(1, 8)] end
+        if k == 2 then return setmetatable({ label = T_pick(WORDS) .. T_pick(WORDS) }, meta) end
+        local parts = {}
+        for i = 1, math.random(0, 4) do parts[i] = T_pick(WORDS) end
+        if math.random(1, 3) == 1 then parts[#parts + 1] = tostring(math.random(1, 3000)) end
+        return table.concat(parts, T_pick({ "", " ", "_", "/" }))
+      end
+      for trial = 1, 20000 do
+        local text = rnd_text()
+        local c0 = calls
+        local okr, want = pcall(ref_classify_seq_role_text, text)
+        local c1 = calls
+        local okn, got = pcall(classify_seq_role_text, text)
+        local e = (okr ~= okn) and ("error mismatch " .. tostring(want) .. " / " .. tostring(got))
+          or ((c1 - c0) ~= (calls - c1) and "__tostring call count differs")
+          or T_same(want, got, "role")
+        if e then
+          out[#out + 1] = ("trial %d (%q): %s"):format(trial, tostring(text), e)
+          if #out > 10 then break end
+        end
+      end
+      -- infer_seq_track_role is built on it.
+      state.samples = {
+        { path = "/lib/Kicks/BD 01.wav", name = "BD 01.wav", tags = { "Drum", "Kick" } },
+        { path = "/lib/Loops/fx riser.wav", name = "Rise.wav" },
+        { path = "/lib/x/y.wav", name = "y.wav", tags = "bad" },
+      }
+      rebuild_samples_path_index()
+      for trial = 1, 3000 do
+        local function maybe(v) if math.random(1, 3) > 1 then return v end end
+        local slot = maybe({})
+        if slot then
+          slot.sample_tag = maybe(rnd_text())
+          slot.sample_path = maybe(T_pick({ "/lib/Kicks/BD 01.wav", "/lib/Loops/fx riser.wav", "/lib/x/y.wav", "/none.wav" }))
+          slot.sample_name = maybe(rnd_text())
+          slot.name = maybe(rnd_text())
+        end
+        local e = T_same(ref_infer_seq_track_role(slot), infer_seq_track_role(slot), "infer")
+        if e then
+          out[#out + 1] = ("infer trial %d: %s"):format(trial, e)
+          if #out > 10 then break end
+        end
+      end
+      return table.concat(out, "\n")
+    ''')
+    assert bad == ""

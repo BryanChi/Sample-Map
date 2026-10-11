@@ -1407,8 +1407,8 @@ function get_seq_gen_style_label(style_key)
   return "Basic"
 end
 
-function classify_seq_role_text(text)
-  local s = tostring(text or ""):lower()
+-- The role for an already lowered text (pure: plain substring tests).
+local function classify_seq_role_lowered(s)
   if s == "" then
     return nil
   end
@@ -1458,6 +1458,25 @@ function classify_seq_role_text(text)
     return "swell"
   end
   return nil
+end
+
+-- Track names and tags are classified several times per track every frame;
+-- the answer depends only on the lowered text, so it is memoized by that
+-- string (bounded; cleared when full). false = no role.
+local role_text_memo, role_text_memo_n = {}, 0
+
+function classify_seq_role_text(text)
+  local s = tostring(text or ""):lower()
+  local role = role_text_memo[s]
+  if role == nil then
+    role = classify_seq_role_lowered(s) or false
+    if role_text_memo_n >= 1024 then
+      role_text_memo, role_text_memo_n = {}, 0
+    end
+    role_text_memo[s] = role
+    role_text_memo_n = role_text_memo_n + 1
+  end
+  return role or nil
 end
 
 function infer_seq_track_role(slot)
