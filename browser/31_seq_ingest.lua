@@ -14,6 +14,15 @@ end
 -- track. tr == false: no item writes beyond those already marked.
 function seq_mark_self_arrange_write(tr, region_id)
   state.seq_skip_ingest = true
+  local scope = seq_item_scope
+  if scope and tr ~= false then
+    -- The baseline no longer describes this track for the rest of the edit.
+    if tr == nil then
+      scope.written_all = true
+    else
+      scope.written[tostring(tr)] = true
+    end
+  end
   local touched = state.seq_fp_touched
   if tr == false then
     -- Nothing to add.
@@ -48,6 +57,8 @@ end
 -- script wrote this frame, so the next ingest can tell "only our writes"
 -- (count unchanged) from "the user edited arrange in between" (count moved).
 function seq_sync_frame_end()
+  -- An edit scope never outlives its frame (an error may have left one open).
+  seq_item_scope = nil
   if state.seq_skip_ingest and r.GetProjectStateChangeCount then
     state.seq_self_write_count = r.GetProjectStateChangeCount(0)
   end
@@ -107,7 +118,7 @@ function seq_arrange_fp_read_slot(slot, tr, spans, prev_items, written_rids)
         e = nil
       end
       if not e then
-        e = { pos = pos }
+        e = { pos = pos, item = item }
         if seq_item_is_parent_marker(item) then
           e.parent = true
         else
@@ -118,6 +129,10 @@ function seq_arrange_fp_read_slot(slot, tr, spans, prev_items, written_rids)
             tagged = tonumber(get_item_ext(item, SEQ_EXT_REGION) or "")
             step = get_item_ext(item, SEQ_EXT_STEP) or ""
             track_tag = get_item_ext(item, SEQ_EXT_TRACK) or ""
+            -- Kept for the edit-scope index (seq_scope_track_from_baseline).
+            e.flag = true
+            e.step = step
+            e.trk = track_tag
           end
           e.qn = qn
           e.tagged = tagged
@@ -280,9 +295,21 @@ function seq_arrange_fingerprints(only_tracks)
   for rid in pairs(affected) do
     out[rid] = build(rid)
   end
+  -- tostring(track) -> slot index whose order lists every item on that track.
+  local track_index = {}
+  for i = 1, #slots do
+    local tr = tracks[i]
+    if tr then
+      local key = tostring(tr)
+      if track_index[key] == nil then
+        track_index[key] = i
+      end
+    end
+  end
   return out, {
     slots_key = slots_key, spans_key = spans_key,
     parts = parts, orders = orders, items = item_maps,
+    track_index = track_index,
   }
 end
 
@@ -297,6 +324,8 @@ function seq_arrange_fp_refresh(fp, meta, incremental)
   state.seq_arrange_fp = fp
   if meta then
     meta.fp = fp
+    -- The project revision this baseline describes (see seq_scope_baseline_current).
+    meta.count = r.GetProjectStateChangeCount and r.GetProjectStateChangeCount(0) or nil
   end
   state.seq_arrange_fp_meta = meta
   state.seq_fp_refresh_at = nil

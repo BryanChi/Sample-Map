@@ -41,14 +41,69 @@ local function json_key(k)
   return cached
 end
 
+-- ',"key":' pieces for every key after an object's first, so a key and its
+-- comma go into the buffer as one piece.
+local json_comma_key_cache = {}
+local json_comma_key_n = 0
+
+local function json_comma_key(k)
+  local cached = json_comma_key_cache[k]
+  if cached then
+    return cached
+  end
+  cached = "," .. json_key(k)
+  if json_comma_key_n >= 8192 then
+    json_comma_key_cache = {}
+    json_comma_key_n = 0
+  end
+  json_comma_key_cache[k] = cached
+  json_comma_key_n = json_comma_key_n + 1
+  return cached
+end
+
+-- Number text, reused across calls: a sequencer save writes ~18k numbers with
+-- under a hundred distinct values. Integers and floats are kept apart (1 and
+-- 1.0 are one table key but print as "1" and "1.0"), and float zero, NaN and
+-- the infinities are never cached (0.0 and -0.0 are one key but print
+-- differently), so a cache miss always goes through json_number_text. Float
+-- zero (every note's pan) takes its text by sign instead.
+local json_num_int, json_num_float, json_num_n = {}, {}, 0
+local json_math_type, json_floor, json_huge = math.type, math.floor, math.huge
+local json_find = string.find
+local json_float_zero = 0.0
+local json_zero_text, json_neg_zero_text = tostring(json_float_zero), tostring(-json_float_zero)
+
+local function json_number_text(val)
+  local kind = json_math_type(val)
+  if kind == "float" and (val ~= val or val == json_huge or val == -json_huge) then
+    return "null"
+  end
+  if kind == "float" and val == 0 then
+    return tostring(val)
+  end
+  local s = tostring(val)
+  if json_num_n >= 4096 then
+    json_num_int, json_num_float, json_num_n = {}, {}, 0
+  end
+  if kind == "integer" then
+    json_num_int[val] = s
+  else
+    json_num_float[val] = s
+  end
+  json_num_n = json_num_n + 1
+  return s
+end
+
 -- Appends val's JSON to buf after index n; returns the new last index.
+-- Object members with number, string or boolean values are written inline
+-- (the bulk of a save); everything else recurses.
 local function json_encode_into(val, buf, n)
   local t = type(val)
   if t == "table" then
     local is_array = true
     local max_idx = 0
     for k in pairs(val) do
-      if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then
+      if type(k) ~= "number" or k ~= json_floor(k) or k < 1 then
         is_array = false
         break
       end
@@ -73,33 +128,58 @@ local function json_encode_into(val, buf, n)
       buf[n] = "{"
       local first = true
       for k, v in pairs(val) do
+        n = n + 1
         if first then
           first = false
+          buf[n] = json_key(k)
         else
-          n = n + 1
-          buf[n] = ","
+          buf[n] = json_comma_key_cache[k] or json_comma_key(k)
         end
-        n = n + 1
-        buf[n] = json_key(k)
-        n = json_encode_into(v, buf, n)
+        local tv = type(v)
+        if tv == "number" then
+          local s
+          if json_math_type(v) == "integer" then
+            s = json_num_int[v]
+          elseif v == 0 then
+            s = (1 / v > 0) and json_zero_text or json_neg_zero_text
+          else
+            s = json_num_float[v]
+          end
+          n = n + 1
+          buf[n] = s or json_number_text(v)
+        elseif tv == "string" then
+          n = n + 1
+          if json_find(v, '[%z\1-\31"\\]') then
+            buf[n] = json_encode_string(v)
+          else
+            buf[n] = '"' .. v .. '"'
+          end
+        elseif tv == "boolean" then
+          n = n + 1
+          buf[n] = v and "true" or "false"
+        else
+          n = json_encode_into(v, buf, n)
+        end
       end
       n = n + 1
       buf[n] = "}"
     end
   elseif t == "string" then
     n = n + 1
-    if val:find('[%z\1-\31"\\]') then
+    if json_find(val, '[%z\1-\31"\\]') then
       buf[n] = json_encode_string(val)
     else
       buf[n] = '"' .. val .. '"'
     end
   elseif t == "number" then
-    n = n + 1
-    if val ~= val or val == math.huge or val == -math.huge then
-      buf[n] = "null"
+    local s
+    if json_math_type(val) == "integer" then
+      s = json_num_int[val]
     else
-      buf[n] = tostring(val)
+      s = json_num_float[val]
     end
+    n = n + 1
+    buf[n] = s or json_number_text(val)
   elseif t == "boolean" then
     n = n + 1
     buf[n] = val and "true" or "false"

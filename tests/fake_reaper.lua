@@ -344,6 +344,12 @@ function api.GetMediaItem_Track(item) return item and item.track end
 api.GetMediaItemTrack = api.GetMediaItem_Track
 function api.GetMediaItemInfo_Value(item, key)
   if key == "B_UISEL" then return item.selected and 1 or 0 end
+  if key == "IP_ITEMNUMBER" then
+    for i, it in ipairs(item.track.items) do
+      if it == item then return i - 1 end
+    end
+    return -1
+  end
   return item.vals[key] or 0
 end
 function api.SetMediaItemInfo_Value(item, key, value)
