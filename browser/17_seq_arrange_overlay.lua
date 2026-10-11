@@ -847,6 +847,9 @@ function apply_seq_undo_snapshot(snap, label)
   local ok, err = xpcall(seq_apply_undo_snapshot_body, function(e)
     return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e)
   end, snap, label, guard)
+  if guard.scope then
+    seq_item_scope_close(true)
+  end
   if guard.refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(-1)
   end
@@ -874,6 +877,8 @@ function seq_apply_undo_snapshot_body(snap, label, guard)
   if seq_ensure_slot_reaper_tracks then
     seq_ensure_slot_reaper_tracks()
   end
+  -- One edit scope for the removals and rebuilds below.
+  guard.scope = seq_item_scope_open and seq_item_scope_open()
   if full then
     if remove_seq_rendered_items then
       remove_seq_rendered_items(nil)
@@ -901,6 +906,10 @@ function seq_apply_undo_snapshot_body(snap, label, guard)
         end
       end
     end
+  end
+  if guard.scope then
+    guard.scope = false
+    seq_item_scope_close(true)
   end
   if mix and seq_apply_all_slot_mix_to_reaper then
     seq_apply_all_slot_mix_to_reaper()

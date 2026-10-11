@@ -289,8 +289,16 @@ function save_seq_project_state(proj)
     local set_ok = pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER, serialized)
     if set_ok then
       state.seq_last_ext_state = serialized
+      local count_after = nil
       if count_before and state.seq_last_proj_change == count_before then
-        state.seq_last_proj_change = r.GetProjectStateChangeCount(0)
+        count_after = r.GetProjectStateChangeCount(0)
+        state.seq_last_proj_change = count_after
+      end
+      -- Saving moves no arrange item: an arrange baseline that was current
+      -- stays current (seq_scope_baseline_current).
+      local meta = state.seq_arrange_fp_meta
+      if count_before and type(meta) == "table" and meta.count == count_before then
+        meta.count = count_after or r.GetProjectStateChangeCount(0)
       end
     end
   end

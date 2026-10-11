@@ -49,17 +49,323 @@ function seq_ingest_slot_track(slot)
   return get_track_by_guid(slot.reaper_track_guid)
 end
 
+-- --- Edit-scoped index of arrange items --------------------------------------
+-- One synchronous sequencer edit asks "which items on this track carry these
+-- tags" many times: for a step and then its neighbour, once per pooled copy of
+-- a region, once per region of a pattern. Nothing but the script changes
+-- arrange while it runs, so inside an edit (seq_item_scope set) each track is
+-- enumerated and each tag read at most once. The script's own deletes and
+-- inserts keep the index current; every lookup still compares the track's
+-- item count with REAPER and enumerates the track again on a mismatch, and an
+-- insert that would match a lookup makes the track be enumerated again so
+-- deletes keep REAPER's order. seq_sync_frame_end drops the scope, so it never
+-- outlives the frame (even after an error).
+--
+-- A track can also be indexed from the arrange baseline (the fingerprint
+-- entries read after the last sync, seq_arrange_fp_meta) without reading any
+-- tag, when that baseline is current: the project change count is where it
+-- was when the baseline was taken, the script has not written arrange since,
+-- and the track holds as many items as the baseline lists. Its matches have
+-- their tags read again from REAPER before anything acts on them; any
+-- disagreement re-reads the whole track and stops using the baseline.
+seq_item_scope = nil
+
+-- Returns true when this call opened the scope (and must close it).
+function seq_item_scope_open()
+  if seq_item_scope then
+    return false
+  end
+  seq_item_scope = { tracks = {}, written = {}, written_all = false }
+  return true
+end
+
+function seq_item_scope_close(own)
+  if own then
+    seq_item_scope = nil
+  end
+end
+
+-- Tag readers on index entries ({ item = item, ... }); each reads once.
+function seq_scope_item_parent(e)
+  local v = e.parent
+  if v == nil then
+    v = get_item_ext(e.item, SEQ_EXT_PARENT) == "1"
+    e.parent = v
+  end
+  return v
+end
+
+function seq_scope_item_flag(e)
+  local v = e.flag
+  if v == nil then
+    v = get_item_ext(e.item, SEQ_EXT_FLAG) == "1"
+    e.flag = v
+  end
+  return v
+end
+
+function seq_scope_item_rid(e)
+  local v = e.rid
+  if v == nil then
+    v = tonumber(get_item_ext(e.item, SEQ_EXT_REGION) or "") or false
+    e.rid = v
+  end
+  return v or nil
+end
+
+function seq_scope_item_step(e)
+  local v = e.step
+  if v == nil then
+    v = tostring(get_item_ext(e.item, SEQ_EXT_STEP) or "")
+    e.step = v
+  end
+  return v
+end
+
+function seq_scope_item_track_tag(e)
+  local v = e.trk
+  if v == nil then
+    v = tostring(get_item_ext(e.item, SEQ_EXT_TRACK) or "")
+    e.trk = v
+  end
+  return v
+end
+
+-- seq_item_is_aux_piece on an entry.
+function seq_scope_item_aux(e)
+  local v = e.aux
+  if v == nil then
+    v = seq_item_is_aux_piece(e.item) and true or false
+    e.aux = v
+  end
+  return v
+end
+
+-- seq_item_is_owned on an entry. Fields already known to rule the item out
+-- are checked first; otherwise the reads happen in seq_item_is_owned's order.
+function seq_scope_item_owned(e, region_id)
+  if e.flag == false or e.parent == true then
+    return false
+  end
+  if region_id and seq_scope_item_rid(e) ~= region_id then
+    return false
+  end
+  if seq_scope_item_parent(e) then
+    return false
+  end
+  return seq_scope_item_flag(e)
+end
+
+-- The arrange baseline describes the project as it is now (see above).
+function seq_scope_baseline_current()
+  local meta = state.seq_arrange_fp_meta
+  if type(meta) ~= "table" or type(meta.fp) ~= "table" or meta.fp ~= state.seq_arrange_fp then
+    return false
+  end
+  if state.seq_fp_touched ~= nil or state.seq_fp_refresh_at ~= nil then
+    return false
+  end
+  if not meta.count or not meta.track_index or not r.GetProjectStateChangeCount then
+    return false
+  end
+  return r.GetProjectStateChangeCount(0) == meta.count
+end
+
+-- Index of tr's items from the baseline, or nil when it can't be trusted.
+function seq_scope_track_from_baseline(scope, key, count)
+  if scope.base_ok == nil then
+    scope.base_ok = seq_scope_baseline_current()
+  end
+  if not scope.base_ok or scope.written_all or scope.written[key] then
+    return nil
+  end
+  local meta = state.seq_arrange_fp_meta
+  local idx = meta.track_index[key]
+  local order = idx and meta.orders and meta.orders[idx]
+  if type(order) ~= "table" or #order ~= count then
+    return nil
+  end
+  local list = {}
+  for i = 1, count do
+    local b = order[i]
+    if not b.item then
+      return nil
+    end
+    local e = { item = b.item, base = true }
+    if b.parent then
+      e.parent = true
+    else
+      e.parent = false
+      if b.flag then
+        e.flag = true
+        e.rid = b.tagged or false
+        e.step = b.step
+        e.trk = b.trk
+      else
+        e.flag = false
+      end
+    end
+    list[i] = e
+  end
+  return { list = list, n = count }
+end
+
+-- Index of tr's items by enumerating the track. old: this track's index when
+-- it is still consistent with REAPER (its entries keep their tags).
+function seq_scope_track_scan(tr, count, old)
+  local reuse = nil
+  if old then
+    reuse = {}
+    for _, group in ipairs({ old.list, old.adds or {} }) do
+      for i = 1, #group do
+        local e = group[i]
+        if not e.dead then
+          reuse[tostring(e.item)] = e
+        end
+      end
+    end
+  end
+  local list = {}
+  for i = 0, count - 1 do
+    local item = r.GetTrackMediaItem(tr, i)
+    if item then
+      list[#list + 1] = (reuse and reuse[tostring(item)]) or { item = item }
+    end
+  end
+  return { list = list, n = count }
+end
+
+-- Entries for the items on tr that match(e), in track order (ascending item
+-- index), plus the track's index for seq_scope_deleted. Same items, in the
+-- same order, as a scan of every item on the track.
+function seq_scope_track_matches(tr, match)
+  local scope = seq_item_scope or { tracks = {}, written = {}, written_all = false }
+  local key = tostring(tr)
+  local count = r.CountTrackMediaItems(tr)
+  local rec = scope.tracks[key]
+  if rec and rec.n ~= count then
+    -- Changed behind the index: read the track again from scratch.
+    rec = nil
+  end
+  if rec and rec.adds then
+    for _, e in ipairs(rec.adds) do
+      if not e.dead and match(e) then
+        rec = seq_scope_track_scan(tr, count, rec)
+        break
+      end
+    end
+  end
+  if not rec then
+    rec = seq_scope_track_from_baseline(scope, key, count) or seq_scope_track_scan(tr, count, nil)
+  end
+  local out
+  for _ = 1, 3 do
+    out = {}
+    local list = rec.list
+    for i = 1, #list do
+      local e = list[i]
+      if not e.dead and match(e) then
+        out[#out + 1] = e
+      end
+    end
+    local retry = false
+    -- Baseline matches are confirmed against REAPER before anyone acts on them.
+    for i = 1, #out do
+      local e = out[i]
+      if e.base then
+        local fresh = { item = e.item }
+        if not match(fresh) then
+          scope.base_ok = false
+          rec = seq_scope_track_scan(tr, count, nil)
+          retry = true
+          break
+        end
+        -- Keep only what was just read; anything else is read when needed.
+        e.base = nil
+        e.parent, e.flag, e.rid = fresh.parent, fresh.flag, fresh.rid
+        e.step, e.trk, e.aux = fresh.step, fresh.trk, fresh.aux
+      end
+    end
+    if not retry and rec.adds and #out > 1 then
+      -- Inserts since the track was read: take each match's current index.
+      local at, seen = {}, {}
+      for i = 1, #out do
+        local n = r.GetMediaItemInfo_Value(out[i].item, "IP_ITEMNUMBER")
+        if type(n) ~= "number" or seen[n] then
+          rec = seq_scope_track_scan(tr, count, rec)
+          retry = true
+          break
+        end
+        seen[n] = true
+        at[out[i]] = n
+      end
+      if not retry then
+        table.sort(out, function(a, b) return at[a] < at[b] end)
+      end
+    end
+    if not retry then
+      break
+    end
+  end
+  scope.tracks[key] = rec
+  return out, rec
+end
+
+-- After DeleteTrackMediaItem on an entry from seq_scope_track_matches.
+function seq_scope_deleted(rec, e, ok)
+  if ok then
+    e.dead = true
+    rec.n = rec.n - 1
+  else
+    -- Unknown state: the next lookup reads the track again.
+    rec.n = -1
+  end
+end
+
+-- The script added item to tr (inside a scope).
+function seq_scope_item_added(tr, item)
+  local scope = seq_item_scope
+  if not scope or not tr or not item then
+    return
+  end
+  local rec = scope.tracks[tostring(tr)]
+  if rec then
+    local adds = rec.adds
+    if not adds then
+      adds = {}
+      rec.adds = adds
+    end
+    adds[#adds + 1] = { item = item }
+    rec.n = rec.n + 1
+  end
+end
+
+-- The script changed tags or positions of existing items: index from scratch.
+function seq_scope_forget()
+  local scope = seq_item_scope
+  if scope then
+    scope.tracks = {}
+    scope.written_all = true
+  end
+end
+
 function remove_seq_rendered_items(region)
   local removed = 0
   local region_id = region and region.id or nil
+  local function match(e)
+    return seq_scope_item_owned(e, region_id)
+  end
   local tr_count = r.CountTracks(0)
   for tr_idx = 0, tr_count - 1 do
     local tr = r.GetTrack(0, tr_idx)
     local removed_here = removed
-    for item_idx = r.CountTrackMediaItems(tr) - 1, 0, -1 do
-      local item = r.GetTrackMediaItem(tr, item_idx)
-      if item and seq_item_is_owned(item, region_id) then
-        if r.DeleteTrackMediaItem(tr, item) then
+    if tr then
+      local hits, rec = seq_scope_track_matches(tr, match)
+      for i = #hits, 1, -1 do
+        local e = hits[i]
+        local ok = r.DeleteTrackMediaItem(tr, e.item)
+        seq_scope_deleted(rec, e, ok)
+        if ok then
           removed = removed + 1
         end
       end
@@ -76,18 +382,28 @@ function remove_seq_rendered_items_by_ids(id_set)
     return 0
   end
   local removed = 0
+  local function match(e)
+    if e.flag == false then
+      return false
+    end
+    local rid = seq_scope_item_rid(e)
+    if not (rid and id_set[rid]) then
+      return false
+    end
+    return seq_scope_item_flag(e)
+  end
   local tr_count = r.CountTracks(0)
   for tr_idx = 0, tr_count - 1 do
     local tr = r.GetTrack(0, tr_idx)
-    for item_idx = r.CountTrackMediaItems(tr) - 1, 0, -1 do
-      local item = r.GetTrackMediaItem(tr, item_idx)
-      if item and get_item_ext(item, SEQ_EXT_FLAG) == "1" then
-        local rid = tonumber(get_item_ext(item, SEQ_EXT_REGION) or "")
-        if rid and id_set[rid] then
-          if r.DeleteTrackMediaItem(tr, item) then
-            removed = removed + 1
-            seq_mark_self_arrange_write(tr, rid)
-          end
+    if tr then
+      local hits, rec = seq_scope_track_matches(tr, match)
+      for i = #hits, 1, -1 do
+        local e = hits[i]
+        local ok = r.DeleteTrackMediaItem(tr, e.item)
+        seq_scope_deleted(rec, e, ok)
+        if ok then
+          removed = removed + 1
+          seq_mark_self_arrange_write(tr, seq_scope_item_rid(e))
         end
       end
     end
@@ -815,6 +1131,7 @@ function seq_delete_notes_overlapping_span(region, slot, span_start, span_end, k
   if #to_delete == 0 then
     return false
   end
+  local own_scope = seq_item_scope_open()
   for i = 1, #to_delete do
     local item = to_delete[i]
     register_seq_note_anim(region.id, slot.id, item.key, item.note, "delete")
@@ -823,6 +1140,7 @@ function seq_delete_notes_overlapping_span(region, slot, span_start, span_end, k
       remove_seq_rendered_items_for_step(region, slot, slot.id, item.key)
     end
   end
+  seq_item_scope_close(own_scope)
   return true
 end
 
