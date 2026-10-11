@@ -171,7 +171,20 @@ function seq_scope_baseline_current()
   return r.GetProjectStateChangeCount(0) == meta.count
 end
 
+-- The index entry for baseline entry b: its tags as the baseline read them.
+function seq_scope_entry_from_base(b)
+  if b.parent then
+    return { item = b.item, base = true, parent = true }
+  elseif b.flag then
+    return { item = b.item, base = true, parent = false, flag = true, rid = b.tagged or false,
+      step = b.step, trk = b.trk }
+  end
+  return { item = b.item, base = true, parent = false, flag = false }
+end
+
 -- Index of tr's items from the baseline, or nil when it can't be trusted.
+-- Its list holds entries only for the items a lookup has matched or read a
+-- tag of; rec.base[i] stands for any other item i (see seq_scope_track_matches).
 function seq_scope_track_from_baseline(scope, key, count)
   if scope.base_ok == nil then
     scope.base_ok = seq_scope_baseline_current()
@@ -185,29 +198,12 @@ function seq_scope_track_from_baseline(scope, key, count)
   if type(order) ~= "table" or #order ~= count then
     return nil
   end
-  local list = {}
   for i = 1, count do
-    local b = order[i]
-    if not b.item then
+    if not order[i].item then
       return nil
     end
-    local e = { item = b.item, base = true }
-    if b.parent then
-      e.parent = true
-    else
-      e.parent = false
-      if b.flag then
-        e.flag = true
-        e.rid = b.tagged or false
-        e.step = b.step
-        e.trk = b.trk
-      else
-        e.flag = false
-      end
-    end
-    list[i] = e
   end
-  return { list = list, n = count }
+  return { list = {}, base = order, len = count, n = count }
 end
 
 -- Index of tr's items by enumerating the track. old: this track's index when
@@ -216,12 +212,21 @@ function seq_scope_track_scan(tr, count, old)
   local reuse = nil
   if old then
     reuse = {}
-    for _, group in ipairs({ old.list, old.adds or {} }) do
-      for i = 1, #group do
-        local e = group[i]
-        if not e.dead then
-          reuse[tostring(e.item)] = e
-        end
+    local list, base = old.list, old.base
+    for i = 1, base and old.len or #list do
+      local e = list[i]
+      if e == nil then
+        e = seq_scope_entry_from_base(base[i])
+      end
+      if not e.dead then
+        reuse[tostring(e.item)] = e
+      end
+    end
+    local adds = old.adds or {}
+    for i = 1, #adds do
+      local e = adds[i]
+      if not e.dead then
+        reuse[tostring(e.item)] = e
       end
     end
   end
@@ -261,11 +266,47 @@ function seq_scope_track_matches(tr, match)
   local out
   for _ = 1, 3 do
     out = {}
-    local list = rec.list
-    for i = 1, #list do
-      local e = list[i]
-      if not e.dead and match(e) then
-        out[#out + 1] = e
+    local list, base = rec.list, rec.base
+    if base then
+      -- Items without an entry are tried on one reused table filled from the
+      -- baseline; an entry is kept for those that match or had a tag read.
+      local s = {}
+      for i = 1, rec.len do
+        local e = list[i]
+        if e == nil then
+          local b = base[i]
+          -- The fields seq_scope_entry_from_base(b) would have.
+          local parent, flag, rid, step, trk
+          if b.parent then
+            parent = true
+          elseif b.flag then
+            parent, flag, rid, step, trk = false, true, b.tagged or false, b.step, b.trk
+          else
+            parent, flag = false, false
+          end
+          s.item, s.base, s.aux, s.dead = b.item, true, nil, nil
+          s.parent, s.flag, s.rid, s.step, s.trk = parent, flag, rid, step, trk
+          local hit = match(s)
+          -- The tag readers only fill fields that are nil.
+          if hit or s.aux ~= nil or s.parent ~= parent or s.flag ~= flag or s.rid ~= rid
+              or s.step ~= step or s.trk ~= trk then
+            e = { item = s.item, base = true, parent = s.parent, flag = s.flag, rid = s.rid,
+              step = s.step, trk = s.trk, aux = s.aux }
+            list[i] = e
+            if hit then
+              out[#out + 1] = e
+            end
+          end
+        elseif not e.dead and match(e) then
+          out[#out + 1] = e
+        end
+      end
+    else
+      for i = 1, #list do
+        local e = list[i]
+        if not e.dead and match(e) then
+          out[#out + 1] = e
+        end
       end
     end
     local retry = false
