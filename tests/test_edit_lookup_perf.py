@@ -4,8 +4,11 @@ and reads each tag at most once per edit, and can take a track's tags from the
 arrange baseline when that baseline is current. These tests check that the
 indexed lookups delete exactly the items, in exactly the order, that the old
 full scans did, also after the user edits, duplicates or deletes items behind
-the script's back. Uses the in-memory REAPER project from
-tests/fake_reaper.lua via test_seq_sync. Requires `pip install lupa`."""
+the script's back. Also checks the Lua-side shortcuts on the same edit path
+against the code they replaced: json_encode's number/key caches (same bytes)
+and the undo deep compare with recorded snapshot key counts (same answers).
+Uses the in-memory REAPER project from tests/fake_reaper.lua via
+test_seq_sync. Requires `pip install lupa`."""
 import os
 import sys
 import tempfile
@@ -730,3 +733,32 @@ def test_undo_compare_matches_old_compare_on_snapshots_and_live_tables():
     ''')
     assert out.startswith("ok "), out
     assert int(out.split()[1]) > 2000
+
+
+def test_baseline_index_reads_only_hits_across_lookups():
+    # A track indexed from the baseline keeps entries only for what lookups
+    # touched: a second lookup with other criteria reads only its own hits,
+    # and repeating the first reads nothing, enumerates nothing.
+    L = _runtime(False)
+    out = run(L, LOOKUP + r'''
+      build_song(7)
+      FAKE.now = 300; frame()
+      local res = {}
+      local p3, m3 = owned_in(3)
+      local p4, m4 = owned_in(4)
+      local own = seq_item_scope_open()
+      local got3 = scoped(TR[2], m3)
+      for k in pairs(NCALL) do NCALL[k] = nil end
+      local got4 = scoped(TR[2], m4)
+      local reads4, enum4 = NCALL.GetSetMediaItemInfo_String or 0, NCALL.GetTrackMediaItem or 0
+      for k in pairs(NCALL) do NCALL[k] = nil end
+      local again3 = scoped(TR[2], m3)
+      local reads3, enum3 = NCALL.GetSetMediaItemInfo_String or 0, NCALL.GetTrackMediaItem or 0
+      seq_item_scope_close(own)
+      res[#res + 1] = tostring(got3 ~= "" and got4 ~= "" and got3 == again3)
+      res[#res + 1] = tostring(got3 == brute(TR[2], p3) and got4 == brute(TR[2], p4))
+      res[#res + 1] = tostring(reads4 == 3 * #owned_items(TR[2], 4) and enum4 == 0)
+      res[#res + 1] = tostring(reads3 == 0 and enum3 == 0)
+      return table.concat(res, " ")
+    ''')
+    assert out == "true true true true"
