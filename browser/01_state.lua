@@ -621,8 +621,18 @@ sample_path_miss_list = nil -- state.samples table the miss cache belongs to
 function rebuild_samples_path_index()
   samples_by_path = {}
   sample_path_miss = {}
+  local str_byte, str_find, str_lower = string.byte, string.find, string.lower
   for _, s in ipairs(state.samples) do
-    if s.path then
+    local path = s.path
+    if type(path) == "string" and path ~= "" and str_byte(path, -1) ~= 47 and not str_find(path, "\\", 1, true) then
+      -- Already normalized (the usual case): the normalized form is the path
+      -- itself and path_index_key() is just its lowercase.
+      samples_by_path[path] = s
+      local key = str_lower(path)
+      if key ~= path then
+        samples_by_path[key] = s
+      end
+    elseif s.path then
       samples_by_path[s.path] = s
       -- Also index forward-slash normalized form for analyzer path lookups
       local norm = tostring(s.path):gsub("\\", "/"):gsub("/+$", "")
