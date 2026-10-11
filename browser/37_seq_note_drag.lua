@@ -1135,9 +1135,9 @@ end
 function draw_seq_stutter_count_badge(dl, ctx, x0, y0, x1, y1, count, accent, hover)
   count = seq_clamp_stutter_count(count)
   local text = tostring(count)
-  local text_size = { r.ImGui_CalcTextSize(ctx, text) }
-  local text_w = text_size[1] or 0
-  local text_h = text_size[2] or 0
+  local text_w, text_h = r.ImGui_CalcTextSize(ctx, text)
+  text_w = text_w or 0
+  text_h = text_h or 0
   local tx = (x0 + x1) * 0.5 - text_w * 0.5
   local ty = (y0 + y1) * 0.5 - text_h * 0.5
   local bx0, by0, bx1, by1 = tx - 3, ty - 1, tx + text_w + 3, ty + text_h + 1
