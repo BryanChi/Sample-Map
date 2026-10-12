@@ -1577,7 +1577,7 @@ function sample_is_loop(sample)
   if sample_has_tag(sample, "loop") then
     return true
   end
-  return detect_loop_or_oneshot(sample.path or "", sample.folder or "", sample.playback_type) == "loop"
+  return detect_loop_or_oneshot(sample.path or "", sample.folder or "", sample.playback_type, sample.duration) == "loop"
 end
 
 -- Collect role-matching samples, optionally constrained by genre/custom keywords (OR).

@@ -52,6 +52,7 @@ function REF_apply_discovered_library_tags()
     project = true, projects = true, session = true, sessions = true,
     swell = true, ones = true, wavs = true, audiofiles = true,
     scene = true, discover = true,
+    min = true, maj = true, minor = true, major = true, sharp = true, flat = true,
   }
   for _, entry in ipairs(TAG_KEYWORDS) do
     skip[string.lower(entry.tag)] = true
@@ -64,6 +65,13 @@ function REF_apply_discovered_library_tags()
     for _, key in ipairs(entry.keys) do
       if #key >= 3 then
         skip[string.lower(key)] = true
+      end
+      if key:find(" ", 1, true) then
+        for word in key:lower():gmatch("%w+") do
+          if #word >= 3 then
+            skip[word] = true
+          end
+        end
       end
     end
   end
@@ -225,9 +233,19 @@ function REF_apply_discovered_library_tags()
     return c
   end
 
+  local covered = {}
+  for token, count in pairs(token_counts) do
+    if count >= min_count and token:find(" ", 1, true) and pack_count(token) >= 3 then
+      for word in token:gmatch("%S+") do
+        if token_counts[word] and count >= 0.9 * token_counts[word] then
+          covered[word] = true
+        end
+      end
+    end
+  end
   local ranked = {}
   for token, count in pairs(token_counts) do
-    if count >= min_count and pack_count(token) >= 2 then
+    if count >= min_count and not covered[token] and pack_count(token) >= 3 then
       ranked[#ranked + 1] = { tag = token, count = count }
     end
   end
@@ -282,7 +300,7 @@ function REF_apply_discovered_library_tags()
       local kept = {}
       for _, tag in ipairs(sample.tags or {}) do
         local low = tostring(tag):lower()
-        if (core_keep[low] or custom[low]) and not (tag_is_suppressed and tag_is_suppressed(low)) then
+        if (core_keep[low] or custom[low] or sm_is_tempo_tag(tag) or sm_is_key_tag(tag)) and not (tag_is_suppressed and tag_is_suppressed(low)) then
           kept[#kept + 1] = tag
         end
       end
