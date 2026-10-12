@@ -60,7 +60,9 @@ map_atlas = {
   key = nil,          -- filter + layout key the finished atlas was built for
   job = nil,          -- build in progress
   ready = false,
+  done = {},          -- recent finished atlases { key, res }, newest first
 }
+MAP_ATLAS_KEEP = 6
 
 local log10 = math.log(10)
 
@@ -498,6 +500,18 @@ function map_atlas_update()
     map_atlas_step(job)
     return
   end
+  -- Built before (a tag turned off again): show it at once, no rebuild.
+  local done = map_atlas.done or {}
+  for i = 1, #done do
+    if done[i].key == key then
+      map_atlas.res = done[i].res
+      map_atlas.res_key = key
+      map_atlas.key = key
+      map_atlas.ready = true
+      map_atlas.job = nil
+      return
+    end
+  end
   local n = MAP_ATLAS_COLS * MAP_ATLAS_ROWS
   map_atlas.job = {
     key = key,
@@ -817,6 +831,18 @@ function map_atlas_step(job)
     map_atlas.res_key = job.key
     map_atlas.ready = true
     map_atlas.job = nil
+    -- Keep the last few finished atlases (newest first) for map_atlas_update.
+    local done = map_atlas.done or {}
+    for i = #done, 1, -1 do
+      if done[i].key == job.key then
+        table.remove(done, i)
+      end
+    end
+    table.insert(done, 1, { key = job.key, res = res })
+    for i = #done, MAP_ATLAS_KEEP + 1, -1 do
+      done[i] = nil
+    end
+    map_atlas.done = done
   end
 end
 

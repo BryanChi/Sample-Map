@@ -123,21 +123,65 @@ function build_map_spatial(filtered)
 end
 
 function map_duration_bounds(filtered)
+  -- sample_map_duration inlined: this runs over every filtered sample.
   local duration_min, duration_max = nil, nil
-  local map_duration, min, max = sample_map_duration, math.min, math.max
   for i = 1, #filtered do
-    local map_dur = map_duration(filtered[i])
-    if map_dur > 0 then
+    local s = filtered[i]
+    local d = s.effective_duration
+    if type(d) ~= "number" or d <= 0 then
+      d = s.duration
+    end
+    if type(d) == "number" and d > 0 then
       if not duration_min then
-        duration_min = map_dur
-        duration_max = map_dur
-      else
-        duration_min = min(duration_min, map_dur)
-        duration_max = max(duration_max, map_dur)
+        duration_min = d
+        duration_max = d
+      elseif d < duration_min then
+        duration_min = d
+      elseif d > duration_max then
+        duration_max = d
       end
     end
   end
   return duration_min, duration_max
+end
+
+-- Recent filter results (tag sets), newest first, so turning a tag off again,
+-- or back on, reuses what was built for it instead of redoing the work. Each
+-- entry also keeps the last view built under that filter, so going back to it
+-- without moving the map skips the dot selection too. Entries are keyed by
+-- compute_map_filter_key(), which already changes whenever the library, its
+-- layout, folder availability or the tag index changes.
+MAP_FILTER_MEMO_SIZE = 6
+map_filter_memo = {}
+
+function map_filter_memo_get(key)
+  for i = 1, #map_filter_memo do
+    local e = map_filter_memo[i]
+    if e.key == key then
+      if i > 1 then
+        table.remove(map_filter_memo, i)
+        table.insert(map_filter_memo, 1, e)
+      end
+      return e
+    end
+  end
+  return nil
+end
+
+function map_filter_memo_put(entry)
+  for i = #map_filter_memo, 1, -1 do
+    if map_filter_memo[i].key == entry.key then
+      table.remove(map_filter_memo, i)
+    end
+  end
+  table.insert(map_filter_memo, 1, entry)
+  for i = #map_filter_memo, MAP_FILTER_MEMO_SIZE + 1, -1 do
+    map_filter_memo[i] = nil
+  end
+end
+
+function map_filter_memo_clear()
+  map_filter_memo = {}
 end
 
 function rebuild_map_base_cache()
@@ -202,16 +246,31 @@ function collect_tag_filter_candidates()
   if not by_tag then
     return nil, false
   end
-  local seen, out = {}, {}
+  local only, count = nil, 0
+  for tag, on in pairs(active) do
+    if on then
+      only, count = tag, count + 1
+    end
+  end
+  if count == 1 then
+    -- One tag: its index list already holds each sample once.
+    return by_tag[only] or {}, true
+  end
+  -- Several tags: union, each sample once. A per-call stamp on the sample
+  -- marks it as taken (cheaper than a library-sized seen-set every toggle).
+  local stamp = (map_tag_union_stamp or 0) + 1
+  map_tag_union_stamp = stamp
+  local out, n = {}, 0
   for tag, on in pairs(active) do
     if on then
       local list = by_tag[tag]
       if list then
         for i = 1, #list do
           local s = list[i]
-          if not seen[s] then
-            seen[s] = true
-            out[#out + 1] = s
+          if s._tag_union ~= stamp then
+            s._tag_union = stamp
+            n = n + 1
+            out[n] = s
           end
         end
       end
@@ -220,49 +279,99 @@ function collect_tag_filter_candidates()
   return out, true
 end
 
+-- Point map_cache at a filter result (fresh or from the memo) and drop the
+-- view built for the previous filter.
+local function use_map_filter_entry(entry)
+  map_cache.filtered = entry.filtered
+  map_cache.filtered_count = #entry.filtered
+  map_cache.spatial = entry.spatial
+  map_cache.duration_min = entry.duration_min
+  map_cache.duration_max = entry.duration_max
+  map_cache.filter_key = entry.key
+  map_cache.filter_entry = entry
+  map_cache.view_key = nil
+  map_cache.lod_key = nil
+  map_cache.draw_list = nil
+  map_cache.draw_entries = nil
+  map_cache.draw_path_set = nil
+end
+
 function rebuild_map_filtered_cache()
-  ensure_map_base_cache()
   local filter_key = compute_map_filter_key()
+  local memo = map_filter_memo_get(filter_key)
+  if memo then
+    use_map_filter_entry(memo)
+    return
+  end
+  ensure_map_base_cache()
   local candidates, has_tags = collect_tag_filter_candidates()
 
   if not has_tags then
     -- Clearing tags: reuse the base scan (no full-library walk)
-    map_cache.filtered = map_base_cache.filtered
-    map_cache.filtered_count = map_base_cache.filtered_count
-    map_cache.spatial = map_base_cache.spatial
-    map_cache.duration_min = map_base_cache.duration_min
-    map_cache.duration_max = map_base_cache.duration_max
-    map_cache.filter_key = filter_key
-    map_cache.view_key = nil
-    map_cache.lod_key = nil
-    map_cache.draw_list = nil
-    map_cache.draw_entries = nil
-    map_cache.draw_path_set = nil
+    local entry = {
+      key = filter_key,
+      filtered = map_base_cache.filtered,
+      spatial = map_base_cache.spatial,
+      duration_min = map_base_cache.duration_min,
+      duration_max = map_base_cache.duration_max,
+    }
+    map_filter_memo_put(entry)
+    use_map_filter_entry(entry)
     return
   end
 
+  -- One pass: keep the candidates the base filter passed, bin them for the
+  -- spatial index and track the duration range (as build_map_spatial and
+  -- map_duration_bounds would).
   local base_set = map_base_cache.filtered_set or {}
-  local filtered = {}
+  local filtered, spatial = {}, {}
+  local n = 0
+  local res = MAP_GRID_RES
+  local floor = math.floor
+  local duration_min, duration_max = nil, nil
   for i = 1, #candidates do
     local s = candidates[i]
     if base_set[s] then
       if not s._render_color then
         s._render_color = get_sample_dot_color(s)
       end
-      filtered[#filtered + 1] = s
+      n = n + 1
+      filtered[n] = s
+      local cell_x = floor((s.x or 0.5) * res)
+      if cell_x < 0 then cell_x = 0 elseif cell_x > res - 1 then cell_x = res - 1 end
+      local cell_y = floor((s.y or 0.5) * res)
+      if cell_y < 0 then cell_y = 0 elseif cell_y > res - 1 then cell_y = res - 1 end
+      local key = cell_y * res + cell_x
+      local bucket = spatial[key]
+      if not bucket then
+        bucket = {}
+        spatial[key] = bucket
+      end
+      bucket[#bucket + 1] = s
+      local d = s.effective_duration
+      if type(d) ~= "number" or d <= 0 then
+        d = s.duration
+      end
+      if type(d) == "number" and d > 0 then
+        if not duration_min then
+          duration_min, duration_max = d, d
+        elseif d < duration_min then
+          duration_min = d
+        elseif d > duration_max then
+          duration_max = d
+        end
+      end
     end
   end
 
-  map_cache.filtered = filtered
-  map_cache.filtered_count = #filtered
-  map_cache.spatial = build_map_spatial(filtered)
-  map_cache.duration_min, map_cache.duration_max = map_duration_bounds(filtered)
-  map_cache.filter_key = filter_key
-  map_cache.view_key = nil
-  map_cache.lod_key = nil
-  map_cache.draw_list = nil
-  map_cache.draw_entries = nil
-  map_cache.draw_path_set = nil
+  local entry = { key = filter_key, filtered = filtered, spatial = spatial,
+    duration_min = duration_min, duration_max = duration_max }
+  -- A subset of a library with no repeated path has none either.
+  if map_base_cache.spatial and map_spatial_paths_unique(map_base_cache.spatial) then
+    map_spatial_unique_paths[entry.spatial] = true
+  end
+  map_filter_memo_put(entry)
+  use_map_filter_entry(entry)
 end
 
 function preview_random_filtered_sample()
@@ -443,16 +552,24 @@ function apply_map_dot_cap(candidates, max_dots, playing_path, x_min, x_max, y_m
   local playing = nil
   prefer_set = prefer_set or {}
 
+  -- Hot loop over every visible sample: locals and inline clamps.
+  local floor = math.floor
+  local sx_scale, sy_scale = subgrid / vw, subgrid / vh
+  local last = subgrid - 1
+  local has_prefer = next(prefer_set) ~= nil
   for i = 1, #candidates do
     local s = candidates[i]
-    if playing_path and s.path == playing_path then
+    local path = s.path
+    if playing_path and path == playing_path then
       playing = s
     else
-      local gx = math.max(0, math.min(subgrid - 1, math.floor(((s.x or 0.5) - x0) / vw * subgrid)))
-      local gy = math.max(0, math.min(subgrid - 1, math.floor(((s.y or 0.5) - y0) / vh * subgrid)))
+      local gx = floor(((s.x or 0.5) - x0) * sx_scale)
+      if gx < 0 then gx = 0 elseif gx > last then gx = last end
+      local gy = floor(((s.y or 0.5) - y0) * sy_scale)
+      if gy < 0 then gy = 0 elseif gy > last then gy = last end
       local key = gy * subgrid + gx
-      local rank = sample_lod_rank(s)
-      if prefer_set[s.path] then
+      local rank = s._lod_rank or sample_lod_rank(s)
+      if has_prefer and prefer_set[path] then
         -- Mild bias keeps prior dots from thrashing without blocking new cells
         rank = rank - 200000000
       end
@@ -513,13 +630,26 @@ function map_build_draw_entries(draw_list, padded_width, padded_height, padded_c
     cols = arrays.draw_col or {}
   end
   local unavailable_color = MAP_UNAVAILABLE_DOT_COLOR
+  -- Entry tables cut off by a smaller list wait here for the next larger one,
+  -- so switching between a small and a large filter allocates nothing.
+  local spare = arrays and arrays.entry_spare
+  if arrays and not spare then
+    spare = {}
+    arrays.entry_spare = spare
+  end
   for i = 1, n do
     local s = draw_list[i]
     local px = padded_center_x + ((s.x or 0.5) * padded_width - half_w) * zoom
     local py = padded_center_y + ((s.y or 0.5) * padded_height - half_h) * zoom
     local e = entries[i]
     if not e then
-      e = {}
+      local ns = spare and #spare or 0
+      if ns > 0 then
+        e = spare[ns]
+        spare[ns] = nil
+      else
+        e = {}
+      end
       entries[i] = e
     end
     local unavailable = s._folder_unavailable
@@ -536,6 +666,9 @@ function map_build_draw_entries(draw_list, padded_width, padded_height, padded_c
     end
   end
   for i = #entries, n + 1, -1 do
+    if spare then
+      spare[#spare + 1] = entries[i]
+    end
     entries[i] = nil
   end
   if arrays then
@@ -567,6 +700,29 @@ function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_heig
   end
 
   local zoom = state.zoom or 1.0
+  local entry = map_cache.filter_entry
+  local saved = entry and entry.key == map_cache.filter_key and entry.view
+  if saved and saved.key == view_key then
+    -- Back to a filter and view built before (a tag turned off again).
+    map_cache.view_key = view_key
+    map_cache.hover_list = saved.hover_list
+    map_cache.draw_list = saved.draw_list
+    map_cache.draw_path_set = saved.path_set
+    map_cache.draw_index_by_path = saved.path_set
+    map_cache.draw_dup_paths = saved.dup
+    map_cache.draw_entries = map_build_draw_entries(
+      saved.draw_list, padded_width, padded_height, padded_center_x, padded_center_y, zoom,
+      map_cache.entry_pool, map_cache
+    )
+    map_cache.entry_pool = map_cache.draw_entries
+    map_cache.entries_gen = (map_cache.entries_gen or 0) + 1
+    map_cache.visible_total = saved.visible_total
+    map_cache.draw_count = #saved.draw_list
+    map_cache.dots_capped = saved.capped
+    map_cache.lod_budget = saved.budget
+    return saved.draw_list, saved.hover_list, map_cache
+  end
+
   local x_min, x_max, y_min, y_max = get_viewport_norm_bounds(
     padded_x0, padded_y0, padded_width, padded_height,
     padded_center_x, padded_center_y, margin
@@ -635,6 +791,12 @@ function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_heig
   map_cache.draw_count = #draw_list
   map_cache.dots_capped = capped
   map_cache.lod_budget = max_dots
+  if entry and entry.key == map_cache.filter_key then
+    entry.view = {
+      key = view_key, hover_list = hover_list, draw_list = draw_list, path_set = path_set,
+      dup = dup, visible_total = visible_total, capped = capped, budget = max_dots,
+    }
+  end
 
   return draw_list, hover_list, map_cache
 end
