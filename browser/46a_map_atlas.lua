@@ -174,18 +174,18 @@ function map_view_frame(padded_x0, padded_y0, padded_width, padded_height, padde
   }
 end
 
--- Stars are small when zoomed out (0.6x the dot size) and grow as you zoom
--- in (~1x at 4x, 1.6x at 16x).
+-- Stars are small when zoomed out (0.5x the dot size) and grow as you zoom
+-- in (~1x at 4x, 1.7x at 16x).
 function map_dot_zoom_scale()
   local d = map_zoom_depth()
-  return 0.6 + 1.0 * d * math.sqrt(d)
+  return 0.5 + 1.1 * d * math.sqrt(d)
 end
 
--- Star brightness: dimmer when zoomed right out, where the nebula carries
+-- Star brightness: faint when zoomed right out, where the nebula carries
 -- the picture, full from about 3x.
 function map_star_alpha_scale()
   local d = map_zoom_depth()
-  return 0.5 + 0.5 * math.min(1.0, d / 0.4)
+  return 0.35 + 0.65 * math.min(1.0, d / 0.4)
 end
 
 -- --- Formatting ----------------------------------------------------------------
@@ -1116,7 +1116,9 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
   table.sort(cands, function(a, b) return a.cnt > b.cnt end)
 
   local _, th = r.ImGui_CalcTextSize(ctx, "A")
-  local h = th * 2 + 2
+  -- Card: padding, then a colour dot, then the name over the count.
+  local pad_x, pad_y, dot_w = 8, 5, 12
+  local h = th * 2 + 2 + pad_y * 2
   -- Other controls (edge counts, overview) and the status card / zoom chip
   -- strip along the bottom stay clear of labels.
   local placed = {}
@@ -1148,7 +1150,7 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
     local px, py = sx_of(v, t.peak_x), sy_of(v, t.peak_y)
     local margin = 8
     local pinned = px < v.x0 + 30 or px > v.x1 - 30 or py < v.y0 + 14 or py > v.y1 - 14
-    local w = math.max(nw, sw) + 8
+    local w = math.max(nw, sw) + pad_x * 2 + dot_w
     -- The label sits above its spot, with a short tick down to it.
     local cx = math.max(v.x0 + w * 0.5 + margin, math.min(v.x1 - w * 0.5 - margin, px))
     local cy = math.max(v.y0 + h * 0.5 + margin + 18, math.min(v.y1 - h * 0.5 - margin, py - h * 0.5 - 8))
@@ -1165,23 +1167,33 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
     end
     if ok then
       shown = shown + 1
-      placed[#placed + 1] = { x0 - 2, y0 - 2, x0 + w + 2, y0 + h + 2 }
+      placed[#placed + 1] = { x0 - 3, y0 - 3, x0 + w + 3, y0 + h + 4 }
       local base = lift(build_color_rrgbbaa(extract_rgb(state.tag_colors[t.tag] or 0x888888)), 0.5)
       local over = mx >= x0 and mx <= x0 + w and my >= y0 and my <= y0 + h
       local active = state.active_tags and state.active_tags[t.tag]
       local dim = hot_tag and hot_tag ~= t.tag
-      local a = dim and 0x50 or ((over or active) and 0xFF or 0xD8)
-      -- Dark plate so names stay readable over crowded stars.
-      r.ImGui_DrawList_AddRectFilled(dl, x0 - 4, y0 - 2, x0 + w + 4, y0 + h + 2, with_alpha(MAP_ATLAS_COL.space_edge, dim and 0x60 or 0xA8), 4)
-      if over or active then
-        r.ImGui_DrawList_AddRectFilled(dl, x0 - 4, y0 - 2, x0 + w + 4, y0 + h + 2, with_alpha(base, 0x22), 4)
-        r.ImGui_DrawList_AddRect(dl, x0 - 3.5, y0 - 1.5, x0 + w + 3.5, y0 + h + 1.5, with_alpha(base, 0x70), 4, 0, 1.0)
+      local a = dim and 0x50 or ((over or active) and 0xFF or 0xE0)
+      local x1, y1 = x0 + w, y0 + h
+      local rad = 6
+      -- Drop shadow, dark glassy plate with a faint tint of the tag colour,
+      -- a thin coloured border and a soft top highlight.
+      r.ImGui_DrawList_AddRectFilled(dl, x0 + 1, y0 + 2, x1 + 1, y1 + 3, with_alpha(0x000000FF, dim and 0x30 or 0x60), rad + 1)
+      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, with_alpha(MAP_ATLAS_COL.space_edge, dim and 0x78 or 0xD0), rad)
+      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, with_alpha(base, (over or active) and 0x2C or (dim and 0x08 or 0x12)), rad)
+      r.ImGui_DrawList_AddLine(dl, x0 + rad, y0 + 1, x1 - rad, y0 + 1, with_alpha(0xFFFFFFFF, dim and 0x08 or 0x18), 1.0)
+      r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5,
+        with_alpha(base, dim and 0x20 or ((over or active) and 0xC0 or 0x50)), rad, 0, (over or active) and 1.5 or 1.0)
+      -- Colour dot with a small glow; a ring when this tag is the filter.
+      local dx0, dy0 = x0 + pad_x + 3, y0 + h * 0.5
+      r.ImGui_DrawList_AddCircleFilled(dl, dx0, dy0, 6.5, with_alpha(base, dim and 0x10 or ((over or active) and 0x50 or 0x28)), 16)
+      r.ImGui_DrawList_AddCircleFilled(dl, dx0, dy0, 3.2, with_alpha(base, a), 12)
+      if active then
+        r.ImGui_DrawList_AddCircle(dl, dx0, dy0, 5.8, with_alpha(base, 0xE0), 16, 1.2)
       end
-      local nx = cx - nw * 0.5
-      local sx = cx - sw * 0.5
+      local tx = x0 + pad_x + dot_w
       if pinned then
         -- Arrow towards the tag's densest spot
-        local ax, ay = x0 - 6, y0 + th * 0.5
+        local ax, ay = x0 - 6, y0 + h * 0.5
         local dx, dy = px - cx, py - cy
         local len = math.sqrt(dx * dx + dy * dy)
         if len > 0 then
@@ -1193,14 +1205,14 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
             with_alpha(base, a))
         end
       elseif math.abs(cy - (py - h * 0.5 - 8)) < 1 then
-        r.ImGui_DrawList_AddLine(dl, px, y0 + h + 1, px, py - 3, with_alpha(base, a * 0.5), 1.0)
+        r.ImGui_DrawList_AddLine(dl, px, y1 + 1, px, py - 3, with_alpha(base, a * 0.5), 1.0)
       end
-      add_text(dl, nx + 1, y0 + 1, MAP_ATLAS_COL.label_shadow, name)
-      add_text(dl, nx, y0, with_alpha(base, a), name)
-      add_text(dl, nx + 0.5, y0, with_alpha(base, a), name)
-      add_text(dl, sx + 1, y0 + th + 3, MAP_ATLAS_COL.label_shadow, sub)
-      add_text(dl, sx, y0 + th + 2, with_alpha(MAP_ATLAS_COL.label_count, dim and 0x50 or 0xA8), sub)
-      hits[#hits + 1] = { x0 - 4, y0 - 2, x0 + w + 4, y0 + h + 2, kind = "label", tag = t.tag }
+      local ny = y0 + pad_y
+      add_text(dl, tx + 1, ny + 1, MAP_ATLAS_COL.label_shadow, name)
+      add_text(dl, tx, ny, with_alpha(base, a), name)
+      add_text(dl, tx + 0.5, ny, with_alpha(base, a), name)
+      add_text(dl, tx, ny + th + 2, with_alpha(MAP_ATLAS_COL.label_count, dim and 0x50 or ((over or active) and 0xE0 or 0xA0)), sub)
+      hits[#hits + 1] = { x0, y0, x0 + w, y0 + h, kind = "label", tag = t.tag }
       if over then
         state.map_atlas_hot_tag_next = t.tag
       end
@@ -1350,9 +1362,7 @@ function handle_map_overlay_input(hovered, mx, my, width, height)
   if r.ImGui_SetMouseCursor and r.ImGui_MouseCursor_Hand then
     r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_Hand())
   end
-  if h.kind == "label" then
-    r.ImGui_SetTooltip(ctx, "Click to show only " .. label_text(h.tag) .. " (click again to clear)")
-  elseif h.kind == "zoom" then
+  if h.kind == "zoom" then
     r.ImGui_SetTooltip(ctx, "Click to zoom all the way out")
   end
   if not r.ImGui_IsMouseClicked(ctx, 0) then

@@ -573,14 +573,17 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
       dl, s, px, py, padded_x0 - MAP_GUTTER_LEFT, padded_y0 - MAP_GUTTER_TOP,
       padded_x0, padded_y0, padded_x0 + padded_width, padded_y0 + padded_height
     )
-    -- Soft halo in the dot's colour, then a crisp ring
-    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 7.0, (closest.color & 0xFFFFFF00) | 0x22, 20)
-    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 3.5, (closest.color & 0xFFFFFF00) | 0x40, 16)
+    -- Wide soft glow in the dot's colour, a bright core, then a crisp ring
+    local glow_col = closest.color & 0xFFFFFF00
+    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 14.0, glow_col | 0x18, 24)
+    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 8.0, glow_col | 0x38, 20)
+    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 4.0, glow_col | 0x66, 16)
     if not is_currently_playing then
-      r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius * 1.4, closest.color, 12)
+      r.ImGui_DrawList_AddCircleFilled(dl, px, py, math.max(3.0, dot_radius * 1.7), closest.color | 0xFF, 12)
+      r.ImGui_DrawList_AddCircleFilled(dl, px, py, math.max(1.5, dot_radius * 0.75), 0xFFFFFFE0, 10)
     end
-    r.ImGui_DrawList_AddCircle(dl, px, py, dot_radius + 3.0, s.hot_color or hover_color, 16, 1.5)
-    draw_map_star_flare(dl, px, py, closest.color, dot_radius + 12.0)
+    r.ImGui_DrawList_AddCircle(dl, px, py, dot_radius + 4.0, s.hot_color or hover_color, 16, 1.8)
+    draw_map_star_flare(dl, px, py, closest.color, dot_radius + 16.0)
 
     -- Pin to the hovered dot so ImGui nav cannot relocate this tooltip.
     if r.ImGui_SetNextWindowPos then
