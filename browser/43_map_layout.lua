@@ -768,6 +768,11 @@ function render_header()
     state.settings_open = not state.settings_open
   end
 
+  if r.ImGui_MenuItem(ctx, "Feedback") then
+    sm_open_feedback()
+  end
+  menu_item_tooltip("Report a bug or suggest an idea.\nYou can add pictures and the usage log; it goes to the developer on GitHub.")
+
   if SampleMapUpdateState and SampleMapUpdateState.show_update_icon then
     r.ImGui_SameLine(ctx)
     local update_img = get_vfx_icon and get_vfx_icon("Update")
