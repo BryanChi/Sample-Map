@@ -103,21 +103,14 @@ def test_regions_and_labels_follow_tags():
     kx, ky = L.eval("res.tags.kick.peak_x"), L.eval("res.tags.kick.peak_y")
     hx, hy = L.eval("res.tags.hat.peak_x"), L.eval("res.tags.hat.peak_y")
     assert ky > 0.6 and hy < 0.4 and hx < kx
-    # Closed outline: every segment end is shared by another segment.
-    open_ends = L.execute(r'''
-      local segs = res.tags.kick.segs
-      local seen = {}
-      local function key(x, y) return string.format("%.5f,%.5f", x, y) end
-      for i = 1, #segs, 4 do
-        for _, k in ipairs({ key(segs[i], segs[i + 1]), key(segs[i + 2], segs[i + 3]) }) do
-          seen[k] = (seen[k] or 0) + 1
-        end
-      end
-      local odd = 0
-      for _, n in pairs(seen) do if n % 2 == 1 then odd = odd + 1 end end
-      return odd''')
-    assert L.eval("#res.tags.kick.segs") > 0
-    assert open_ends == 0
+    # Nebula: one colour per cell, brightest where the kicks pile up.
+    n = L.eval("#res.nebula")
+    assert n == L.eval("MAP_ATLAS_COLS * MAP_ATLAS_ROWS")
+    alpha = L.execute(r'''
+      local cols = MAP_ATLAS_COLS
+      local function a(nx, ny) return res.nebula[math.floor(ny * MAP_ATLAS_ROWS) * cols + math.floor(nx * cols) + 1] & 0xFF end
+      return a(res.tags.kick.peak_x, res.tags.kick.peak_y), a(0.97, 0.03)''')
+    assert alpha[0] > 0x60 and alpha[1] < alpha[0] // 4
 
 
 def test_counts_in_view_and_off_screen():
@@ -150,18 +143,57 @@ def test_filter_change_rebuilds_and_hides_stale_regions():
     assert order == ["kick"]
 
 
-def test_hot_label_dims_other_tags():
+def test_star_colours_lift_and_hot_label_dims_other_tags():
     L = _rt()
     out = L.execute(r'''
       local kick = get_sample_dot_color({ tags = { "kick" }, channels = 2 })
       local hat = get_sample_dot_color({ tags = { "hat" }, channels = 2 })
       local cache = { entries_gen = 1, draw_col = { kick, hat } }
+      local plain = map_star_colors(cache, 2)
       state.map_atlas_hot_tag = "kick"
-      local cols = map_atlas_hot_colors(cache, 2)
+      local cols = map_star_colors(cache, 2)
       state.map_atlas_hot_tag = nil
-      return cols[1] == kick, cols[2] & 0xFF''')
-    assert out[0] is True
-    assert out[1] < 0x40
+      local function lum(c) return ((c >> 24) & 0xFF) + ((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) end
+      return lum(plain[1]) > lum(kick), cols[1] == plain[1], cols[2] & 0xFF''')
+    assert out[0] is True and out[1] is True
+    assert out[2] < 0x40
+
+
+def test_label_text_is_plain_plural():
+    L = _rt()
+    f = L.eval("map_label_text")
+    assert [f(t) for t in ("kick", "hat", "808", "fx", "crash", "keys", "vocals")] == \
+        ["KICKS", "HATS", "808S", "FX", "CRASHES", "KEYS", "VOCALS"]
+
+
+def test_constellation_links_join_nearest_same_tag():
+    L = _rt()
+    L.execute("res = build_atlas()")
+    out = L.execute(r'''
+      local linked, wrong, far = 0, 0, 0
+      for _, s in ipairs(state.samples) do
+        local l = map_atlas_links_for(res, s)
+        if l then
+          linked = linked + 1
+          for k = 1, 3, 2 do
+            local o = l[k]
+            if o then
+              if map_atlas_tag_of(o) ~= map_atlas_tag_of(s) or o == s then wrong = wrong + 1 end
+              if l[k + 1] > MAP_LINK_CELL + 1e-9 then far = far + 1 end
+            end
+          end
+          if l[3] and l[4] < l[2] then wrong = wrong + 1 end
+        elseif map_atlas_tag_of(s) == nil then
+        end
+      end
+      local untagged = 0
+      for _, s in ipairs(state.samples) do
+        if map_atlas_tag_of(s) == nil and map_atlas_links_for(res, s) then untagged = untagged + 1 end
+      end
+      return linked, wrong, far, untagged''')
+    linked, wrong, far, untagged = out
+    assert linked > 500
+    assert wrong == 0 and far == 0 and untagged == 0
 
 
 def test_overview_click_centres_view():

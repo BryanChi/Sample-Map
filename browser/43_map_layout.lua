@@ -809,15 +809,20 @@ function render_header()
     end
     menu_item_tooltip("One-shots whose names don't say what they are get a drum type guessed from the sound\n(kick, snare, clap, hat, crash, tom, perc). Guesses count in tag filters and dot colours.")
     if r.ImGui_MenuItem(ctx, "Map: Frequency Bands and Length Zones", nil, map_guides_enabled()) then
-      state.map_guides = not map_guides_enabled()
+      state.map_bands = not map_guides_enabled()
       save_config()
     end
     menu_item_tooltip("Shade the map into SUB ... AIR bands and mark HITS / ONE-SHOTS / PHRASES / LOOPS by length.")
-    if r.ImGui_MenuItem(ctx, "Map: Tag Regions and Labels", nil, map_atlas_enabled()) then
+    if r.ImGui_MenuItem(ctx, "Map: Tag Labels", nil, map_atlas_enabled()) then
       state.map_atlas = not map_atlas_enabled()
       save_config()
     end
-    menu_item_tooltip("Outline where each tag's samples sit, with a label and count.\nClick a label to show only that tag; hover it to highlight its dots.")
+    menu_item_tooltip("Name each tag's cluster (KICKS, HATS ...) with its count.\nClick a label to show only that tag; hover it to highlight its stars.")
+    if r.ImGui_MenuItem(ctx, "Map: Constellation Lines When Zoomed In", nil, map_constellations_enabled()) then
+      state.map_constellations = not map_constellations_enabled()
+      save_config()
+    end
+    menu_item_tooltip("Join nearby samples of the same tag with faint lines once you zoom in.")
     if r.ImGui_MenuItem(ctx, "Map: Overview When Zoomed In", nil, map_overview_enabled()) then
       state.map_overview = not map_overview_enabled()
       save_config()

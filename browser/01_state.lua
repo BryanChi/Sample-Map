@@ -260,7 +260,6 @@ MAP_GRID_RES = 32
 -- Hard cap for AddCircleFilled at every zoom. Over budget, a viewport-relative
 -- pick grid keeps on-screen density even instead of packing more when zoomed in.
 MAP_DOT_BUDGET = 30000
-MAP_DOT_RIM_MAX = 7000  -- dots get a dark rim when zoomed in and at most this many are drawn
 MAP_ZOOM_MIN = 1.0
 MAP_ZOOM_MAX = 16.0
 MAP_PLAY_TRACE_COUNT = 10
