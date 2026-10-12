@@ -2133,44 +2133,31 @@ function render_seq_groove_popup()
   r.ImGui_EndPopup(ctx)
 end
 
-function render_seq_kit_random_genre_chips(tags, id_prefix, priority_set)
-  local wrap_w = r.ImGui_GetContentRegionAvail(ctx)
-  local row_w = 0.0
-  local gap = 6.0
-  local first = true
+function render_seq_kit_random_genre_chips(tags, id_prefix, priority_set, counts, enabled)
+  local flow = ui_flow_begin(6.0)
+  local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   local shown = 0
-
   for idx, tag in ipairs(tags) do
-    local tw = select(1, r.ImGui_CalcTextSize(ctx, tag)) + 16.0
-    if not first then
-      if row_w + gap + tw > wrap_w then
-        row_w = 0.0
-      else
-        r.ImGui_SameLine(ctx, 0, gap)
-        row_w = row_w + gap
-      end
-    end
-    first = false
+    ui_flow_place(flow, select(1, r.ImGui_CalcTextSize(ctx, tag)) + pad_x * 2)
     shown = shown + 1
     local used_in_project = priority_set and priority_set[tag:lower()] == true
-    if draw_tag_button(ctx, tag, false, tag, id_prefix .. tostring(idx) .. "_") then
+    if draw_tag_button(ctx, tag, false, tag, id_prefix .. tostring(idx) .. "_") and enabled ~= false then
       randomize_seq_kit({ tag }, { exact_tag = true })
     end
     if used_in_project then
-      local dl = r.ImGui_GetWindowDrawList(ctx)
-      local x0, y0 = r.ImGui_GetItemRectMin(ctx)
-      local x1, y1 = r.ImGui_GetItemRectMax(ctx)
-      local rounding = (y1 - y0) * 0.5
-      r.ImGui_DrawList_AddRect(dl, x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5, 0xFFB870AA, rounding + 0.5, 0, 1.35)
+      ui_draw_chip_ring(SEQ_USED_CHIP_RING)
     end
     if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
-      local tip = "Randomize kit using \"" .. tag .. "\" samples (roles preserved)"
+      local count = counts and tonumber(counts[tag]) or nil
+      local tip = "Roll a kit from \"" .. tag .. "\" samples (roles stay the same)"
+      if count then
+        tip = string.format("%d sample%s\n", count, count == 1 and "" or "s") .. tip
+      end
       if used_in_project then
         tip = "Used in this project\n" .. tip
       end
       r.ImGui_SetTooltip(ctx, tip)
     end
-    row_w = row_w + tw
   end
   return shown
 end
@@ -2252,53 +2239,73 @@ function render_seq_kit_history_element_chip(kit_id, elem_idx, element)
   return button_w
 end
 
-function render_seq_kit_history_entry(entry)
+-- One past kit as a card: title row with a Load button (or "current" when it
+-- is the kit on the tracks now), then its drum chips.
+function render_seq_kit_history_entry(entry, current_sig)
   if not entry or type(entry.elements) ~= "table" then
     return
   end
+  local entry_id = tostring(entry.id or 0)
+  if current_sig == nil then
+    current_sig = seq_kit_signature(collect_seq_kit_elements())
+  end
+  local is_active = current_sig ~= "" and current_sig == seq_kit_signature(entry.elements)
+
+  -- The card is painted from last frame's measured height so it sits behind
+  -- the chips drawn below.
+  state.seq_kit_card_h = state.seq_kit_card_h or {}
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local cx0, cy0 = r.ImGui_GetCursorScreenPos(ctx)
+  local card_w = r.ImGui_GetContentRegionAvail(ctx) or 200
+  local card_h = state.seq_kit_card_h[entry_id]
+  if card_h then
+    local mx, my = r.ImGui_GetMousePos(ctx)
+    local hovered = r.ImGui_IsWindowHovered(ctx) and mx and my
+      and mx >= cx0 and mx <= cx0 + card_w and my >= cy0 and my <= cy0 + card_h
+    local border = is_active and 0xFFB870CC or (hovered and UI_THEME.border_hvr or UI_THEME.border)
+    ui_draw_panel(dl, cx0, cy0, cx0 + card_w, cy0 + card_h, UI_METRICS.radius_ctrl,
+      hovered and UI_THEME.surface_hvr or UI_THEME.surface, border, false, false)
+  end
+
+  local inset = 8.0
+  r.ImGui_Dummy(ctx, 1, 2)
+  r.ImGui_Indent(ctx, inset)
+
   local title = string.format("#%d  %s", entry.id or 0, entry.label or "Kit")
   if entry.is_original then
     title = title .. "  · original"
   end
-  local count_label = string.format("(%d)", #entry.elements)
-  local current_sig = seq_kit_signature(collect_seq_kit_elements())
-  local is_active = current_sig ~= "" and current_sig == seq_kit_signature(entry.elements)
-  local title_w = select(1, r.ImGui_CalcTextSize(ctx, title)) + 8.0
-  local title_h = select(2, r.ImGui_CalcTextSize(ctx, title)) + 4.0
-  r.ImGui_InvisibleButton(ctx, "##seq_kit_title_" .. tostring(entry.id or 0), title_w, title_h)
-  local title_hovered = r.ImGui_IsItemHovered(ctx)
-  local title_clicked = r.ImGui_IsItemClicked(ctx, 0)
-  local dl = r.ImGui_GetWindowDrawList(ctx)
-  local tx0, ty0 = r.ImGui_GetItemRectMin(ctx)
-  local title_col = is_active and 0xFFB870FF or (title_hovered and 0xFFFFFFFF or UI_THEME.text)
-  r.ImGui_DrawList_AddText(dl, tx0 + 2.0, ty0 + 2.0, title_col, title)
-  if title_clicked then
-    apply_seq_kit_history_entry(entry)
+  local title_col = is_active and 0xFFB870FF or UI_THEME.text
+  local btn_w = 46.0
+  local row_x1 = cx0 + card_w - inset
+  r.ImGui_AlignTextToFramePadding(ctx)
+  r.ImGui_TextColored(ctx, title_col, seq_truncate_text_to_width(title, card_w - inset * 2 - btn_w - 8))
+  local title_x1 = r.ImGui_GetItemRectMax(ctx)
+  if is_active then
+    local tag_w = r.ImGui_CalcTextSize(ctx, "current")
+    r.ImGui_SameLine(ctx, 0, math.max(6.0, row_x1 - tag_w - title_x1))
+    r.ImGui_TextColored(ctx, 0xFFB870FF, "current")
+  else
+    r.ImGui_SameLine(ctx, 0, math.max(6.0, row_x1 - btn_w - title_x1))
+    if draw_ui_button("seq_kit_load_" .. entry_id, "Load", btn_w, nil, { compact = true }) then
+      apply_seq_kit_history_entry(entry)
+    end
+    if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
+      r.ImGui_SetTooltip(ctx, "Put this whole kit back on the tracks")
+    end
   end
-  if title_hovered and r.ImGui_SetTooltip then
-    r.ImGui_SetTooltip(ctx, "Click to replace the whole kit with this one")
-  end
-  r.ImGui_SameLine(ctx, 0, 6.0)
-  r.ImGui_TextColored(ctx, UI_THEME.text_dim, count_label)
 
-  local wrap_w = r.ImGui_GetContentRegionAvail(ctx)
-  local row_w = 0.0
-  local gap = 4.0
-  local first = true
+  local flow = ui_flow_begin(4.0)
+  flow.wrap = card_w - inset * 2
   for idx, element in ipairs(entry.elements) do
     local role_label = SEQ_ROLE_LABELS[element.role] or tostring(element.role or "?")
-    local tw = select(1, r.ImGui_CalcTextSize(ctx, role_label)) + 12.0
-    if not first then
-      if row_w + gap + tw > wrap_w then
-        row_w = 0.0
-      else
-        r.ImGui_SameLine(ctx, 0, gap)
-        row_w = row_w + gap
-      end
-    end
-    first = false
-    local drawn_w = render_seq_kit_history_element_chip(entry.id or idx, idx, element)
-    row_w = row_w + (drawn_w or tw)
+    ui_flow_place(flow, select(1, r.ImGui_CalcTextSize(ctx, role_label)) + 12.0)
+    render_seq_kit_history_element_chip(entry.id or idx, idx, element)
   end
-  r.ImGui_Dummy(ctx, 0, 4)
+
+  r.ImGui_Unindent(ctx, inset)
+  r.ImGui_Dummy(ctx, 1, 2)
+  local _, cy1 = r.ImGui_GetCursorScreenPos(ctx)
+  local spacing_y = select(2, r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing())) or 0
+  state.seq_kit_card_h[entry_id] = math.max(1, cy1 - cy0 - spacing_y)
 end

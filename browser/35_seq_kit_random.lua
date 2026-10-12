@@ -2,36 +2,62 @@
 -- Loaded in order by "Sample Map Browser.lua"; shares globals with the other modules.
 local r = reaper
 
+SEQ_KIT_POPUP_W = 640.0
+
 function render_seq_kit_history_list()
   state.seq_kit_history = state.seq_kit_history or {}
-  r.ImGui_TextColored(ctx, 0xFFB870FF, "Past kits")
-  if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
-    r.ImGui_SetTooltip(ctx, "Title: apply kit · Chip: preview / double-click replace")
-  end
-  r.ImGui_Dummy(ctx, 0, 2)
-
+  ui_group_caption("Recent kits")
   if #state.seq_kit_history == 0 then
-    r.ImGui_TextColored(ctx, 0xFF888888, "No randomized kits yet")
+    r.ImGui_TextColored(ctx, UI_THEME.text_mute, "Kits you roll show up here,")
+    r.ImGui_TextColored(ctx, UI_THEME.text_mute, "so you can go back to one.")
     return
   end
 
+  local current_sig = seq_kit_signature(collect_seq_kit_elements())
   for _, entry in ipairs(state.seq_kit_history) do
-    render_seq_kit_history_entry(entry)
-    r.ImGui_Separator(ctx)
+    render_seq_kit_history_entry(entry, current_sig)
+    r.ImGui_Dummy(ctx, 1, 4)
   end
-  if draw_ui_button("seq_kit_hist_clear", "Clear kit history", nil, nil, { compact = true, style = "danger" }) then
+  if draw_ui_button("seq_kit_hist_clear", "Clear history", nil, nil, { compact = true, lead_icon = "close" }) then
     state.seq_kit_history = {}
     save_config()
   end
 end
 
-function render_seq_kit_random_popup()
-  if r.ImGui_SetNextWindowSize then
-    local cond = r.ImGui_Cond_Appearing and r.ImGui_Cond_Appearing() or 0
-    r.ImGui_SetNextWindowSize(ctx, 720.0, 460.0, cond)
+-- Genres to offer: ones already used by this project's regions first, then the
+-- rest of the library, filtered by the query. Returns project, library, counts.
+function seq_kit_popup_genres(query_lower)
+  local library_genres = collect_library_genre_tags()
+  local counts, library_set = {}, {}
+  for _, entry in ipairs(library_genres) do
+    library_set[entry.tag:lower()] = entry.tag
+    counts[entry.tag] = entry.count or 0
   end
+  local function matches(tag)
+    return query_lower == "" or tag:lower():find(query_lower, 1, true) ~= nil
+  end
+
+  local project, library, shown = {}, {}, {}
+  for _, tag in ipairs(collect_project_kit_genre_priority()) do
+    local lib_tag = library_set[tag:lower()]
+    if lib_tag and matches(lib_tag) and not shown[lib_tag:lower()] then
+      project[#project + 1] = lib_tag
+      shown[lib_tag:lower()] = true
+    end
+  end
+  for _, entry in ipairs(library_genres) do
+    local tag = entry.tag
+    if matches(tag) and not shown[tag:lower()] then
+      library[#library + 1] = tag
+      shown[tag:lower()] = true
+    end
+  end
+  return project, library, counts
+end
+
+function render_seq_kit_random_popup()
   if r.ImGui_SetNextWindowSizeConstraints then
-    r.ImGui_SetNextWindowSizeConstraints(ctx, 560.0, 340.0, 980.0, 820.0)
+    r.ImGui_SetNextWindowSizeConstraints(ctx, SEQ_KIT_POPUP_W, 0, SEQ_KIT_POPUP_W, 2000)
   end
   if not r.ImGui_BeginPopup(ctx, "seq_kit_random_popup") then
     return
@@ -39,90 +65,67 @@ function render_seq_kit_random_popup()
 
   sm_tag_index_rebuild_if_stale()
 
-  r.ImGui_TextColored(ctx, UI_THEME.text, "Randomize Kit")
-  r.ImGui_Separator(ctx)
+  local track_count = #(state.seq_tracks or {})
+  local meta = (track_count > 0)
+    and string.format("%d track%s  ·  roles stay the same", track_count, track_count == 1 and "" or "s")
+    or "No tracks yet"
+  ui_popup_header("dice5", "Randomize kit", meta)
 
-  r.ImGui_SetNextItemWidth(ctx, -1)
-  local changed, query
-  if r.ImGui_InputTextWithHint then
-    changed, query = r.ImGui_InputTextWithHint(ctx, "##seq_kit_random_query", "Custom keyword", state.seq_kit_random_query or "")
+  local submitted, query = ui_popup_search("seq_kit_random_query", "Filter genres or type any keyword", state.seq_kit_random_query)
+  state.seq_kit_random_query = query
+  local trimmed = seq_trim_text(query)
+
+  if track_count > 0 then
+    local randomize_label = (trimmed ~= "") and ('Randomize with "' .. trimmed .. '"') or "Randomize (any genre)"
+    local run = draw_ui_button("seq_kit_random_run", randomize_label, nil, 28,
+      { full_width = true, style = "primary", lead_icon = "dice5" })
+    if run or submitted then
+      randomize_seq_kit((trimmed ~= "") and { trimmed } or nil, { exact_tag = false })
+    end
   else
-    changed, query = r.ImGui_InputText(ctx, "##seq_kit_random_query", state.seq_kit_random_query or "", 128)
+    r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Add tracks to the sequencer first, then roll a kit for them.")
   end
-  seq_mark_text_input_item()
-  if changed then
-    state.seq_kit_random_query = query
-  end
-  local trimmed = seq_trim_text(state.seq_kit_random_query)
-  local randomize_label = (trimmed ~= "") and ('Randomize with "' .. trimmed .. '"') or "Randomize (any genre)"
-  if draw_ui_button("seq_kit_random_run", randomize_label, nil, nil, { full_width = true, style = "primary" }) then
-    if trimmed ~= "" then
-      randomize_seq_kit({ trimmed }, { exact_tag = false })
-    else
-      randomize_seq_kit(nil, { exact_tag = false })
-    end
+  r.ImGui_Dummy(ctx, 1, 4)
+
+  local project, library, counts = seq_kit_popup_genres(trimmed:lower())
+  local project_set = {}
+  for _, tag in ipairs(project) do
+    project_set[tag:lower()] = true
   end
 
-  r.ImGui_Separator(ctx)
-
-  local library_genres = collect_library_genre_tags()
-  local priority = collect_project_kit_genre_priority()
-  local priority_set = {}
-  for _, tag in ipairs(priority) do
-    priority_set[tag:lower()] = true
-  end
-
-  local query_lower = trimmed:lower()
-  local function genre_matches_query(tag)
-    if query_lower == "" then
-      return true
-    end
-    return tag:lower():find(query_lower, 1, true) ~= nil
-  end
-
-  local library_set = {}
-  for _, entry in ipairs(library_genres) do
-    library_set[entry.tag:lower()] = entry.tag
-  end
-
-  local all_shown = {}
-  local shown_set = {}
-  for _, tag in ipairs(priority) do
-    local lib_tag = library_set[tag:lower()]
-    if lib_tag and genre_matches_query(lib_tag) and not shown_set[lib_tag:lower()] then
-      all_shown[#all_shown + 1] = lib_tag
-      shown_set[lib_tag:lower()] = true
-    end
-  end
-  for _, entry in ipairs(library_genres) do
-    local tag = entry.tag
-    if genre_matches_query(tag) and not shown_set[tag:lower()] then
-      all_shown[#all_shown + 1] = tag
-      shown_set[tag:lower()] = true
-    end
-  end
-
-  local avail_w, avail_h = r.ImGui_GetContentRegionAvail(ctx)
-  local gap = 12.0
-  local right_w = math.max(210.0, math.min(260.0, avail_w * 0.38))
+  local avail_w = r.ImGui_GetContentRegionAvail(ctx) or SEQ_KIT_POPUP_W
+  local gap = 14.0
+  local right_w = 236.0
   local left_w = math.max(180.0, avail_w - right_w - gap)
-  local col_h = math.max(180.0, avail_h)
-  local child_win_flags = r.ImGui_WindowFlags_None and r.ImGui_WindowFlags_None() or 0
+  local keys = { "seq_kit_random_tags", "seq_kit_history_list" }
+  local col_h = ui_fit_child_height(keys, 140, 360)
 
-  if r.ImGui_BeginChild(ctx, "seq_kit_random_tags", left_w, col_h, 0, child_win_flags) then
-    if #all_shown == 0 then
-      r.ImGui_TextColored(ctx, 0xFF888888, "No genres match filter")
-    else
-      render_seq_kit_random_genre_chips(all_shown, "seq_kit_lib_", priority_set)
+  local opened = ui_fit_child_begin(keys[1], left_w, col_h)
+  if opened then
+    if #project > 0 then
+      ui_group_caption("In this project")
+      render_seq_kit_random_genre_chips(project, "seq_kit_proj_", project_set, counts, track_count > 0)
+      r.ImGui_Dummy(ctx, 1, 4)
     end
-    r.ImGui_EndChild(ctx)
+    ui_group_caption((#project > 0) and "Library" or "Genres")
+    if #library > 0 then
+      render_seq_kit_random_genre_chips(library, "seq_kit_lib_", project_set, counts, track_count > 0)
+    elseif #project == 0 then
+      local msg = (#collect_library_genre_tags() == 0) and "No genre tags in the library yet" or "No genres match"
+      r.ImGui_TextColored(ctx, UI_THEME.text_mute, msg)
+    end
   end
-  r.ImGui_SameLine(ctx, 0, gap)
-  if r.ImGui_BeginChild(ctx, "seq_kit_history_list", right_w, col_h, 1, child_win_flags) then
-    render_seq_kit_history_list()
-    r.ImGui_EndChild(ctx)
-  end
+  ui_fit_child_end(keys[1], opened)
 
+  r.ImGui_SameLine(ctx, 0, gap)
+  local hist_opened = ui_fit_child_begin(keys[2], right_w, col_h)
+  if hist_opened then
+    render_seq_kit_history_list()
+  end
+  ui_fit_child_end(keys[2], hist_opened)
+
+  ui_popup_footer("Click a genre to roll with it   ·   Enter: roll   ·   Esc: close")
+  ui_popup_close_on_escape()
   r.ImGui_EndPopup(ctx)
 end
 

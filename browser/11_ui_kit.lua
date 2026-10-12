@@ -80,6 +80,128 @@ function ui_group_caption(text)
   r.ImGui_Dummy(ctx, 1, th + 2)
 end
 
+-- Popup title row: accent icon tile, bold title, dim meta text on the right.
+function ui_popup_header(icon, title, meta)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  local avail = r.ImGui_GetContentRegionAvail(ctx) or 0
+  local tw, th = r.ImGui_CalcTextSize(ctx, title or "")
+  local h = math.max(24, th + 8)
+  local text_x = x
+  if icon then
+    r.ImGui_DrawList_AddRectFilled(dl, x, y, x + h, y + h, UI_THEME.accent_fill, UI_METRICS.radius_ctrl)
+    r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + h - 0.5, y + h - 0.5, 0x1EFF5E44, UI_METRICS.radius_ctrl, 0, 1.0)
+    ui_button_draw_icon(dl, icon, x + h * 0.5, y + h * 0.5, h, UI_THEME.accent)
+    text_x = x + h + 9
+  end
+  local ty = y + (h - th) * 0.5
+  r.ImGui_DrawList_AddText(dl, text_x, ty, UI_THEME.text, title or "")
+  r.ImGui_DrawList_AddText(dl, text_x + 0.5, ty, UI_THEME.text, title or "")
+  if meta and meta ~= "" then
+    local mw, mh = r.ImGui_CalcTextSize(ctx, meta)
+    local mx = math.max(text_x + tw + 12, x + avail - mw)
+    r.ImGui_DrawList_AddText(dl, mx, y + (h - mh) * 0.5, UI_THEME.text_dim, meta)
+  end
+  r.ImGui_Dummy(ctx, math.max(1, avail), h)
+  r.ImGui_Dummy(ctx, 1, 2)
+end
+
+-- Full-width search field for popups. Focused when the popup appears;
+-- returns (submitted_with_enter, text).
+function ui_popup_search(id, hint, value)
+  if r.ImGui_IsWindowAppearing and r.ImGui_IsWindowAppearing(ctx) and r.ImGui_SetKeyboardFocusHere then
+    r.ImGui_SetKeyboardFocusHere(ctx)
+  end
+  r.ImGui_SetNextItemWidth(ctx, -1)
+  local flags = r.ImGui_InputTextFlags_EnterReturnsTrue and r.ImGui_InputTextFlags_EnterReturnsTrue() or 0
+  local submitted, text
+  if r.ImGui_InputTextWithHint then
+    submitted, text = r.ImGui_InputTextWithHint(ctx, "##" .. tostring(id), hint or "", value or "", flags)
+  else
+    submitted, text = r.ImGui_InputText(ctx, "##" .. tostring(id), value or "", flags)
+  end
+  seq_mark_text_input_item()
+  return submitted == true, text or value or ""
+end
+
+function ui_popup_close_on_escape()
+  if r.ImGui_IsKeyPressed and r.ImGui_Key_Escape
+      and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
+    r.ImGui_CloseCurrentPopup(ctx)
+    return true
+  end
+  return false
+end
+
+-- Outline around the last drawn pill-shaped chip.
+function ui_draw_chip_ring(color)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local x0, y0 = r.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = r.ImGui_GetItemRectMax(ctx)
+  local rounding = (y1 - y0) * 0.5
+  r.ImGui_DrawList_AddRect(dl, x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5, color, rounding + 0.5, 0, 1.35)
+end
+
+-- One-line muted hint at the bottom of a popup.
+function ui_popup_footer(text)
+  r.ImGui_Dummy(ctx, 1, 2)
+  r.ImGui_TextColored(ctx, UI_THEME.text_mute, text or "")
+end
+
+-- Left-to-right wrapping layout for chips: call ui_flow_place(flow, w) before
+-- drawing each item of width w.
+function ui_flow_begin(gap)
+  return { x = 0.0, first = true, gap = gap or 6.0, wrap = r.ImGui_GetContentRegionAvail(ctx) or 0 }
+end
+
+function ui_flow_place(flow, w)
+  if not flow.first then
+    if flow.x + flow.gap + w > flow.wrap then
+      flow.x = 0.0
+    else
+      r.ImGui_SameLine(ctx, 0, flow.gap)
+      flow.x = flow.x + flow.gap
+    end
+  end
+  flow.first = false
+  flow.x = flow.x + w
+end
+
+-- Scrolling children sized to their content (measured last frame), clamped to
+-- [min_h, max_h], so auto-sizing popups don't jump or grow off screen.
+-- Pass several keys to give side-by-side children the tallest one's height.
+function ui_fit_child_height(keys, min_h, max_h)
+  local measured = state.ui_fit_child_h or {}
+  if type(keys) ~= "table" then
+    keys = { keys }
+  end
+  local h = nil
+  for _, key in ipairs(keys) do
+    local v = measured[key]
+    if v and (not h or v > h) then
+      h = v
+    end
+  end
+  return math.max(min_h, math.min(max_h, h or max_h))
+end
+
+-- Returns opened; call ui_fit_child_end(key, opened) afterwards.
+function ui_fit_child_begin(key, w, h)
+  return r.ImGui_BeginChild(ctx, key, w, h, 0, 0)
+end
+
+function ui_fit_child_end(key, opened)
+  if not opened then
+    return
+  end
+  local cy = r.ImGui_GetCursorPosY and r.ImGui_GetCursorPosY(ctx)
+  if type(cy) == "number" then
+    state.ui_fit_child_h = state.ui_fit_child_h or {}
+    state.ui_fit_child_h[key] = cy + 2
+  end
+  imgui_end_child(true)
+end
+
 function ui_push_theme()
   local n_col, n_var = 0, 0
   local function col(getter, value)
@@ -368,6 +490,121 @@ function ui_button_draw_icon(dl, icon, cx, cy, size, color)
     r.ImGui_DrawList_AddRect(dl, cx - hw, cy - hh, cx - gap * 0.2, cy + hh, color, 1.4, 0, stroke)
     r.ImGui_DrawList_AddRect(dl, cx + gap * 0.2, cy - hh, cx + hw, cy - gap * 0.15, color, 1.4, 0, stroke)
     r.ImGui_DrawList_AddRect(dl, cx + gap * 0.2, cy + gap * 0.15, cx + hw, cy + hh, color, 1.4, 0, stroke)
+  else
+    ui_draw_extra_icon(dl, icon, cx, cy, size, color, stroke)
+  end
+end
+
+-- Sequencer toolbar glyphs. All are drawn inside roughly +-0.3 * size so they
+-- sit at the same optical weight as the icons above.
+local function ui_icon_polyline(dl, pts, color, stroke)
+  for i = 1, #pts - 1 do
+    r.ImGui_DrawList_AddLine(dl, pts[i][1], pts[i][2], pts[i + 1][1], pts[i + 1][2], color, stroke)
+  end
+end
+
+function ui_draw_extra_icon(dl, icon, cx, cy, size, color, stroke)
+  local s = size
+  stroke = stroke or math.max(1.4, s * 0.08)
+  if icon == "note" then
+    local hx, hy = cx - s * 0.10, cy + s * 0.17
+    r.ImGui_DrawList_AddCircleFilled(dl, hx, hy, s * 0.095, color, 12)
+    local sx = hx + s * 0.085
+    r.ImGui_DrawList_AddLine(dl, sx, hy, sx, cy - s * 0.27, color, stroke)
+    r.ImGui_DrawList_AddLine(dl, sx, cy - s * 0.27, sx + s * 0.17, cy - s * 0.10, color, stroke)
+  elseif icon == "gain" then
+    local bw = s * 0.085
+    local base = cy + s * 0.26
+    local heights = { 0.22, 0.36, 0.52 }
+    for i, hgt in ipairs(heights) do
+      local bx = cx + (i - 2) * s * 0.18
+      r.ImGui_DrawList_AddRectFilled(dl, bx - bw * 0.5, base - s * hgt, bx + bw * 0.5, base, color, 1.0)
+    end
+  elseif icon == "pan" then
+    r.ImGui_DrawList_AddLine(dl, cx - s * 0.30, cy, cx + s * 0.30, cy, color, stroke)
+    r.ImGui_DrawList_AddLine(dl, cx, cy - s * 0.12, cx, cy + s * 0.12, color, math.max(1.0, stroke * 0.7))
+    r.ImGui_DrawList_AddCircleFilled(dl, cx + s * 0.16, cy, s * 0.085, color, 12)
+  elseif icon == "pitch" then
+    ui_icon_polyline(dl, { { cx - s * 0.18, cy - s * 0.06 }, { cx, cy - s * 0.26 }, { cx + s * 0.18, cy - s * 0.06 } }, color, stroke)
+    ui_icon_polyline(dl, { { cx - s * 0.18, cy + s * 0.06 }, { cx, cy + s * 0.26 }, { cx + s * 0.18, cy + s * 0.06 } }, color, stroke)
+  elseif icon == "start" then
+    r.ImGui_DrawList_AddLine(dl, cx - s * 0.24, cy - s * 0.26, cx - s * 0.24, cy + s * 0.26, color, stroke)
+    r.ImGui_DrawList_AddTriangleFilled(dl, cx - s * 0.10, cy - s * 0.20, cx - s * 0.10, cy + s * 0.20, cx + s * 0.24, cy, color)
+  elseif icon == "stretch" then
+    local hw, ah = s * 0.30, s * 0.11
+    r.ImGui_DrawList_AddLine(dl, cx - hw, cy, cx + hw, cy, color, stroke)
+    ui_icon_polyline(dl, { { cx - hw + ah, cy - ah }, { cx - hw, cy }, { cx - hw + ah, cy + ah } }, color, stroke)
+    ui_icon_polyline(dl, { { cx + hw - ah, cy - ah }, { cx + hw, cy }, { cx + hw - ah, cy + ah } }, color, stroke)
+    r.ImGui_DrawList_AddLine(dl, cx, cy - s * 0.22, cx, cy - s * 0.10, color, math.max(1.0, stroke * 0.7))
+    r.ImGui_DrawList_AddLine(dl, cx, cy + s * 0.10, cx, cy + s * 0.22, color, math.max(1.0, stroke * 0.7))
+  elseif icon == "decay" then
+    local x0, x1 = cx - s * 0.28, cx + s * 0.30
+    local top, bot = cy - s * 0.26, cy + s * 0.24
+    local pts = { { x0, bot } }
+    for i = 0, 8 do
+      local t = i / 8
+      pts[#pts + 1] = { x0 + (x1 - x0) * t, top + (bot - top) * (1.0 - math.exp(-4.0 * t)) }
+    end
+    ui_icon_polyline(dl, pts, color, stroke)
+  elseif icon == "stutter" then
+    local bw, hh = s * 0.075, s * 0.20
+    for i = -1, 1 do
+      local bx = cx + i * s * 0.17
+      local scale = 1.0 - (i + 1) * 0.22
+      r.ImGui_DrawList_AddRectFilled(dl, bx - bw * 0.5, cy + hh - hh * 2 * scale, bx + bw * 0.5, cy + hh, color, 1.0)
+    end
+  elseif icon == "vary" then
+    r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, s * 0.075, color, 12)
+    local dots = { { -0.22, -0.15 }, { 0.23, -0.10 }, { -0.04, 0.25 }, { 0.20, 0.18 } }
+    for _, d in ipairs(dots) do
+      r.ImGui_DrawList_AddCircleFilled(dl, cx + d[1] * s, cy + d[2] * s, s * 0.045, color, 8)
+    end
+    r.ImGui_DrawList_AddCircle(dl, cx, cy, s * 0.30, color, 20, math.max(1.0, stroke * 0.6))
+  elseif icon == "lock" then
+    local bw, top = s * 0.20, cy - s * 0.02
+    r.ImGui_DrawList_AddRect(dl, cx - s * 0.12, cy - s * 0.28, cx + s * 0.12, top + s * 0.08, color, s * 0.12, 0, stroke)
+    r.ImGui_DrawList_AddRectFilled(dl, cx - bw, top, cx + bw, cy + s * 0.27, color, 2.0)
+  elseif icon == "grid" then
+    local h = s * 0.26
+    r.ImGui_DrawList_AddRect(dl, cx - h, cy - h, cx + h, cy + h, color, 2.0, 0, math.max(1.0, stroke * 0.8))
+    local t = h * 2 / 3
+    for i = 1, 2 do
+      r.ImGui_DrawList_AddLine(dl, cx - h + t * i, cy - h, cx - h + t * i, cy + h, color, 1.0)
+      r.ImGui_DrawList_AddLine(dl, cx - h, cy - h + t * i, cx + h, cy - h + t * i, color, 1.0)
+    end
+  elseif icon == "eye" then
+    local hw, hh = s * 0.32, s * 0.18
+    ui_icon_polyline(dl, {
+      { cx - hw, cy }, { cx - hw * 0.45, cy - hh }, { cx + hw * 0.45, cy - hh }, { cx + hw, cy },
+      { cx + hw * 0.45, cy + hh }, { cx - hw * 0.45, cy + hh }, { cx - hw, cy },
+    }, color, stroke)
+    r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, s * 0.09, color, 12)
+  elseif icon == "steps" then
+    local cell, gap = s * 0.125, s * 0.045
+    local total = cell * 4 + gap * 3
+    local on = { [1] = { 1, 3 }, [2] = { 2, 4 } }
+    for row = 1, 2 do
+      local y = cy - cell - gap * 0.5 + (row - 1) * (cell + gap)
+      for col = 1, 4 do
+        local x = cx - total * 0.5 + (col - 1) * (cell + gap)
+        local filled = false
+        for _, c in ipairs(on[row]) do
+          if c == col then filled = true end
+        end
+        if filled then
+          r.ImGui_DrawList_AddRectFilled(dl, x, y, x + cell, y + cell, color, 1.0)
+        else
+          r.ImGui_DrawList_AddRect(dl, x, y, x + cell, y + cell, color, 1.0, 0, 1.0)
+        end
+      end
+    end
+  elseif icon == "groove" then
+    local pts = {}
+    for i = 0, 12 do
+      local t = i / 12
+      pts[#pts + 1] = { cx - s * 0.30 + s * 0.60 * t, cy + math.sin(t * math.pi * 3.0) * s * 0.14 }
+    end
+    ui_icon_polyline(dl, pts, color, stroke)
   end
 end
 
@@ -390,11 +627,14 @@ function draw_ui_button(id, label, w, h, opts)
 
   local text_size = { r.ImGui_CalcTextSize(ctx, (display ~= "" and display) or "Ay") }
   local trail_w = trailing and 14 or 0
+  -- Leading glyph drawn before the label (icon + text buttons).
+  local lead = opts.lead_icon
+  local lead_w = (lead and display ~= "") and 16 or 0
   if not w or w == 0 then
     if opts.full_width then
       w = r.ImGui_GetContentRegionAvail(ctx)
     elseif display ~= "" then
-      w = text_size[1] + frame_pad_x * 2 + trail_w
+      w = text_size[1] + frame_pad_x * 2 + trail_w + lead_w
     else
       w = h or 26
     end
@@ -455,8 +695,12 @@ function draw_ui_button(id, label, w, h, opts)
     end
     ui_button_draw_icon(dl, icon, cx, cy, icon_size, icon_color)
   elseif display ~= "" then
-    local text_x = x0 + (w - text_size[1] - trail_w) * 0.5
+    local text_x = x0 + (w - text_size[1] - trail_w - lead_w) * 0.5 + lead_w
     local text_y = y0 + (h - text_size[2]) * 0.5 + press
+    if lead_w > 0 then
+      local lead_col = opts.lead_color or ((hovered or active) and 0xFFFFFFFF or text_col)
+      ui_button_draw_icon(dl, lead, text_x - lead_w * 0.5 - 1, cy, math.min(h, 24), lead_col)
+    end
     r.ImGui_DrawList_AddText(dl, text_x, text_y, text_col, display)
     if trailing then
       ui_button_draw_icon(dl, trailing, x1 - 10, cy, 14, text_col)
