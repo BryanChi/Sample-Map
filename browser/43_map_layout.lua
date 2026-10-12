@@ -131,8 +131,28 @@ function map_ui_draw_drop_preview()
   else
     hy0 = y1 - (y1 - y0) * t
   end
-  r.ImGui_DrawList_AddRectFilled(dl, hx0, hy0, hx1, hy1, 0x1EFF5E55, 4)
-  r.ImGui_DrawList_AddRect(dl, hx0, hy0, hx1, hy1, UI_THEME.accent, 4, 0, 2)
+  r.ImGui_DrawList_AddRectFilled(dl, hx0, hy0, hx1, hy1, 0x1EFF5E40, 5)
+  r.ImGui_DrawList_AddRect(dl, hx0 + 1, hy0 + 1, hx1 - 1, hy1 - 1, UI_THEME.accent, 5, 0, 2)
+end
+
+-- Name of the module being moved, following the mouse.
+function map_ui_draw_drag_ghost()
+  local drag = state.map_ui_drag
+  if not drag then
+    return
+  end
+  local dl = r.ImGui_GetForegroundDrawList and r.ImGui_GetForegroundDrawList(ctx) or r.ImGui_GetWindowDrawList(ctx)
+  local mx, my = r.ImGui_GetMousePos(ctx)
+  local label = MAP_UI_LABELS[drag.id] or drag.id
+  local drop = state.map_ui_drop
+  if drop then
+    local where = ({ left = "left of", right = "right of", top = "above", bottom = "below" })[drop.edge] or ""
+    label = label .. " \u{2192} " .. where .. " " .. (MAP_UI_LABELS[drop.id] or drop.id)
+  else
+    label = label .. "  \u{00B7}  drop it on a module edge"
+  end
+  map_ui_draw_badge(dl, mx + 16 + select(1, r.ImGui_CalcTextSize(ctx, label)) * 0.5, my + 20, label,
+    UI_THEME.text, UI_THEME.popup_bg, UI_THEME.border_hvr)
 end
 
 function map_ui_finish_drag()
@@ -170,10 +190,24 @@ function render_sample_map_body()
   end
   map_ui_render_node(state.map_ui_layout, layout_w, tab_avail_y, "root")
   if state.map_ui_edit then
+    map_ui_draw_edit_chrome()
     map_ui_update_drop()
     map_ui_draw_drop_preview()
+    map_ui_draw_drag_ghost()
     map_ui_finish_drag()
+    -- Escape leaves edit mode (cancels a move first).
+    if r.ImGui_IsKeyPressed and r.ImGui_Key_Escape and not imgui_text_input_active()
+        and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
+      if state.map_ui_drag then
+        state.map_ui_drag = nil
+        state.map_ui_drop = nil
+      else
+        state.map_ui_edit = false
+        state.map_ui_split_drag = nil
+      end
+    end
   else
+    state.map_ui_chrome = nil
     state.map_ui_drag = nil
     state.map_ui_drop = nil
     state.map_ui_split_drag = nil
