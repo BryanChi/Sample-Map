@@ -182,3 +182,45 @@ def test_quick_rescan_skips_stat_of_known_files_but_finds_new_and_removed():
     # Both find the new file and drop the deleted one.
     assert fq == qq == "/lib/A/new.wav"
     assert fn == qn == "/lib/A/kick.wav,/lib/A/snare.wav"
+
+
+def test_waveform_colours_come_from_spectral_peaks_or_the_analysed_pitch():
+    L = _runtime()
+    out = L.execute(r'''
+      reaper.PCM_Source_CreateFromFile = function(p) return { file = p } end
+      reaper.GetMediaSourceLength = function() return 2.0, false end
+      reaper.GetMediaSourceSampleRate = function() return 44100 end
+      reaper.GetMediaSourceNumChannels = function() return 1 end
+      reaper.PCM_Source_BuildPeaks = function() return 0 end
+      reaper.PCM_Source_Destroy = function() end
+      reaper.new_array = function(n) return { clear = function() end } end
+      local spectral, want = true, nil
+      reaper.PCM_Source_GetPeaks = function(_, _, _, nch, n, extra, buf)
+        want = extra
+        for i = 1, nch * n do buf[i] = 0.5 end
+        for i = nch * n + 1, nch * n * 2 do buf[i] = -0.4 end
+        if not spectral then return n end
+        -- 440 Hz with some tonality bits above the low 15 bits
+        for i = nch * n * 2 + 1, nch * n * 3 do buf[i] = 440 + 3 * 32768 end
+        return n + 16777216
+      end
+      local function build(sample)
+        waveform_data = nil
+        ensure_waveform_for_sample(sample)
+        for _ = 1, 20 do
+          if not waveform_gen_job then break end
+          process_waveform_slice(6.0)
+        end
+        return waveform_data.frequency_data[1]
+      end
+      local a = build({ path = "/lib/a.wav", duration = 2.0, channels = 1 })
+      spectral = false
+      local b = build({ path = "/lib/b.wav", duration = 2.0, channels = 1, dominant_freq = 95.5 })
+      local c = build({ path = "/lib/c.wav", duration = 2.0, channels = 1 })
+      return want, a, b, c
+    ''')
+    want, a, b, c = out
+    assert want == 115
+    assert a == 440
+    assert b == 95.5
+    assert c is None
