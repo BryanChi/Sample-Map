@@ -558,6 +558,23 @@ function render_filter_input(reserve_right)
     local input_active = (r.ImGui_IsItemActive and r.ImGui_IsItemActive(ctx))
       or (r.ImGui_IsItemDeactivated and r.ImGui_IsItemDeactivated(ctx))
       or (r.ImGui_IsItemFocused and r.ImGui_IsItemFocused(ctx))
+    -- Escape clears whatever filter is applied: search text, tags, folders.
+    -- Left alone while another field, a popup or layout edit wants the key.
+    if r.ImGui_IsKeyPressed and r.ImGui_Key_Escape
+        and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false)
+        and not state.map_ui_edit
+        and (input_active or not imgui_text_input_active())
+        and not (r.ImGui_IsPopupOpen and r.ImGui_PopupFlags_AnyPopup
+          and r.ImGui_IsPopupOpen(ctx, "", r.ImGui_PopupFlags_AnyPopup()))
+        and (not r.ImGui_IsWindowFocused or not r.ImGui_FocusedFlags_RootAndChildWindows
+          or r.ImGui_IsWindowFocused(ctx, r.ImGui_FocusedFlags_RootAndChildWindows())) then
+      if (state.filter or "") ~= "" or has_active_tags or #folder_filter_list() > 0 then
+        state.filter = ""
+        state.active_tags = {}
+        state.selected_tag_parents = {}
+        state.folder_filter_paths = {}
+      end
+    end
     local input_hovered = r.ImGui_IsItemHovered(ctx)
     -- Only while typing: focus can linger on the field after a click elsewhere.
     state.sample_filter_focused = (r.ImGui_IsItemActive and r.ImGui_IsItemActive(ctx)) and true or false
