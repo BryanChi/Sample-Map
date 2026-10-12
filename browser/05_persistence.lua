@@ -1275,9 +1275,13 @@ function python_has_numpy(bin)
     return sm_python_check(bin, "import numpy")
   end
   if line:match("^ok") then
+    -- A Python found later can work after an earlier one failed: show the working one.
+    state.analyzer_numpy_status = line
     return true
   end
-  state.analyzer_numpy_status = state.analyzer_numpy_status or line
+  if not (state.analyzer_numpy_status or ""):match("^ok") then
+    state.analyzer_numpy_status = line
+  end
   return false
 end
 
