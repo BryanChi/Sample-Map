@@ -1138,6 +1138,8 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
   local hot_tag = state.map_atlas_hot_tag
   local shown = 0
   local add_text = r.ImGui_DrawList_AddText
+  -- Ticks are drawn first and cards after, so no tick crosses another card.
+  local ticks, cards = {}, {}
   for _, cand in ipairs(cands) do
     if shown >= MAP_ATLAS_MAX_LABELS then break end
     local t = cand.t
@@ -1175,48 +1177,58 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
       local a = dim and 0x50 or ((over or active) and 0xFF or 0xE0)
       local x1, y1 = x0 + w, y0 + h
       local rad = 6
-      -- Drop shadow, dark glassy plate with a faint tint of the tag colour,
-      -- a thin coloured border and a soft top highlight.
-      r.ImGui_DrawList_AddRectFilled(dl, x0 + 1, y0 + 2, x1 + 1, y1 + 3, with_alpha(0x000000FF, dim and 0x30 or 0x60), rad + 1)
-      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, with_alpha(MAP_ATLAS_COL.space_edge, dim and 0x78 or 0xD0), rad)
-      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, with_alpha(base, (over or active) and 0x2C or (dim and 0x08 or 0x12)), rad)
-      r.ImGui_DrawList_AddLine(dl, x0 + rad, y0 + 1, x1 - rad, y0 + 1, with_alpha(0xFFFFFFFF, dim and 0x08 or 0x18), 1.0)
-      r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5,
-        with_alpha(base, dim and 0x20 or ((over or active) and 0xC0 or 0x50)), rad, 0, (over or active) and 1.5 or 1.0)
-      -- Colour dot with a small glow; a ring when this tag is the filter.
-      local dx0, dy0 = x0 + pad_x + 3, y0 + h * 0.5
-      r.ImGui_DrawList_AddCircleFilled(dl, dx0, dy0, 6.5, with_alpha(base, dim and 0x10 or ((over or active) and 0x50 or 0x28)), 16)
-      r.ImGui_DrawList_AddCircleFilled(dl, dx0, dy0, 3.2, with_alpha(base, a), 12)
-      if active then
-        r.ImGui_DrawList_AddCircle(dl, dx0, dy0, 5.8, with_alpha(base, 0xE0), 16, 1.2)
+      if not pinned and math.abs(cy - (py - h * 0.5 - 8)) < 1 then
+        ticks[#ticks + 1] = { px, y1 + 1, py - 3, with_alpha(base, a * 0.5) }
       end
-      local tx = x0 + pad_x + dot_w
-      if pinned then
-        -- Arrow towards the tag's densest spot
-        local ax, ay = x0 - 6, y0 + h * 0.5
-        local dx, dy = px - cx, py - cy
-        local len = math.sqrt(dx * dx + dy * dy)
-        if len > 0 then
-          dx, dy = dx / len, dy / len
-          r.ImGui_DrawList_AddTriangleFilled(dl,
-            ax + dx * 4, ay + dy * 4,
-            ax - dx * 3 - dy * 3, ay - dy * 3 + dx * 3,
-            ax - dx * 3 + dy * 3, ay - dy * 3 - dx * 3,
-            with_alpha(base, a))
+      cards[#cards + 1] = function()
+        -- Drop shadow, dark glassy plate with a faint tint of the tag colour,
+        -- a thin coloured border and a soft top highlight.
+        r.ImGui_DrawList_AddRectFilled(dl, x0 + 1, y0 + 2, x1 + 1, y1 + 3, with_alpha(0x000000FF, dim and 0x30 or 0x60), rad + 1)
+        r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, with_alpha(MAP_ATLAS_COL.space_edge, dim and 0x78 or 0xD0), rad)
+        r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, with_alpha(base, (over or active) and 0x2C or (dim and 0x08 or 0x12)), rad)
+        r.ImGui_DrawList_AddLine(dl, x0 + rad, y0 + 1, x1 - rad, y0 + 1, with_alpha(0xFFFFFFFF, dim and 0x08 or 0x18), 1.0)
+        r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5,
+          with_alpha(base, dim and 0x20 or ((over or active) and 0xC0 or 0x50)), rad, 0, (over or active) and 1.5 or 1.0)
+        -- Colour dot with a small glow; a ring when this tag is the filter.
+        local dx0, dy0 = x0 + pad_x + 3, y0 + h * 0.5
+        r.ImGui_DrawList_AddCircleFilled(dl, dx0, dy0, 6.5, with_alpha(base, dim and 0x10 or ((over or active) and 0x50 or 0x28)), 16)
+        r.ImGui_DrawList_AddCircleFilled(dl, dx0, dy0, 3.2, with_alpha(base, a), 12)
+        if active then
+          r.ImGui_DrawList_AddCircle(dl, dx0, dy0, 5.8, with_alpha(base, 0xE0), 16, 1.2)
         end
-      elseif math.abs(cy - (py - h * 0.5 - 8)) < 1 then
-        r.ImGui_DrawList_AddLine(dl, px, y1 + 1, px, py - 3, with_alpha(base, a * 0.5), 1.0)
+        local tx = x0 + pad_x + dot_w
+        if pinned then
+          -- Arrow towards the tag's densest spot
+          local ax, ay = x0 - 6, y0 + h * 0.5
+          local dx, dy = px - cx, py - cy
+          local len = math.sqrt(dx * dx + dy * dy)
+          if len > 0 then
+            dx, dy = dx / len, dy / len
+            r.ImGui_DrawList_AddTriangleFilled(dl,
+              ax + dx * 4, ay + dy * 4,
+              ax - dx * 3 - dy * 3, ay - dy * 3 + dx * 3,
+              ax - dx * 3 + dy * 3, ay - dy * 3 - dx * 3,
+              with_alpha(base, a))
+          end
+        end
+        local ny = y0 + pad_y
+        add_text(dl, tx + 1, ny + 1, MAP_ATLAS_COL.label_shadow, name)
+        add_text(dl, tx, ny, with_alpha(base, a), name)
+        add_text(dl, tx + 0.5, ny, with_alpha(base, a), name)
+        add_text(dl, tx, ny + th + 2, with_alpha(MAP_ATLAS_COL.label_count, dim and 0x50 or ((over or active) and 0xE0 or 0xA0)), sub)
       end
-      local ny = y0 + pad_y
-      add_text(dl, tx + 1, ny + 1, MAP_ATLAS_COL.label_shadow, name)
-      add_text(dl, tx, ny, with_alpha(base, a), name)
-      add_text(dl, tx + 0.5, ny, with_alpha(base, a), name)
-      add_text(dl, tx, ny + th + 2, with_alpha(MAP_ATLAS_COL.label_count, dim and 0x50 or ((over or active) and 0xE0 or 0xA0)), sub)
       hits[#hits + 1] = { x0, y0, x0 + w, y0 + h, kind = "label", tag = t.tag }
       if over then
         state.map_atlas_hot_tag_next = t.tag
       end
     end
+  end
+  for i = 1, #ticks do
+    local k = ticks[i]
+    r.ImGui_DrawList_AddLine(dl, k[1], k[2], k[1], k[3], k[4], 1.0)
+  end
+  for i = 1, #cards do
+    cards[i]()
   end
 end
 
