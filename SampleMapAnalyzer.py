@@ -44,10 +44,37 @@ try:
 except Exception:  # pragma: no cover - removed in some Python builds
     audioop = None  # type: ignore
 
+# numpy installed by Sample Map (Library > Re-analyze > Install numpy) lives in a
+# private folder per platform, CPU and Python version, so an Intel build in the
+# shared user site can't shadow it on an Apple Silicon Python (or the reverse).
+def sm_pylib_dir() -> str:
+    import platform
+    tag = "%s-%s-cp%d%d" % (sys.platform, platform.machine() or "any", sys.version_info[0], sys.version_info[1])
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "pylib", tag)
+
+
+if os.path.isdir(sm_pylib_dir()):
+    sys.path.insert(0, sm_pylib_dir())
+
+NUMPY_ERROR = ""
 try:
     import numpy as _np  # type: ignore
-except Exception:
+except Exception as _np_exc:  # ImportError, or a wrong-architecture build
     _np = None  # type: ignore
+    NUMPY_ERROR = str(_np_exc) or type(_np_exc).__name__
+
+
+def numpy_status() -> str:
+    """'ok <version>', 'missing', or 'broken <reason>' (e.g. an Intel numpy on an ARM Python)."""
+    if _np is not None:
+        return "ok " + str(getattr(_np, "__version__", "?"))
+    err = NUMPY_ERROR or ""
+    if "No module named" in err and "numpy" in err and "numpy." not in err:
+        return "missing"
+    if "incompatible architecture" in err or "mach-o" in err.lower():
+        return "broken wrong CPU architecture"
+    first = err.strip().splitlines()[0] if err.strip() else "import failed"
+    return "broken " + first[:200]
 
 try:
     import aifc as _aifc  # type: ignore
@@ -60,7 +87,7 @@ _SOX_BIN: Optional[str] = None
 _TOOLS_READY = False
 _AFCONVERT_BIN = "/usr/bin/afconvert"
 # Formats the built-in readers handle without an external decoder.
-_NATIVE_EXTS = (".wav", ".wave", ".aif", ".aiff")
+_NATIVE_EXTS = (".wav", ".wave", ".aif", ".aiff", ".aifc")
 NO_DECODER_ERROR = "no audio decoder found: install ffmpeg (or sox) to analyze this file type"
 
 
@@ -247,6 +274,25 @@ def detect_swell_cue_point(
     return (drop_off_idx * hop_size + window_size / 2) / float(sr)
 
 
+def _pcm24_to_floats(raw: bytes, big_endian: bool = False) -> List[float]:
+    """24-bit PCM to floats in [-1, 1]. Each sample is widened to a 32-bit int
+    with slice copies (C speed), so the value is exactly sample / 2**23."""
+    n = len(raw) // 3
+    if n <= 0:
+        return []
+    wide = bytearray(n * 4)
+    lo, mid, hi = (2, 1, 0) if big_endian else (0, 1, 2)
+    wide[1::4] = raw[lo : n * 3 : 3]
+    wide[2::4] = raw[mid : n * 3 : 3]
+    wide[3::4] = raw[hi : n * 3 : 3]
+    a = array.array("i")
+    a.frombytes(bytes(wide))
+    if sys.byteorder != "little":
+        a.byteswap()
+    scale = 1.0 / 2147483648.0
+    return [v * scale for v in a]
+
+
 def samples_from_pcm_raw(raw: bytes, sampwidth: int) -> List[float]:
     """Convert integer PCM bytes to float samples in [-1, 1]."""
     if sampwidth == 1:
@@ -258,14 +304,7 @@ def samples_from_pcm_raw(raw: bytes, sampwidth: int) -> List[float]:
         a.frombytes(raw[: len(raw) - (len(raw) % 2)])
         return [v / 32768.0 for v in a]
     if sampwidth == 3:
-        samples: List[float] = []
-        max_val = 8388608.0
-        for i in range(0, len(raw) - 2, 3):
-            val = raw[i] | (raw[i + 1] << 8) | (raw[i + 2] << 16)
-            if val & 0x800000:
-                val -= 0x1000000
-            samples.append(val / max_val)
-        return samples
+        return _pcm24_to_floats(raw, big_endian=False)
     if sampwidth == 4:
         a = array.array("i")
         a.frombytes(raw[: len(raw) - (len(raw) % 4)])
@@ -288,7 +327,7 @@ def to_mono(samples: List[float], channels: int) -> List[float]:
         return samples
     if channels == 2:
         n = len(samples) - (len(samples) % 2)
-        return [(samples[i] + samples[i + 1]) * 0.5 for i in range(0, n, 2)]
+        return [(a + b) * 0.5 for a, b in zip(samples[0:n:2], samples[1:n:2])]
     frames = len(samples) // channels
     inv = 1.0 / channels
     mono: List[float] = []
@@ -356,10 +395,13 @@ def audible_end_from_samples(
 
 
 def parse_wav_info(path: str) -> Optional[dict]:
-    """fmt + data-chunk location for PCM / float32 WAV. None if unsupported."""
+    """Sample format + data location for PCM / float32 WAV and AIFF / AIFF-C.
+    None if unsupported (compressed formats go through ffmpeg/afconvert)."""
     try:
         with open(path, "rb") as f:
             header = f.read(12)
+            if len(header) == 12 and header[0:4] == b"FORM" and header[8:12] in (b"AIFF", b"AIFC"):
+                return _parse_aiff_info(f, header[8:12] == b"AIFC")
             if len(header) < 12 or header[0:4] != b"RIFF" or header[8:12] != b"WAVE":
                 return None
             fmt_tag = channels = sr = bits = None
@@ -425,6 +467,101 @@ def parse_wav_info(path: str) -> Optional[dict]:
         return None
 
 
+def _ieee_extended(b: bytes) -> float:
+    """80-bit IEEE 754 extended float (AIFF sample rate)."""
+    expo = ((b[0] & 0x7F) << 8) | b[1]
+    mant = int.from_bytes(b[2:10], "big")
+    if expo == 0 and mant == 0:
+        return 0.0
+    val = mant * 2.0 ** (expo - 16383 - 63)
+    return -val if b[0] & 0x80 else val
+
+
+def _parse_aiff_info(f, is_aifc: bool) -> Optional[dict]:
+    """COMM + SSND chunks of an AIFF / AIFF-C file (f is just past the FORM header).
+    Python 3.13 removed the aifc module, so this replaces it (no ffmpeg needed)."""
+    channels = frames = bits = sr = None
+    fmt_tag, big_endian = 1, True
+    data_offset = None
+    while True:
+        hdr = f.read(8)
+        if len(hdr) < 8:
+            break
+        cid, size = hdr[0:4], struct.unpack(">I", hdr[4:8])[0]
+        if cid == b"COMM":
+            comm = f.read(size)
+            if size & 1:
+                f.read(1)
+            if len(comm) < 18:
+                return None
+            channels, frames, bits = struct.unpack(">hIh", comm[:8])
+            sr = _ieee_extended(comm[8:18])
+            if is_aifc and len(comm) >= 22:
+                comp = comm[18:22]
+                if comp in (b"NONE", b"twos"):
+                    pass
+                elif comp == b"sowt":
+                    big_endian = False
+                elif comp in (b"fl32", b"FL32"):
+                    fmt_tag = 3
+                else:
+                    return None
+        elif cid == b"SSND":
+            offset = struct.unpack(">I", f.read(4))[0]
+            f.read(4)  # block size
+            data_offset = f.tell() + offset
+            break
+        else:
+            f.seek(size + (size & 1), 1)
+    if data_offset is None or not channels or channels < 1 or not bits or not sr or sr <= 0 or not frames:
+        return None
+    sampwidth = (bits + 7) // 8
+    if fmt_tag == 3 and bits != 32:
+        return None
+    if sampwidth not in (1, 2, 3, 4):
+        return None
+    return {
+        "fmt_tag": fmt_tag,
+        "channels": channels,
+        "sr": int(round(sr)),
+        "bits": bits,
+        "sampwidth": sampwidth,
+        "data_offset": data_offset,
+        "bytes_per_frame": channels * sampwidth,
+        "total_frames": frames,
+        "big_endian": big_endian,
+        "signed8": True,  # AIFF 8-bit is signed; WAV 8-bit is offset binary
+    }
+
+
+def decode_frames(raw: bytes, info: dict) -> List[float]:
+    """Interleaved frames (any parse_wav_info format) to mono floats."""
+    be = info.get("big_endian", False)
+    sw = info["sampwidth"]
+    if info["fmt_tag"] == 3:
+        a = array.array("f")
+        a.frombytes(raw[: len(raw) // 4 * 4])
+        if be != (sys.byteorder == "big"):
+            a.byteswap()
+        samples = a.tolist()
+    elif sw == 1 and info.get("signed8"):
+        a = array.array("b")
+        a.frombytes(raw)
+        samples = [v / 128.0 for v in a]
+    elif sw == 3:
+        samples = _pcm24_to_floats(raw, big_endian=be)
+    elif be and sw in (2, 4):
+        a = array.array("h" if sw == 2 else "i")
+        a.frombytes(raw[: len(raw) // sw * sw])
+        if sys.byteorder == "little":
+            a.byteswap()
+        scale = 1.0 / (32768.0 if sw == 2 else 2147483648.0)
+        samples = [v * scale for v in a]
+    else:
+        samples = samples_from_pcm_raw(raw, sw)
+    return to_mono(samples, info["channels"])
+
+
 def read_wav_mono_frames(path: str, info: dict, start_frame: int, nframes: int) -> List[float]:
     start_frame = max(0, start_frame)
     nframes = min(nframes, info["total_frames"] - start_frame)
@@ -437,11 +574,7 @@ def read_wav_mono_frames(path: str, info: dict, start_frame: int, nframes: int) 
             raw = f.read(nframes * bpf)
     except Exception:
         return []
-    if info["fmt_tag"] == 1:
-        samples = samples_from_pcm_raw(raw, info["sampwidth"])
-    else:
-        samples = samples_from_float32_raw(raw)
-    return to_mono(samples, info["channels"])
+    return decode_frames(raw, info)
 
 
 def find_audible_start_frame(
@@ -611,8 +744,14 @@ def detect_transient_sustain(samples: List[float], sr: int) -> Dict[str, float]:
             i += hop
         return env
 
-    env_full = rms_env(samples)
-    env_hf = rms_env(hp)
+    return _transient_from_envs(rms_env(samples), rms_env(hp), n, sr, window, hop)
+
+
+def _transient_from_envs(
+    env_full: List[float], env_hf: List[float], n: int, sr: int, window: int, hop: int
+) -> Dict[str, float]:
+    """Onset + transient/sustain split from the full-band and high-band RMS envelopes."""
+    dur = n / float(sr)
     if not env_full:
         return {"onset": 0.0, "transient_end": min(dur, _TRANSIENT_FALLBACK_SEC)}
 
@@ -748,6 +887,8 @@ def _rms_envelope(
 ) -> Tuple[List[float], int]:
     window = max(16, int(sr * window_sec))
     hop = max(8, int(sr * hop_sec))
+    if _np is not None and isinstance(samples, _np.ndarray):
+        return _np_rms_env(samples, window, hop), hop
     env: List[float] = []
     i = 0
     n = len(samples)
@@ -1226,8 +1367,262 @@ def analyze_with_wave_module(
         return None
 
 
+# --- numpy fast path ---------------------------------------------------------
+# Same results as the pure-Python path above (checked to ~1e-13); every per-sample
+# loop becomes an array operation, so a file takes a few ms instead of 30-400 ms.
+
+
+class _NpBuf(_np.ndarray if _np is not None else object):  # type: ignore[misc]
+    """Array whose truth value means "not empty", like the lists the shared code expects."""
+
+    def __bool__(self) -> bool:
+        return self.size > 0
+
+
+def _np_decode(raw: bytes, info: dict):
+    sw, ch = info["sampwidth"], info["channels"]
+    be = ">" if info.get("big_endian") else "<"
+    if info["fmt_tag"] == 3:
+        x = _np.frombuffer(raw[: len(raw) // 4 * 4], dtype=be + "f4").astype(_np.float64)
+    elif sw == 1:
+        if info.get("signed8"):
+            x = _np.frombuffer(raw, dtype=_np.int8) / 128.0
+        else:
+            x = (_np.frombuffer(raw, dtype=_np.uint8).astype(_np.float64) - 128.0) / 128.0
+    elif sw == 2:
+        x = _np.frombuffer(raw[: len(raw) // 2 * 2], dtype=be + "i2") / 32768.0
+    elif sw == 3:
+        b = _np.frombuffer(raw[: len(raw) // 3 * 3], dtype=_np.uint8).reshape(-1, 3).astype(_np.int32)
+        if info.get("big_endian"):
+            b = b[:, ::-1]
+        v = b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)
+        x = _np.where(v & 0x800000, v - 0x1000000, v) / 8388608.0
+    else:
+        x = _np.frombuffer(raw[: len(raw) // 4 * 4], dtype=be + "i4") / 2147483648.0
+    if ch > 1:
+        n = len(x) // ch * ch
+        x = (x[0:n:2] + x[1:n:2]) * 0.5 if ch == 2 else x[:n].reshape(-1, ch).mean(axis=1)
+    return x
+
+
+def _np_read_frames(path: str, info: dict, start: int, n: int):
+    start = max(0, start)
+    n = min(n, info["total_frames"] - start)
+    if n <= 0:
+        return _np.zeros(0)
+    with open(path, "rb") as f:
+        f.seek(info["data_offset"] + start * info["bytes_per_frame"])
+        raw = f.read(n * info["bytes_per_frame"])
+    return _np_decode(raw, info)
+
+
+def _np_window_peaks(x, window: int, from_end: bool):
+    """Peak of consecutive windows. from_end: windows aligned to the end of x,
+    returned last-first (the first window may be short); else aligned to the start."""
+    n = len(x)
+    k = -(-n // window)
+    pad = _np.zeros(k * window)
+    if from_end:
+        pad[k * window - n :] = _np.abs(x)
+        return pad.reshape(k, window).max(axis=1)[::-1]
+    pad[:n] = _np.abs(x)
+    return pad.reshape(k, window).max(axis=1)
+
+
+def _np_rms_env(x, window: int, hop: int) -> List[float]:
+    n = len(x)
+    if n < window:
+        return []
+    cs = _np.concatenate(([0.0], _np.cumsum(x * x)))
+    starts = _np.arange(0, n - window + 1, hop)
+    return _np.sqrt(_np.maximum(cs[starts + window] - cs[starts], 0.0) / window).tolist()
+
+
+def _np_audible_end(x, sr: int, peak: float) -> Optional[float]:
+    if len(x) == 0 or sr <= 0:
+        return None
+    window = max(32, int(sr * _AUDIBLE_WINDOW_SEC))
+    if peak <= 0.0:
+        peak = float(_np.abs(x).max())
+    hit = _np.nonzero(_np_window_peaks(x, window, True) >= audible_threshold(peak))[0]
+    if len(hit) == 0:
+        return None
+    last = len(x) - int(hit[0]) * window
+    return min(len(x) / float(sr), max(1.0 / float(sr), last / float(sr) + _AUDIBLE_HANG_SEC))
+
+
+def _np_audible_end_file(path: str, info: dict, peak_hint: float) -> float:
+    """detect_audible_end_wav: walk back from the end in 0.5s chunks."""
+    sr, total = info["sr"], info["total_frames"]
+    file_dur = total / float(sr)
+    window = max(32, int(sr * _AUDIBLE_WINDOW_SEC))
+    chunk = max(window, int(sr * _AUDIBLE_CHUNK_SEC))
+    peak = max(0.0, peak_hint)
+    pos = total
+    while pos > 0:
+        start = max(0, pos - chunk)
+        x = _np_read_frames(path, info, start, pos - start)
+        if len(x):
+            peak = max(peak, float(_np.abs(x).max()))
+            hit = _np.nonzero(_np_window_peaks(x, window, True) >= audible_threshold(peak))[0]
+            if len(hit):
+                last = start + len(x) - int(hit[0]) * window
+                return min(file_dur, max(1.0 / float(sr), last / float(sr) + _AUDIBLE_HANG_SEC))
+        pos = start
+    return file_dur
+
+
+def _np_audible_start(path: str, info: dict) -> int:
+    """find_audible_start_frame: first window above -40 dBFS, 0.5s chunks at a time."""
+    sr, total = info["sr"], info["total_frames"]
+    max_frames = min(total, int(sr * _LEADING_SKIP_MAX_SEC))
+    chunk = max(32, int(sr * _AUDIBLE_CHUNK_SEC))
+    window = max(32, int(sr * _AUDIBLE_WINDOW_SEC))
+    pos = 0
+    while pos < max_frames:
+        n = min(chunk, max_frames - pos)
+        x = _np_read_frames(path, info, pos, n)
+        if len(x):
+            hit = _np.nonzero(_np_window_peaks(x, window, False) >= _LEADING_SILENCE_PEAK)[0]
+            if len(hit):
+                return pos + int(hit[0]) * window
+        pos += n
+    return 0
+
+
+def _np_spectrum(x, sr: int) -> Dict[str, float]:
+    """analyze_spectrum: dominant_freq, brightness, sub_weight from one FFT."""
+    out: Dict[str, float] = {}
+    n = len(x)
+    if n < 256 or sr <= 0:
+        return out
+    wl = min(sr, n, 8192)
+    if wl < 256:
+        wl = min(n, 512)
+    step = max(256, wl // 4)
+    cs = _np.concatenate(([0.0], _np.cumsum(x * x)))
+    starts = _np.arange(0, max(1, n - wl + 1), step)
+    best = int(starts[int(_np.argmax(cs[starts + wl] - cs[starts]))])
+    a = x[best : best + wl]
+    if math.sqrt(float(_np.dot(a, a)) / len(a)) > 1e-8:
+        fft_n = 1
+        while fft_n < len(a):
+            fft_n <<= 1
+        fft_n = min(fft_n, 8192)
+        buf = _np.zeros(fft_n)
+        buf[: min(fft_n, len(a))] = a[:fft_n]
+        if fft_n > 1:
+            buf = buf * (0.5 * (1 - _np.cos(2 * _np.pi * _np.arange(fft_n) / (fft_n - 1))))
+        mag = _np.abs(_np.fft.rfft(buf))[: fft_n // 2]
+        bins = _np.arange(1, len(mag))
+        mg = mag[1:]
+        ok = mg > 0
+        freq = bins * sr / float(fft_n)
+        den = float(mg[ok].sum())
+        if den > 1e-12:
+            out["brightness"] = max(40.0, min(16000.0, float((freq[ok] * mg[ok]).sum()) / den))
+        energy = mg * mg
+        total_e = float(energy[ok].sum())
+        if total_e > 1e-12:
+            lo, hi = math.log(_SUB_WEIGHT_FULL_HZ), math.log(_SUB_WEIGHT_ZERO_HZ)
+            emph = _np.clip(1.0 - (_np.log(_np.maximum(freq, 1e-9)) - lo) / (hi - lo), 0.0, 1.0)
+            emph[freq <= _SUB_WEIGHT_FULL_HZ] = 1.0
+            emph[freq >= _SUB_WEIGHT_ZERO_HZ] = 0.0
+            low_e = float((energy * emph)[ok].sum())
+            rest_e = max(0.0, total_e - low_e)
+            ratio_db = 10.0 * math.log10((low_e + 1e-12) / (rest_e + 1e-12))
+            out["sub_weight"] = max(0.0, min(1.0, 0.5 + 0.5 * math.tanh(ratio_db / _SUB_WEIGHT_DB_SCALE)))
+        min_bin = max(1, int(40 * fft_n / sr))
+        max_bin = min(len(mag) - 1, int(6000 * fft_n / sr))
+        if max_bin > min_bin:
+            hps = mag[: max_bin + 1].copy()
+            for ratio in (2, 3, 4):
+                idx = _np.arange(min_bin, max_bin // ratio)
+                hps[idx] *= mag[idx * ratio]
+            seg = hps[min_bin : max_bin + 1]
+            pb = int(_np.argmax(seg))
+            if seg[pb] > 0:
+                out["dominant_freq"] = max(40.0, min(8000.0, (min_bin + pb) * sr / float(fft_n)))
+    if "dominant_freq" not in out:
+        z = x[: min(n, sr)]
+        prev, curr = z[:-1], z[1:]
+        zc = int(_np.count_nonzero(((prev >= 0) & (curr < 0)) | ((prev <= 0) & (curr > 0))))
+        if zc > 2:
+            est = (zc * sr) / (2 * len(z))
+            if 40.0 <= est <= 8000.0:
+                out["dominant_freq"] = est
+    return out
+
+
+def _np_transient(x, sr: int) -> Dict[str, float]:
+    n = len(x)
+    if n < 32 or sr <= 0:
+        return {}
+    window = max(16, int(sr * _TRANSIENT_WIN_SEC))
+    hop = max(8, window // 2)
+    if n < window:
+        return detect_transient_sustain(x.tolist(), sr)
+    hp = _np.empty(n)
+    hp[0] = 0.0
+    hp[1:] = _np.diff(x)
+    return _transient_from_envs(_np_rms_env(x, window, hop), _np_rms_env(hp, window, hop), n, sr, window, hop)
+
+
+def _analyze_wav_np(path: str, mode: str = "full") -> Optional[Dict[str, float]]:
+    info = parse_wav_info(path)
+    if not info:
+        return None
+    sr, total = info["sr"], info["total_frames"]
+    file_dur = total / float(sr)
+    nwant = max(1, int(sr * _ANALYSIS_BUF_SEC))
+    x = _np_read_frames(path, info, 0, min(nwant, total))
+    buf_start = 0.0
+    if len(x) and float(_np.abs(x).max()) < _LEADING_SILENCE_PEAK and file_dur > _ANALYSIS_BUF_SEC + 0.05:
+        start = _np_audible_start(path, info)
+        if start > 0:
+            x = _np_read_frames(path, info, start, min(nwant, total - start))
+            buf_start = start / float(sr)
+    if len(x) == 0:
+        return None
+    if mode == "transient":
+        result: Dict[str, float] = _np_transient(x, sr)
+    elif mode == "weight":
+        val = _np_spectrum(x, sr).get("sub_weight")
+        result = {"sub_weight": float(val)} if val is not None else {}
+    else:
+        peak = float(_np.abs(x).max())
+        result = {"rms_energy": float(math.sqrt(float(_np.dot(x, x)) / len(x)))}
+        for key, val in _np_spectrum(x, sr).items():
+            result[key] = float(val)
+        if "swell" in path.lower():
+            result["sample_type"] = "Swell"  # type: ignore[assignment]
+            env = _np_rms_env(x, 512, 256)
+            if env:
+                snap = detect_swell_cue_point([], sr, env, 512, 256)
+                if snap is not None:
+                    result["snap_offset"] = float(snap)
+        if len(x) / float(sr) >= file_dur - 0.002:
+            end = _np_audible_end(x, sr, peak)
+        else:
+            end = _np_audible_end_file(path, info, peak)
+        if end is not None:
+            result["effective_duration"] = float(end)
+        result["playback_type"] = detect_playback_type(  # type: ignore[assignment]
+            x.view(_NpBuf), sr, file_dur, result.get("effective_duration")
+        )
+        result.update(_np_transient(x, sr))
+    return shift_time_fields(result, buf_start)
+
+
 def analyze_wav(path: str, mode: str = "full") -> Optional[Dict[str, float]]:
     """Prefer manual reader (PCM + float), then stdlib wave."""
+    if _np is not None:
+        try:
+            data = _analyze_wav_np(path, mode)
+            if data is not None:
+                return data
+        except Exception:
+            pass
     loaded = read_analysis_buffer_wav(path)
     if loaded is not None:
         samples, sr, file_dur, buf_start = loaded
@@ -1571,8 +1966,9 @@ def analyze_file(path: str, mode: str = "full") -> Dict[str, float]:
         # ADPCM / other compressed WAVs fail the PCM reader; ffmpeg/afconvert can decode them.
         if not data:
             data = analyze_via_convert(path, mode)
-    elif ext in (".aif", ".aiff"):
-        aiff = read_aiff_mono(path)
+    elif ext in (".aif", ".aiff", ".aifc"):
+        data = analyze_wav(path, mode)
+        aiff = read_aiff_mono(path) if not data else None
         if aiff is not None:
             samples, sr, file_dur, buf_start = aiff
             result, peak = analyze_samples(samples, sr, path, mode)
@@ -1606,6 +2002,13 @@ def analyze_job_payload(path: str, mode: str) -> Dict[str, object]:
         for k, v in data.items():
             if v is not None:
                 payload[k] = v
+        if mode == "full" and data:
+            # Header facts, so the browser doesn't have to open each new file in REAPER.
+            info = parse_wav_info(path)
+            if info:
+                payload["file_duration"] = info["total_frames"] / float(info["sr"])
+                payload["samplerate"] = info["sr"]
+                payload["channels"] = info["channels"]
         useful = (
             payload.get("dominant_freq") is not None
             or payload.get("rms_energy") is not None
@@ -1646,6 +2049,40 @@ def _remove_quietly(path: str) -> None:
         os.remove(path)
     except OSError:
         pass
+
+
+def _parse_job_line(line: str) -> Tuple[str, str]:
+    mode, path = ("full", line)
+    if "\t" in line:
+        mode, path = line.split("\t", 1)
+    mode = (mode or "full").strip() or "full"
+    if mode not in ("full", "transient", "weight"):
+        mode = "full"
+    return mode, path.strip()
+
+
+def run_batch(raw: str, slot: int, work_dir: str, quit_path: str) -> None:
+    """A "#batch <id>" request: one job per line after the header. Each result is
+    appended to out_<slot>_<id> as one JSON line as soon as it is ready, so the
+    browser can take results every frame while this worker keeps going."""
+    lines = raw.splitlines()
+    batch_id = re.sub(r"[^0-9A-Za-z_-]", "", lines[0][len("#batch ") :].strip()) or "0"
+    out_path = os.path.join(work_dir, f"out_{slot}_{batch_id}")
+    with open(out_path, "a", encoding="utf-8") as out:
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            if os.path.isfile(quit_path):
+                return
+            mode, path = _parse_job_line(line)
+            try:
+                payload = analyze_job_payload(path, mode)
+            except Exception as exc:
+                payload = {"_path": path, "_error": str(exc)}
+            payload.setdefault("_path", path)
+            out.write(json.dumps(payload))
+            out.write("\n")
+            out.flush()
 
 
 def run_worker(slot: int, work_dir: str) -> int:
@@ -1698,6 +2135,10 @@ def run_worker(slot: int, work_dir: str) -> int:
                 with open(req_path, "r", encoding="utf-8") as fh:
                     raw = fh.read()
                 _remove_quietly(req_path)
+                if raw.startswith("#batch "):
+                    run_batch(raw, slot, work_dir, quit_path)
+                    last_job = time.monotonic()
+                    continue
                 line = (raw or "").strip()
                 if "\t" in line:
                     mode, path = line.split("\t", 1)
@@ -1761,6 +2202,18 @@ def parse_cli(argv: List[str]) -> Tuple[Optional[str], str, bool, int, Optional[
 
 
 def main() -> int:
+    if "--install-numpy" in sys.argv[1:]:
+        # Into Sample Map's private folder for this exact Python + CPU (no admin
+        # rights, not the shared user site, allowed on "externally managed" Pythons).
+        target = sm_pylib_dir()
+        os.makedirs(target, exist_ok=True)
+        cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+               "--upgrade", "--target", target, "numpy"]
+        return subprocess.call(cmd)
+    if "--check-numpy" in sys.argv[1:]:
+        sys.stdout.write(numpy_status() + "\n")
+        sys.stdout.write("pylib " + sm_pylib_dir() + "\n")
+        return 0
     path, mode, worker, slot, work_dir = parse_cli(sys.argv[1:])
     if worker:
         if not work_dir:

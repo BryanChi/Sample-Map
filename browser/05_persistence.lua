@@ -1105,12 +1105,8 @@ function stop_analyzer_workers(requeue)
     end
   end
   for _, w in ipairs(workers) do
-    if requeue and w.path and w.path ~= "" then
-      table.insert(state.analyzer_queue, 1, w.path)
-      if w.mode then
-        state.analyzer_path_mode = state.analyzer_path_mode or {}
-        state.analyzer_path_mode[w.path] = w.mode
-      end
+    if requeue then
+      sm_worker_requeue_pending(w)
     end
     -- Quit file for idle workers; busy ones are killed by pid so closing
     -- the pipe does not wait for their current job.
@@ -1156,9 +1152,11 @@ function start_analyzer_worker(slot)
     res_path = dir .. "/res_" .. tostring(slot),
     quit_path = dir .. "/quit_" .. tostring(slot),
     pid_path = dir .. "/pid_" .. tostring(slot),
-    path = nil,
+    dir = dir,
+    path = nil,       -- next job this worker will finish (nil = idle)
     mode = nil,
-    start_time = 0,
+    start_time = 0,   -- last time it sent a result or got work while idle
+    batches = {},     -- { id, jobs = { {path, mode}... }, got, out_path, offset }
   }
 end
 
@@ -1182,6 +1180,11 @@ function detect_cpu_count()
   return n
 end
 
+SM_MAX_ANALYZER_WORKERS = 12
+-- Jobs per worker request. Workers stream results back one line at a time, so
+-- a batch only removes the one-file-per-frame round trip; it never delays results.
+SM_ANALYZER_BATCH = 16
+
 function recommended_analyzer_workers(cores)
   cores = tonumber(cores) or 4
   local n
@@ -1190,10 +1193,11 @@ function recommended_analyzer_workers(cores)
   elseif cores <= 8 then
     n = math.min(6, cores - 1)
   else
-    n = math.min(8, cores - 1)
+    -- Leave two cores for REAPER and audio.
+    n = math.min(SM_MAX_ANALYZER_WORKERS, cores - 2)
   end
   if n < 2 then n = 2 end
-  if n > 8 then n = 8 end
+  if n > SM_MAX_ANALYZER_WORKERS then n = SM_MAX_ANALYZER_WORKERS end
   return n
 end
 
@@ -1227,8 +1231,29 @@ function sm_python_check(bin, code)
   return ok == true
 end
 
+-- numpy as the analyzer itself sees it (its private pylib folder included).
+-- Sets state.analyzer_numpy_status to "ok …", "missing" or "broken <reason>".
 function python_has_numpy(bin)
-  return sm_python_check(bin, "import numpy")
+  if not bin or bin == "" then
+    return false
+  end
+  local null_dev = SM_IS_WINDOWS and "NUL" or "/dev/null"
+  local pipe = io.popen(sm_shell_cmd(shell_escape(bin) .. " " .. shell_escape(EXTERNAL_ANALYZER)
+    .. " --check-numpy 2>" .. null_dev))
+  local line = nil
+  if pipe then
+    line = pipe:read("*l")
+    pipe:close()
+  end
+  if not line or line == "" then
+    -- Older analyzer or no output: fall back to a plain import check.
+    return sm_python_check(bin, "import numpy")
+  end
+  if line:match("^ok") then
+    return true
+  end
+  state.analyzer_numpy_status = state.analyzer_numpy_status or line
+  return false
 end
 
 -- On macOS /usr/bin/python3 is a stub that pops up the "install command line
@@ -1296,22 +1321,51 @@ function resolve_analyzer_python()
   end
   PYTHON_BIN = fallback
   state.analyzer_numpy_missing = true
-  add_scan_log("Analyzer Python: " .. fallback .. " (numpy not installed — using the slower built-in FFT)")
+  add_scan_log("Analyzer Python: " .. fallback .. " (numpy "
+    .. ((state.analyzer_numpy_status or ""):match("^broken") and ("can't load: " .. state.analyzer_numpy_status:sub(8)) or "not installed")
+    .. " — using the slower built-in analysis)")
   add_scan_log("To speed up analysis, use Library > Re-analyze > Install numpy…, or run: "
     .. sm_numpy_install_command())
   return PYTHON_BIN
 end
 
+-- Installs into Sample Map's own pylib folder for this Python (see
+-- SampleMapAnalyzer.sm_pylib_dir), never the shared user site, so a numpy built
+-- for another CPU (Intel vs Apple Silicon) can't shadow it.
 function sm_numpy_install_command()
-  return shell_escape(PYTHON_BIN) .. " -m pip install --user numpy"
+  return shell_escape(PYTHON_BIN) .. " " .. shell_escape(EXTERNAL_ANALYZER) .. " --install-numpy"
+end
+
+-- After an install, look again; idle workers restart so they load numpy.
+function sm_recheck_numpy_after_install()
+  if not state.analyzer_numpy_install_started or not state.analyzer_numpy_missing then
+    return
+  end
+  if python_has_numpy(PYTHON_BIN) then
+    state.analyzer_numpy_missing = false
+    state.analyzer_numpy_status = nil
+    add_scan_log("Analyzer Python: numpy is now available")
+    local busy = false
+    for _, w in ipairs(state.analyzer_workers or {}) do
+      if w.path then busy = true end
+    end
+    if not busy then
+      stop_analyzer_workers(true)
+    end
+  end
 end
 
 -- Only runs when the user picks the menu item (never automatically).
 function sm_install_numpy()
   local cmd = sm_numpy_install_command()
+  local why = ""
+  local status = state.analyzer_numpy_status or ""
+  if status:match("architecture") then
+    why = "The numpy this Python finds was built for a different CPU (Intel vs Apple Silicon), so it can't load.\n\n"
+  end
   local answer = r.ShowMessageBox(
-    "Install numpy for the analyzer's Python?\n\nThis runs:\n" .. cmd
-      .. "\n\nAnalysis keeps working without it, just slower. New analyzer workers use numpy once the install finishes.",
+    why .. "Install numpy for the analyzer's Python?\n\nThis runs:\n" .. cmd
+      .. "\n\nIt goes into Sample Map's own folder and changes nothing else. Analysis is roughly 10x faster with it; without it everything still works, just slower.",
     "Install numpy", 4)
   if answer ~= 6 then
     return
@@ -1341,7 +1395,7 @@ function ensure_analyzer_workers()
   state.analyzer_workers = state.analyzer_workers or {}
   local want = state.max_concurrent_analyzers or 3
   if want < 1 then want = 1 end
-  if want > 8 then want = 8 end
+  if want > SM_MAX_ANALYZER_WORKERS then want = SM_MAX_ANALYZER_WORKERS end
   local started = #state.analyzer_workers
   while #state.analyzer_workers < want do
     local worker = start_analyzer_worker(#state.analyzer_workers + 1)
@@ -1356,7 +1410,7 @@ function ensure_analyzer_workers()
   end
   if started == 0 and #state.analyzer_workers > 0 then
     add_scan_log(string.format(
-      "Analyzer workers: %d (detected %d CPU cores, leaving 1 free)",
+      "Analyzer workers: %d (detected %d CPU cores)",
       #state.analyzer_workers,
       state.cpu_core_count or 0
     ))
@@ -1366,57 +1420,65 @@ end
 
 apply_cpu_analyzer_workers()
 
+-- Every job a worker has been sent and not answered yet, in order.
+function sm_worker_pending_jobs(w)
+  local out = {}
+  for _, b in ipairs(w and w.batches or {}) do
+    for i = b.got + 1, #b.jobs do
+      out[#out + 1] = b.jobs[i]
+    end
+  end
+  return out
+end
+
+-- w.path / w.mode name the job the worker is on now (nil when idle).
+function sm_worker_sync_current(w)
+  local job = sm_worker_pending_jobs(w)[1]
+  w.path = job and job.path or nil
+  w.mode = job and job.mode or nil
+end
+
+-- Put a worker's unanswered jobs back at the front of the queue (in order).
+function sm_worker_requeue_pending(w)
+  local jobs = sm_worker_pending_jobs(w)
+  if #jobs == 0 then
+    w.batches = {}
+    w.path, w.mode = nil, nil
+    return 0
+  end
+  state.analyzer_path_mode = state.analyzer_path_mode or {}
+  local q = state.analyzer_queue
+  table.move(q, 1, #q, #jobs + 1)
+  for i, job in ipairs(jobs) do
+    q[i] = job.path
+    if job.mode and job.mode ~= "full" then
+      state.analyzer_path_mode[job.path] = job.mode
+    end
+  end
+  for _, b in ipairs(w.batches or {}) do
+    if b.out_path then os.remove(b.out_path) end
+  end
+  -- A batch the worker hasn't picked up yet must not run as well.
+  if w.req_path then os.remove(w.req_path) end
+  w.batches = {}
+  w.path, w.mode = nil, nil
+  return #jobs
+end
+
 function refresh_active_processes()
   local busy = {}
   for _, w in ipairs(state.analyzer_workers or {}) do
-    if w.path then
-      busy[#busy + 1] = w
+    for _, job in ipairs(sm_worker_pending_jobs(w)) do
+      busy[#busy + 1] = job
     end
   end
   state.active_processes = busy
 end
 
-function collect_worker_result(w)
-  if not w or not w.path then
-    return false
-  end
-  local f = io.open(w.res_path, "r")
-  if not f then
-    if w.start_time and (r.time_precise() - w.start_time) > 30.0 then
-      state.analyzer_results[w.path] = {data = nil, err = "analyzer timeout"}
-      add_scan_log(string.format("Analyzer timeout on %s (continuing)", w.path:match("([^/]+)$") or w.path))
-      note_scan_session_analyzer(false)
-      w.path = nil
-      w.mode = nil
-      -- Restart the hung worker so its late result can't land on the next job;
-      -- also restart one that exited (pid file gone) right as the job was sent.
-      if sm_analyzer_worker_pid(w) or w.pid_seen then
-        sm_restart_analyzer_worker(w)
-      end
-      return true
-    end
-    return false
-  end
-  local output = f:read("*a")
-  f:close()
-  os.remove(w.res_path)
-  local path = w.path
-  local mode = w.mode
-  local ok_peek, peek = false, nil
+-- Turn one analyzer JSON result into state.analyzer_results[path].
+function sm_store_analyzer_output(path, mode, output)
   if output and output ~= "" then
-    ok_peek, peek = pcall(json_decode, output)
-    local result_path = ok_peek and type(peek) == "table" and peek._path or nil
-    if type(result_path) == "string" and result_path ~= ""
-        and not sm_analyzer_paths_equal(result_path, path) then
-      -- Late result for an earlier job (e.g. after a timeout): drop it, keep waiting.
-      add_scan_log(string.format("Dropped stale analyzer result for %s", result_path:match("([^/]+)$") or result_path))
-      return false
-    end
-  end
-  w.path = nil
-  w.mode = nil
-  if output and output ~= "" then
-    local success, data = ok_peek, peek
+    local success, data = pcall(json_decode, output)
     if success and type(data) == "table" then
       data._debug = nil
       local err = data._error
@@ -1437,8 +1499,6 @@ function collect_worker_result(w)
           add_scan_log(string.format("Transient scan: %s (onset=%.4f, transient_end=%.4f)", path:match("([^/]+)$") or path, data.onset or 0, data.transient_end or 0))
         elseif mode == "weight" then
           add_scan_log(string.format("Weight scan: %s (weight=%.3f)", path:match("([^/]+)$") or path, data.sub_weight or 0))
-        else
-          add_scan_log(string.format("Analyzer completed: %s (freq=%.1f, bright=%.1f, weight=%.2f, rms=%.3f, playback=%s)", path:match("([^/]+)$") or path, data.dominant_freq or 0, data.brightness or 0, data.sub_weight or 0, data.rms_energy or 0, tostring(data.playback_type or "?")))
         end
       end
     else
@@ -1451,15 +1511,100 @@ function collect_worker_result(w)
     add_scan_log(string.format("Analyzer error on %s: empty output", path:match("([^/]+)$") or path))
     note_scan_session_analyzer(false)
   end
-  return true
 end
 
-function assign_worker_job(w, path, mode)
-  if not w or not path or path == "" then
+-- Take the result lines a worker has written so far. Returns true when any landed.
+function collect_worker_result(w)
+  if not w or not w.batches or #w.batches == 0 then
     return false
   end
-  if mode ~= "transient" and mode ~= "weight" then
-    mode = "full"
+  local landed = false
+  while #w.batches > 0 do
+    local b = w.batches[1]
+    local f = io.open(b.out_path, "r")
+    local text = nil
+    if f then
+      f:seek("set", b.offset)
+      text = f:read("*a")
+      f:close()
+    end
+    local consumed = 0
+    if text and text ~= "" then
+      local pos = 1
+      while true do
+        local nl = text:find("\n", pos, true)
+        if not nl then break end
+        local line = text:sub(pos, nl - 1)
+        pos = nl + 1
+        consumed = nl
+        local ok, peek = pcall(json_decode, line)
+        local rpath = ok and type(peek) == "table" and peek._path or nil
+        -- Results come back in job order; match by path so a stray line can't shift them.
+        local idx = nil
+        for i = b.got + 1, #b.jobs do
+          if rpath == nil or sm_analyzer_paths_equal(b.jobs[i].path, rpath) then
+            idx = i
+            break
+          end
+        end
+        if idx then
+          for i = b.got + 1, idx - 1 do
+            -- Skipped by the worker (should not happen): retry later.
+            table.insert(state.analyzer_queue, b.jobs[i].path)
+          end
+          local job = b.jobs[idx]
+          b.got = idx
+          sm_store_analyzer_output(job.path, job.mode, line)
+          landed = true
+          w.start_time = r.time_precise()
+        end
+      end
+      b.offset = b.offset + consumed
+    end
+    if b.got >= #b.jobs then
+      os.remove(b.out_path)
+      table.remove(w.batches, 1)
+    else
+      break
+    end
+  end
+  sm_worker_sync_current(w)
+  -- A job that runs too long (or a worker that died) fails that one file; the rest go back in the queue.
+  if w.path and w.start_time and (r.time_precise() - w.start_time) > 30.0 then
+    local stuck = w.path
+    local b = w.batches[1]
+    b.got = b.got + 1
+    state.analyzer_results[stuck] = {data = nil, err = "analyzer timeout"}
+    add_scan_log(string.format("Analyzer timeout on %s (continuing)", stuck:match("([^/]+)$") or stuck))
+    note_scan_session_analyzer(false)
+    sm_worker_requeue_pending(w)
+    -- Restart the worker so a late result can't land on the next job.
+    sm_restart_analyzer_worker(w)
+    return true
+  end
+  return landed
+end
+
+-- Remove and return the first n paths of the analyzer queue (one table.move,
+-- not one shift per path: draining 55k paths one by one cost ~16 s of UI time).
+function sm_queue_take(n)
+  local q = state.analyzer_queue
+  local count = math.min(n, #q)
+  if count <= 0 then
+    return {}
+  end
+  local taken = table.move(q, 1, count, 1, {})
+  local total = #q
+  table.move(q, count + 1, total, 1)
+  for i = total - count + 1, total do
+    q[i] = nil
+  end
+  return taken
+end
+
+function assign_worker_jobs(w, paths)
+  if not w or #paths == 0 then
+    return false
   end
   if not sm_analyzer_worker_alive(w) then
     -- Worker exited (idle timeout or crash): start a fresh one in this slot.
@@ -1467,14 +1612,55 @@ function assign_worker_job(w, path, mode)
       return false
     end
   end
-  os.remove(w.res_path)
-  if not write_worker_file(w.req_path, mode .. "\t" .. path .. "\n") then
+  state.analyzer_batch_seq = (state.analyzer_batch_seq or 0) + 1
+  local id = tostring(state.analyzer_batch_seq)
+  local jobs, lines = {}, { "#batch " .. id }
+  local modes = state.analyzer_path_mode or {}
+  for _, path in ipairs(paths) do
+    local mode = modes[path] or state.analyzer_mode
+    modes[path] = nil
+    if mode ~= "transient" and mode ~= "weight" then
+      mode = "full"
+    end
+    jobs[#jobs + 1] = { path = path, mode = mode }
+    lines[#lines + 1] = mode .. "\t" .. path
+  end
+  local out_path = (w.dir or analyzer_work_dir()) .. "/out_" .. tostring(w.slot) .. "_" .. id
+  os.remove(out_path)
+  if not write_worker_file(w.req_path, table.concat(lines, "\n") .. "\n") then
+    for i = #jobs, 1, -1 do
+      table.insert(state.analyzer_queue, 1, jobs[i].path)
+      if jobs[i].mode ~= "full" then modes[jobs[i].path] = jobs[i].mode end
+    end
     return false
   end
-  w.path = path
-  w.mode = mode
-  w.start_time = r.time_precise()
+  if #w.batches == 0 then
+    w.start_time = r.time_precise()
+  end
+  w.batches[#w.batches + 1] = { id = id, jobs = jobs, got = 0, out_path = out_path, offset = 0 }
+  sm_worker_sync_current(w)
   return true
+end
+
+-- Back-compat for single-file callers.
+function assign_worker_job(w, path, mode)
+  if not path or path == "" then
+    return false
+  end
+  if mode then
+    state.analyzer_path_mode = state.analyzer_path_mode or {}
+    state.analyzer_path_mode[path] = mode
+  end
+  return assign_worker_jobs(w, { path })
+end
+
+function sm_req_file_waiting(w)
+  local f = io.open(w.req_path, "r")
+  if f then
+    f:close()
+    return true
+  end
+  return false
 end
 
 function process_analyzer_queue()
@@ -1494,30 +1680,26 @@ function process_analyzer_queue()
   end
 
   for _, w in ipairs(workers) do
-    if w.path then
+    w.batches = w.batches or {}
+    if #w.batches > 0 then
       collect_worker_result(w)
     end
   end
 
   -- Quiet single-file analysis (a drum layering glue) runs workers without a scan.
   if state.scan_running or (sm_quiet_analysis_pending and sm_quiet_analysis_pending()) then
+    -- Spread a short queue over all workers instead of handing it to the first one.
+    local per = math.ceil(#state.analyzer_queue / math.max(1, #workers))
+    local size = math.max(1, math.min(SM_ANALYZER_BATCH, per))
     for _, w in ipairs(workers) do
-      if not w.path and #state.analyzer_queue > 0 then
-        local path = table.remove(state.analyzer_queue, 1)
-        local mode = nil
-        if state.analyzer_path_mode and path then
-          mode = state.analyzer_path_mode[path]
-          state.analyzer_path_mode[path] = nil
-        end
-        if not mode then
-          mode = state.analyzer_mode
-        end
-        if not assign_worker_job(w, path, mode) then
-          table.insert(state.analyzer_queue, 1, path)
-          if mode then
-            state.analyzer_path_mode = state.analyzer_path_mode or {}
-            state.analyzer_path_mode[path] = mode
-          end
+      if #state.analyzer_queue == 0 then
+        break
+      end
+      local left = #sm_worker_pending_jobs(w)
+      -- Top the worker up before it runs dry, so it never waits for the next frame.
+      if #w.batches < 2 and left <= size // 2 and not (#w.batches > 0 and sm_req_file_waiting(w)) then
+        local paths = sm_queue_take(size)
+        if not assign_worker_jobs(w, paths) then
           break
         end
       end
