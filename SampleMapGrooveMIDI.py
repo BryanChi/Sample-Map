@@ -395,8 +395,10 @@ def extract_bar_pattern(notes, ticks_per_quarter, time_sigs, bars=1, bar_offset=
 
     Positions are flattened across the requested bars into a single 0..15*bars
     list, then folded into one bar (mod 16) so the Lua writer can repeat it —
-    matching the built-in template contract. Velocities are averaged per role/step
-    and returned alongside for future use.
+    matching the built-in template contract. Velocities and micro-timing are
+    averaged per role/step and returned alongside: velocities as MIDI 1..127,
+    offsets in sixteenths (-0.5..0.5, positive = late), so the played swing
+    and pocket survive the 16th grid.
     """
     bars = max(1, int(bars or 1))
     bar_offset = max(0, int(bar_offset or 0))
@@ -407,6 +409,7 @@ def extract_bar_pattern(notes, ticks_per_quarter, time_sigs, bars=1, bar_offset=
     tick_per_16 = tpb / 16.0
 
     role_steps = {}  # role -> {pos16: [vel, ...]}
+    role_offsets = {}  # role -> {pos16: [offset in 16ths, ...]}
     for abs_tick, pitch, vel in notes:
         if abs_tick < start_tick or abs_tick >= end_tick:
             continue
@@ -414,20 +417,27 @@ def extract_bar_pattern(notes, ticks_per_quarter, time_sigs, bars=1, bar_offset=
         if not role:
             continue
         local = abs_tick - start_tick
-        step = int(round(local / tick_per_16))
+        exact = local / tick_per_16
+        step = int(round(exact))
         # Fold multi-bar extraction into one bar of 16ths.
         pos16 = step % 16
         bucket = role_steps.setdefault(role, {})
         bucket.setdefault(pos16, []).append(vel)
+        role_offsets.setdefault(role, {}).setdefault(pos16, []).append(exact - step)
 
     pattern = {}
     velocities = {}
+    offsets = {}
     for role, steps in role_steps.items():
         pattern[role] = sorted(steps.keys())
         velocities[role] = {
             str(pos): int(round(sum(vs) / float(len(vs)))) for pos, vs in steps.items()
         }
-    return pattern, velocities, tpb
+        offsets[role] = {
+            str(pos): round(sum(os_) / float(len(os_)), 4)
+            for pos, os_ in role_offsets.get(role, {}).items()
+        }
+    return pattern, velocities, tpb, offsets
 
 
 def find_entry(rows, entry_id):
@@ -514,7 +524,7 @@ def pick_preview_bar(notes, ticks_per_quarter, time_sigs, total_bars):
     best = None
     order = list(range(1, total_bars)) + [0] if total_bars > 1 else [0]
     for bar in order:
-        pattern, _vel, _tpb = extract_bar_pattern(notes, ticks_per_quarter, time_sigs, bars=1, bar_offset=bar)
+        pattern, _vel, _tpb, _off = extract_bar_pattern(notes, ticks_per_quarter, time_sigs, bars=1, bar_offset=bar)
         hits = sum(len(v) for v in pattern.values())
         if len(pattern) >= 2 and hits >= 6:
             return bar, pattern
@@ -613,13 +623,13 @@ def build_pattern_response(entry, bars=1, bar_offset=None, seed=None):
         if bar_offset >= total_bars:
             bar_offset = max(0, total_bars - 1)
 
-    pattern, velocities, _ = extract_bar_pattern(
+    pattern, velocities, _, offsets = extract_bar_pattern(
         notes, tpq, time_sigs, bars=bars, bar_offset=bar_offset
     )
     if not pattern:
         # Empty bar — try from the start once.
         if bar_offset != 0:
-            pattern, velocities, _ = extract_bar_pattern(
+            pattern, velocities, _, offsets = extract_bar_pattern(
                 notes, tpq, time_sigs, bars=bars, bar_offset=0
             )
             bar_offset = 0
@@ -628,6 +638,7 @@ def build_pattern_response(entry, bars=1, bar_offset=None, seed=None):
     return {
         "pattern": pattern,
         "velocities": velocities,
+        "offsets": offsets,
         "roles": roles,
         "meta": summarize(entry),
         "bars": bars,

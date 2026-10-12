@@ -676,7 +676,7 @@ function render_seq_track_sample_candidates(dl, slot, layout)
           r.ImGui_SetTooltip(ctx, "Click to remove")
         elseif seq_candidate_entry_taken(entry) then
           r.ImGui_SetTooltip(ctx, (entry.name or "Sample")
-            .. (is_active and "\nSelected — sample changes save here" or "\nClick to recall")
+            .. (is_active and "\nSelected — samples you pick or drop save here" or "\nClick to recall")
             .. "\nDrag to drop · Alt-click to remove")
         else
           r.ImGui_SetTooltip(ctx, "Click to copy the current sample here")
@@ -1056,12 +1056,10 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
       end
     end
     if r.ImGui_IsItemClicked(ctx, 1) then
-      seq_midi_ensure_jsfx()
       if state.seq_midi_learn_slot_id == slot.id then
-        state.seq_midi_learn_slot_id = nil
+        seq_midi_end_learn()
       else
-        state.seq_midi_learn_slot_id = slot.id
-        state.seq_midi_learn_range = false
+        seq_midi_begin_learn(slot, false, "rclick")
       end
     end
     if r.ImGui_IsItemHovered(ctx) then
@@ -1074,7 +1072,7 @@ function render_seq_track_mix_controls(dl, slot, x0, y0, x1, y1, layout)
             or (seq_midi_note_name(lo) .. "–" .. seq_midi_note_name(hi)
                 .. "  (" .. tostring(lo) .. "–" .. tostring(hi) .. ")")
         r.ImGui_SetTooltip(ctx, "MIDI " .. range
-          .. "\nClick to assign notes  ·  Right-click: learn  ·  Alt-click: GM default")
+          .. "\nClick to assign notes  ·  Right-click: learn (Esc or click to stop)  ·  Alt-click: GM default")
       end
     end
   end

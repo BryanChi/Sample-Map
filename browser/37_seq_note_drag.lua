@@ -731,14 +731,25 @@ function render_seq_top_toolbar()
       local cap_dbl = cap_hovered and r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0)
       if cap_hovered then
         r.ImGui_DrawList_AddRectFilled(dl, gx, gy, gx + name_w + rounding, gy + btn_h, tone(0.50, 70), rounding)
-        r.ImGui_SetTooltip(ctx, "Focused region — pattern and groove apply here only.\nClick to zoom. Double-click to rename.")
+        r.ImGui_SetTooltip(ctx, "Focused region — pattern and groove apply here only.\nClick to zoom. Double-click (here or on the region) to rename.")
       end
       local tw, th = r.ImGui_CalcTextSize(ctx, region_chip)
       r.ImGui_DrawList_AddText(dl, gx + (name_w - tw) * 0.5, gy + (btn_h - th) * 0.5, 0xFFFFFFFF, region_chip)
+      local now = r.time_precise()
       if cap_dbl then
+        state.seq_region_chip_zoom = nil
         seq_begin_region_rename(focus_region)
       elseif cap_clicked then
-        seq_zoom_to_region(focus_region)
+        -- Zoom once the double-click window has passed, so double-click
+        -- renames without zooming first.
+        state.seq_region_chip_zoom = { region_id = focus_region.id, at = now + 0.3 }
+      end
+      local pend = state.seq_region_chip_zoom
+      if pend and now >= pend.at then
+        state.seq_region_chip_zoom = nil
+        if pend.region_id == focus_region.id then
+          seq_zoom_to_region(focus_region)
+        end
       end
     end
 
@@ -1366,7 +1377,7 @@ function apply_seq_stutter_lane_drag(drag, region, step_qn, start_qn, step_count
       local key = seq_alloc_note_key(region, slot.id, qn_offset)
       local note = make_default_seq_note(slot, key, qn_offset)
       if not note then
-        log("Sequencer slot has no assigned sample")
+        sm_notify("This track has no sample yet: drop a sample on it first", "warn")
         return false
       end
       set_seq_note(region, slot.id, key, note)

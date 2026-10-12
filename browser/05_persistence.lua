@@ -753,7 +753,7 @@ function sm_save_tag_presets(presets)
   end
   local ok, err = sm_atomic_write(SM_TAG_PRESETS_PATH, "return " .. content)
   if not ok then
-    log("Failed to save tag presets: " .. tostring(err))
+    sm_notify("Could not save tag presets: " .. tostring(err), "error")
   end
   return ok
 end
@@ -840,7 +840,7 @@ function save_config_file()
   if saved then
     log("Saved config with " .. #state.folders .. " folder(s)")
   else
-    log("Failed to save config file: " .. tostring(save_err))
+    sm_notify("Could not save settings: " .. tostring(save_err), "error")
   end
 end
 
@@ -2341,10 +2341,10 @@ function save_samples()
   if ok_json_enc and type(json_str) == "string" then
     local json_saved, json_err = sm_atomic_write(DATA_PATH, json_str)
     if not json_saved then
-      log("Failed to write JSON cache: " .. tostring(json_err))
+      sm_notify("Could not save the sample library: " .. tostring(json_err), "error")
     end
   else
-    log("Failed to encode JSON cache: " .. tostring(json_str))
+    sm_notify("Could not save the sample library: " .. tostring(json_str), "error")
   end
 
   state.last_save_time = r.time_precise()
@@ -2368,7 +2368,8 @@ function filter_samples_by_folders()
     state.active_tags = {}
     state.tag_list = {}
     state.tag_counts = {}
-    return
+    rebuild_samples_path_index()
+    return 0
   end
 
   local filtered_samples = {}
@@ -2376,13 +2377,12 @@ function filter_samples_by_folders()
 
   for _, sample in ipairs(state.samples) do
     if sample.path then
-      local normalized_sample_path = normalize_path(sample.path)
       local keep_sample = false
 
-      -- Check if sample belongs to any of the current folders
+      -- Check if sample belongs to any of the current folders (whole path
+      -- components, so ".../Drums" does not also keep ".../Drums2").
       for _, folder in ipairs(state.folders) do
-        local normalized_folder = normalize_path(folder)
-        if normalized_sample_path:sub(1, #normalized_folder) == normalized_folder then
+        if sample_under_scan_folder(sample.path, folder) then
           keep_sample = true
           break
         end
@@ -2402,12 +2402,11 @@ function filter_samples_by_folders()
   state.samples = filtered_samples
   rebuild_samples_path_index()
 
-  -- Rebuild tag data since samples changed
-  state.active_tags = {}
-  state.tag_list = {}
-  state.tag_counts = {}
+  -- Rebuild tag data since samples changed; the user's tag filters stay.
+  rebuild_tag_index()
 
   if removed_count > 0 then
     log("Removed " .. removed_count .. " samples from removed folder(s)")
   end
+  return removed_count
 end

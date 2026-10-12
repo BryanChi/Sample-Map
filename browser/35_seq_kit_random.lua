@@ -491,7 +491,7 @@ function toggle_seq_note(region, slot, step_key, qn_offset, force_mode, opts)
   elseif not existing and force_mode ~= "erase" then
     local note = make_default_seq_note(slot, step_key, qn_offset)
     if not note then
-      log("Sequencer slot has no assigned sample")
+      sm_notify("This track has no sample yet. Drop or pick one first.", "warn")
       return false
     end
     local pattern = get_seq_pattern(region.pattern_id, true)

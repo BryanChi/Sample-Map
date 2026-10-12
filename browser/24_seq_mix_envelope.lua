@@ -553,7 +553,9 @@ function seq_midi_stop_all_voices()
   end
 end
 
-function seq_midi_trigger_slot(slot, vel)
+-- note: the MIDI note that fired this slot (a range plays it at its pitch);
+-- nil for UI hits, which play at the root.
+function seq_midi_trigger_slot(slot, vel, note)
   if not slot or not seq_midi_slot_audible(slot) then
     return false
   end
@@ -566,7 +568,7 @@ function seq_midi_trigger_slot(slot, vel)
   end
 
   seq_midi_stop_voice(slot.id)
-  local started = seq_player_trigger(slot, vel)
+  local started = seq_player_trigger(slot, vel, note)
   if started then
     state.seq_track_play_anims = state.seq_track_play_anims or {}
     state.seq_track_play_anims[tostring(slot.id)] = {
@@ -595,21 +597,20 @@ function seq_midi_handle_note_on(note, vel)
     local slot = seq_find_track_slot_by_id(learn_id)
     if slot then
       seq_midi_set_note(slot, note, state.seq_midi_learn_range == true)
-      state.seq_midi_learn_slot_id = nil
-      state.seq_midi_learn_range = false
+      seq_midi_end_learn()
       save_config()
       if save_seq_project_state then save_seq_project_state() end
-      seq_midi_trigger_slot(slot, vel)
+      seq_midi_trigger_slot(slot, vel, note)
       return true
     end
-    state.seq_midi_learn_slot_id = nil
+    seq_midi_end_learn()
   end
 
   -- SampleMapPlayer plays via its trigger slider so the kit tracks meter.
   local hit = false
   for _, slot in ipairs(state.seq_tracks or {}) do
     if seq_midi_slot_matches(slot, note) then
-      if seq_midi_trigger_slot(slot, vel) then
+      if seq_midi_trigger_slot(slot, vel, note) then
         hit = true
       end
     end
@@ -929,9 +930,9 @@ function seq_player_write_cfg(slot, proj_key)
   if #pts < 1 then
     pts = { { t = 0, amp = 1, curve = 0 }, { t = 1, amp = 1, curve = 0 } }
   end
-  if #pts > 32 then
+  if #pts > SEQ_ENV_POINT_LIMIT then
     local trimmed = {}
-    for i = 1, 32 do
+    for i = 1, SEQ_ENV_POINT_LIMIT do
       trimmed[i] = pts[i]
     end
     pts = trimmed
@@ -1070,7 +1071,10 @@ function seq_player_sync_all()
   state.seq_player_sync_mark = { rev = rev, tracks = tracks, n = #tracks, proj = proj, at = now }
 end
 
-function seq_player_trigger(slot, vel)
+-- Player slider13 (0-based param 12): note the next trigger plays, -1 = root.
+SEQ_PLAYER_PARAM.trig_note = SEQ_PLAYER_PARAM.trig_note or 12
+
+function seq_player_trigger(slot, vel, note)
   if not slot then
     return false
   end
@@ -1082,6 +1086,9 @@ function seq_player_trigger(slot, vel)
   vel = math.max(1, math.min(127, math.floor(tonumber(vel) or 100)))
   local P = SEQ_PLAYER_PARAM
   seq_player_set_param(tr, fx, P.vel, vel)
+  -- -1 = play at the root. Set every time so a UI hit after a MIDI hit
+  -- doesn't reuse the last note.
+  seq_player_set_param(tr, fx, P.trig_note, note and seq_midi_clamp_note(note) or -1)
   local cur = math.floor(tonumber((r.TrackFX_GetParam(tr, fx, P.trigger))) or 0)
   seq_player_set_param(tr, fx, P.trigger, (cur + 1) % 1000000)
   return true
@@ -1173,7 +1180,69 @@ function render_seq_midi_arm_icon_button(id, h)
   end
 end
 
+SEQ_MIDI_LEARN_TIMEOUT = 15.0
+
+-- Start listening for a note for slot. as_range: extend the slot's range to
+-- the next note instead of replacing it. Arms the Sample Map folder while
+-- learning when it isn't armed (MIDI only reaches the script then), and
+-- disarms it again when learning ends.
+function seq_midi_begin_learn(slot, as_range, source)
+  if not slot then
+    return
+  end
+  seq_midi_end_learn()
+  seq_midi_ensure_jsfx()
+  state.seq_midi_learn_slot_id = slot.id
+  state.seq_midi_learn_range = as_range == true
+  state.seq_midi_learn_t0 = r.time_precise()
+  state.seq_midi_learn_source = source
+  state.seq_midi_learn_auto_armed = nil
+  if not seq_midi_parent_is_armed() then
+    if seq_midi_set_parent_arm(true) and seq_midi_parent_is_armed() then
+      state.seq_midi_learn_auto_armed = true
+    else
+      sm_notify("MIDI learn needs the Sample Map folder record-armed (MIDI button)", "warn")
+    end
+  end
+end
+
+function seq_midi_end_learn()
+  if state.seq_midi_learn_auto_armed then
+    state.seq_midi_learn_auto_armed = nil
+    seq_midi_set_parent_arm(false)
+  end
+  state.seq_midi_learn_slot_id = nil
+  state.seq_midi_learn_range = false
+  state.seq_midi_learn_t0 = nil
+  state.seq_midi_learn_source = nil
+end
+
+-- Learn started outside the popup (right-click) ends on Esc, a left click,
+-- or after SEQ_MIDI_LEARN_TIMEOUT; in the popup, closing it ends learn.
+function seq_midi_learn_tick()
+  if not state.seq_midi_learn_slot_id then
+    if state.seq_midi_learn_auto_armed then
+      -- Learn was cleared elsewhere (popup closed, track deleted).
+      seq_midi_end_learn()
+    end
+    return
+  end
+  local t0 = state.seq_midi_learn_t0
+  if t0 and r.time_precise() - t0 > SEQ_MIDI_LEARN_TIMEOUT then
+    seq_midi_end_learn()
+    sm_notify("MIDI learn timed out", "info")
+    return
+  end
+  if state.seq_midi_learn_source == "rclick" and ctx then
+    local esc = r.ImGui_Key_Escape and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false)
+    if esc or r.ImGui_IsMouseClicked(ctx, 0) then
+      seq_midi_end_learn()
+    end
+  end
+end
+
 function seq_midi_poll_gmem()
+  seq_midi_learn_tick()
   if not r.gmem_attach or not r.gmem_read then
     return
   end

@@ -2139,6 +2139,11 @@ update_seq_track_sample_assignments = function(slot, sample_path, sample_name, p
     r.UpdateArrange()
   end
 
+  if skipped_frozen > 0 and not opts.quiet then
+    sm_notify(skipped_frozen == 1 and "1 pinned note kept its sample"
+      or string.format("%d pinned notes kept their sample", skipped_frozen), "info")
+  end
+
   if persist then
     save_config()
   end
