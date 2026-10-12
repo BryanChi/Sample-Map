@@ -87,6 +87,7 @@ SAMPLE_MAP_BROWSER_MODULES = {
   "44_settings.lua",
   "45_map_input.lua",
   "46_map_render.lua",
+  "46b_scan_report.lua",
   "46a_map_atlas.lua",
   "47_main_loop.lua",
   "47b_feedback.lua",

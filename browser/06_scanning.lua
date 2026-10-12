@@ -949,6 +949,9 @@ function process_scan_slice(max_ms)
       -- Only write fields the analyzer actually produced (don't clobber with nil)
       local data = result.data
       local wrote = false
+      if data.analysis_note then
+        sm_scan_report_note_quiet(sample, data.analysis_note)
+      end
       if type(data.file_duration) == "number" and data.file_duration > 0 then
         sample.duration = data.file_duration
         if type(sample.file_size) == "number" then
