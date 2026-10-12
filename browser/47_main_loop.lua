@@ -83,7 +83,7 @@ function sm_loop_frame()
       sm_pcall("update check", SampleMapAutoCheckForUpdates)
     end
     sm_pcall("seq_gmd_bg_tick", seq_gmd_bg_tick)
-    sm_pcall("process_scan_slice", process_scan_slice)
+    sm_pcall("process_scan_slice", process_scan_slice, sm_scan_slice_ms())
     sm_pcall("process_waveform_slice", process_waveform_slice, 6.0)
     sm_pcall("process_retag_slice", process_retag_slice, 10.0)
     sm_pcall("process_guess_refresh_slice", process_guess_refresh_slice, 4.0)
@@ -161,12 +161,7 @@ function sm_loop_frame()
         render_view_tab_switcher()
         if state.scan_running then
           r.ImGui_SameLine(ctx, 0, UI_METRICS.toolbar_gap)
-          if draw_ui_button("scan_stop_toolbar", "Stop scan", nil, UI_METRICS.toolbar_h, { style = "danger", compact = true }) then
-            stop_scan()
-          end
-          if r.ImGui_IsItemHovered(ctx) then
-            r.ImGui_SetTooltip(ctx, "Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.")
-          end
+          draw_scan_progress_chip()
         end
 
         local map_in_main = state.active_view == "sample_map" and not state.sample_map_floating

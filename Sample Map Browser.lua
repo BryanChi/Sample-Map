@@ -11,6 +11,7 @@
 --   [nomain] SampleMapDrumAI.py
 --   [nomain] SampleMapGrooveMIDI.py
 --   [nomain] tag_presets.default.lua
+--   [nomain] feedback/CRS_Feedback.lua
 --   [nomain] assets/*
 --   [nomain] assets/behringer-icons/*
 --   [nomain] assets/behringer-icons/png/*
@@ -86,7 +87,9 @@ SAMPLE_MAP_BROWSER_MODULES = {
   "44_settings.lua",
   "45_map_input.lua",
   "46_map_render.lua",
+  "46a_map_atlas.lua",
   "47_main_loop.lua",
+  "47b_feedback.lua",
   "48_main_entry.lua",
 }
 do

@@ -343,6 +343,9 @@ state = {
   -- Drum types guessed from the sound (sample.guess_tag) count as tags in
   -- filters and colours (View > Show Guessed Drum Tags).
   show_guessed_tags = true,
+  -- Background scanning: a smaller time slice per frame and only a few
+  -- analyzer workers, so REAPER stays responsive (Library menu).
+  scan_background = false,
   retag_job = nil,       -- Library > Re-tag Library while it runs (06b_retag.lua)
   retag_preview = nil,   -- its result, until Apply / Cancel
   guess_refresh = nil,   -- guessed drum tags being refreshed after a scan

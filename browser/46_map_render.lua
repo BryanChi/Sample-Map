@@ -16,26 +16,25 @@ function round_to_nice_map_freq(freq)
   end
 end
 
--- Map canvas palette. The plot sits on the darkest surface with a faint
--- accent glow in the middle; the axis gutters are a shade darker still and
--- carry the scale labels, so the plot area itself stays clean.
+-- Map canvas palette: deep-space navy. The axis gutters are a shade darker
+-- than the plot and carry the scale labels, so the plot itself stays clean.
 MAP_CANVAS = {
-  plot_bg      = 0x0C100DFF,
-  plot_bg_deep = 0x09141AFF,
-  gutter_bg    = 0x090C0AFF,
-  gutter_edge  = 0x222B25FF,
-  frame        = 0x26302AFF,
-  glow         = 0x1EFF5E06,
-  glow_deep    = 0x3FD6E00E,
-  grid_major   = 0x8FB39A1E,
-  grid_minor   = 0x8FB39A0C,
-  tick         = 0x5F6962FF,
-  label_major  = 0x9FB2A5D8,
-  label_minor  = 0x6F7B73B0,
-  axis_caption = 0x5F6962FF,
-  guide        = 0xE8EEEA30,
-  readout_bg   = 0x0E2A18F0,
-  readout_text = 0xDFFFE8FF,
+  plot_bg      = 0x070A16FF,
+  plot_bg_deep = 0x050713FF,
+  gutter_bg    = 0x05070FFF,
+  gutter_edge  = 0x1A2038FF,
+  frame        = 0x1D2440FF,
+  glow         = 0x6A7CFF06,
+  glow_deep    = 0x9A6CFF0C,
+  grid_major   = 0x9FB0E01A,
+  grid_minor   = 0x9FB0E00A,
+  tick         = 0x5A6280FF,
+  label_major  = 0xA4AECED8,
+  label_minor  = 0x6E7696B0,
+  axis_caption = 0x5A6280FF,
+  guide        = 0xE6EAFF30,
+  readout_bg   = 0x161C3CF0,
+  readout_text = 0xE6EBFFFF,
 }
 MAP_GUTTER_LEFT = 70
 MAP_GUTTER_TOP = 25
@@ -86,43 +85,11 @@ function map_zoom_depth()
   return math.max(0.0, math.min(1.0, math.log(z / zmin) / math.log(zmax / zmin)))
 end
 
--- Rounded canvas fill with a soft accent glow, drawn before the grid. The
--- canvas shifts with zoom so the depth reads without looking at a number:
--- zoomed out it is a neutral green-black with a wide, faint glow; zooming in
--- cools it towards deep teal, tightens and brightens the glow, and darkens
--- the edges like a lens vignette.
+-- Rounded canvas fill, drawn before the guides and grid. Flat on purpose:
+-- zoom depth is shown by the grid, the overview map and the dot size rather
+-- than by tinting the whole canvas.
 function draw_map_canvas_backdrop(dl, x0, y0, width, height, padded_x0, padded_y0)
-  local C = MAP_CANVAS
-  local rounding = UI_METRICS.radius_panel
-  local depth = map_zoom_depth()
-  local bg = map_lerp_color(C.plot_bg, C.plot_bg_deep, depth)
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + height, bg, rounding)
-  local px1, py1 = x0 + width, y0 + height
-  local pw, ph = px1 - padded_x0, py1 - padded_y0
-  if pw > 8 and ph > 8 then
-    if r.ImGui_DrawList_PushClipRect then
-      r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, px1, py1, true)
-    end
-    local cx, cy = padded_x0 + pw * 0.5, padded_y0 + ph * 0.5
-    local glow = map_lerp_color(C.glow, C.glow_deep, depth)
-    local rad = math.max(pw, ph) * (0.55 - 0.17 * depth)
-    for i = 1, 3 do
-      r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, rad * (1.0 - (i - 1) * 0.28), glow, 48)
-    end
-    -- Edge vignette, only once zoomed in a little
-    local vig_a = math.floor(depth * 0x16 + 0.5)
-    if vig_a > 0 then
-      local band = math.max(6, math.min(pw, ph) * 0.035)
-      for i = 0, 3 do
-        local inset = band * (i + 0.5)
-        r.ImGui_DrawList_AddRect(dl, padded_x0 + inset - band * 0.5, padded_y0 + inset - band * 0.5,
-          px1 - inset + band * 0.5, py1 - inset + band * 0.5, (vig_a * (4 - i)) // 4, 0, 0, band)
-      end
-    end
-    if r.ImGui_DrawList_PopClipRect then
-      r.ImGui_DrawList_PopClipRect(dl)
-    end
-  end
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + height, MAP_ATLAS_COL and MAP_ATLAS_COL.bg or MAP_CANVAS.plot_bg, UI_METRICS.radius_panel)
 end
 
 -- Axis gutters: darker strips on the left (Y scale) and top (X scale), split
@@ -157,103 +124,18 @@ end
 
 function draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
   draw_map_gutters(dl, x0, y0, width, height, padded_x0, padded_y0)
-  -- Draw grid lines for frequency (horizontal) and time (vertical)
   if #state.samples > 0 and state.samples[1].x then
-    local C = MAP_CANVAS
-    local log10 = math.log(10)
-
-    -- Brightness / pitch floor is 40 Hz (analyzer does not report below that)
-    local freq_min_log = math.log(40.0) / log10
-    local freq_max_log = math.log(20000.0) / log10
-
-    -- Calculate duration range from samples for X-axis grid (cached with filter rebuild)
-    local len_min_log, len_max_log = nil, nil
-    if map_cache.duration_min and map_cache.duration_max then
-      len_min_log = math.log(math.max(map_cache.duration_min, 0.01)) / log10
-      len_max_log = math.log(math.max(map_cache.duration_max, 0.01)) / log10
+    local v = map_view_frame(padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
+    local b = map_axis_bounds()
+    if r.ImGui_DrawList_PushClipRect then
+      r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, x0 + width, y0 + height, true)
     end
-
-    -- Use reasonable defaults for duration if no samples
-    if not len_min_log then
-      len_min_log = math.log(0.01) / log10  -- 10ms
-      len_max_log = math.log(60.0) / log10   -- 60 seconds
+    draw_map_galaxy_backdrop(dl, v)
+    draw_map_guides(dl, v, b)
+    if r.ImGui_DrawList_PopClipRect then
+      r.ImGui_DrawList_PopClipRect(dl)
     end
-
-    local plot_x1 = x0 + width
-    local plot_y1 = y0 + height
-
-    -- Horizontal Y-axis lines: even steps are major (brighter line, brighter label)
-    local y_axis = map_y_axis_id()
-    local num_freq_lines = 10
-    for i = 0, num_freq_lines do
-      local normalized_y = i / num_freq_lines
-      -- normalized_y = 1.0 - y_normalized, so y_normalized = 1.0 - normalized_y
-      local y_normalized = 1.0 - normalized_y
-      local freq_log = freq_min_log + y_normalized * (freq_max_log - freq_min_log)
-      local freq_val = 10 ^ freq_log
-
-      local base_y = normalized_y * padded_height
-      local py = padded_center_y + (base_y - padded_height * 0.5) * state.zoom
-
-      if py >= padded_y0 - 1 and py <= padded_y0 + padded_height + 1 then
-        local major = (i % 2) == 0
-        if py > padded_y0 + 0.5 then
-          r.ImGui_DrawList_AddLine(dl, padded_x0, py, plot_x1, py, major and C.grid_major or C.grid_minor, 1.0)
-        end
-        r.ImGui_DrawList_AddLine(dl, padded_x0 - 5, py, padded_x0 - 1, py, C.tick, 1.0)
-
-        local freq_text
-        if y_axis == "weight" then
-          if i == 0 then
-            freq_text = "Heavy"
-          elseif i == num_freq_lines then
-            freq_text = "Light"
-          else
-            freq_text = string.format("%.0f%%", y_normalized * 100.0)
-          end
-        else
-          freq_text = map_format_hz(round_to_nice_map_freq(freq_val))
-        end
-        -- Right-aligned against the gutter edge, clamped inside the gutter
-        local tw, th = r.ImGui_CalcTextSize(ctx, freq_text)
-        local ty = math.max(padded_y0 + 1, math.min(plot_y1 - th - 2, py - th * 0.5))
-        r.ImGui_DrawList_AddText(dl, padded_x0 - 9 - tw, ty, major and C.label_major or C.label_minor, freq_text)
-      end
-    end
-
-    -- Vertical duration lines
-    local duration_min, duration_max = map_cache.duration_min, map_cache.duration_max
-
-    if duration_min and duration_max then
-      local padding = 0.05
-      local num_time_lines = 10
-      for i = 0, num_time_lines do
-        local normalized_x = padding + (i / num_time_lines) * (1.0 - 2.0 * padding)
-        local len_log = len_min_log + ((normalized_x - padding) / (1.0 - 2.0 * padding)) * (len_max_log - len_min_log)
-        local time_val = 10 ^ len_log
-
-        local base_x = normalized_x * padded_width
-        local px = padded_center_x + (base_x - padded_width * 0.5) * state.zoom
-
-        if px >= padded_x0 - 1 and px <= padded_x0 + padded_width + 1 then
-          local major = (i % 2) == 0
-          r.ImGui_DrawList_AddLine(dl, px, padded_y0, px, plot_y1, major and C.grid_major or C.grid_minor, 1.0)
-          r.ImGui_DrawList_AddLine(dl, px, padded_y0 - 5, px, padded_y0 - 1, C.tick, 1.0)
-
-          local time_text
-          if time_val < 10.0 then
-            time_text = string.format("%.1fs", time_val)
-          else
-            time_text = string.format("%.0fs", time_val)
-          end
-          -- Centred on the line, clamped inside the top gutter
-          local tw, th = r.ImGui_CalcTextSize(ctx, time_text)
-          local tx = math.max(padded_x0 + 2, math.min(plot_x1 - tw - 4, px - tw * 0.5))
-          local ty = y0 + (padded_y0 - y0 - th) * 0.5 - 1
-          r.ImGui_DrawList_AddText(dl, tx, ty, major and C.label_major or C.label_minor, time_text)
-        end
-      end
-    end
+    draw_map_adaptive_grid(dl, x0, y0, v, b)
   end
 end
 
@@ -380,7 +262,7 @@ function draw_map_play_trace(dl, padded_x0, padded_y0, padded_width, padded_heig
   for i = 1, nseg do
     local t = i / nseg
     local alpha = math.floor(28 + t * 70 + 0.5)
-    local col = (0x1EFF5E00) | alpha
+    local col = (0xBFD2FF00) | alpha
     r.ImGui_DrawList_AddLine(dl, pts[i].px, pts[i].py, pts[i + 1].px, pts[i + 1].py, col, 1.15)
   end
   for i = 1, #pts do
@@ -389,7 +271,7 @@ function draw_map_play_trace(dl, padded_x0, padded_y0, padded_width, padded_heig
     local r0 = 2.2 + t * 1.4
     local is_current = current_path and pts[i].s.path == current_path
     if not is_current then
-      r.ImGui_DrawList_AddCircle(dl, pts[i].px, pts[i].py, r0, (0x1EFF5E00) | alpha, 10, 1.1)
+      r.ImGui_DrawList_AddCircle(dl, pts[i].px, pts[i].py, r0, (0xBFD2FF00) | alpha, 10, 1.1)
     end
   end
   if r.ImGui_DrawList_PopClipRect then
@@ -519,11 +401,12 @@ function draw_map_dot_tooltip_header(s, color)
 end
 
 function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
-  local dot_radius = state.dot_radius or 2.0
+  local base_dot_radius = state.dot_radius or 2.0
+  -- Dots grow a little with zoom so close-ups read as beads, not specks.
+  local dot_radius = base_dot_radius * map_dot_zoom_scale()
   local clicked_sample = nil
   local click_handled_this_frame = false
 
-  local outline_color = build_color_rrgbbaa(extract_rgb(state.dot_outline_color or 0xFF00FF))
   local hover_color = build_color_rrgbbaa(extract_rgb(state.dot_hover_color or 0xC84D))
   local outline_size = state.dot_outline_size or 4.0
 
@@ -560,6 +443,13 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   -- The flat arrays mirror these entries unless something rebuilt one without
   -- the other; then use the entries directly.
   local flat = pxs ~= nil and cache.draw_arrays_for == entries and cache.draw_arrays_n == n_entries
+  if flat then
+    -- Dot colours lifted towards white like stars; hovering a label dims
+    -- every other tag.
+    cols = map_star_colors(cache, n_entries)
+    draw_map_star_halos(dl, n_entries, pxs, pys, cols, dot_radius)
+  end
+  draw_map_constellations(dl, entries, n_entries, dot_radius)
   if flat and not playing_path and next(highlight_info) == nil then
     -- Common case (nothing playing, no hovered track): plain dot loop.
     for i = 1, n_entries do
@@ -645,8 +535,14 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
     end
     local elapsed = r.time_precise() - state.breathing_start_time
     local pulse = 0.85 + 0.15 * math.sin((elapsed % 1.5) / 1.5 * 2.0 * math.pi)
-    local ring_r = (selected_dot_radius + outline_size) * pulse
+    -- Playing star: soft glow in its colour, a bright core, a thin white
+    -- ring that breathes, and a small flare.
+    local ring_r = math.max(9.0, selected_dot_radius + 5.0) * pulse
+    r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, math.max(18.0, selected_dot_radius * 3.2), (e.color & 0xFFFFFF00) | 0x22, 24)
+    r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, math.max(9.0, selected_dot_radius * 1.9), (e.color & 0xFFFFFF00) | 0x40, 20)
+    draw_map_star_flare(dl, e.px, e.py, e.color, math.max(22.0, selected_dot_radius + 16.0))
     r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, selected_dot_radius, e.color, 16)
+    r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, selected_dot_radius * 0.45, 0xFFFFFFE6, 12)
     local playing_assigned = highlight_info[e.s.path]
     if playing_assigned then
       r.ImGui_DrawList_AddCircle(dl, e.px, e.py, selected_dot_radius + 3.0, assigned_ring, 16, 1.8)
@@ -654,8 +550,8 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
         r.ImGui_DrawList_AddCircle(dl, e.px, e.py, selected_dot_radius + 6.0, selected_ring, 16, 2.0)
       end
     end
-    r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r, outline_color, 16, state.dot_outline_thickness or 3.0)
-    r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r * 1.35, (e.color & 0xFFFFFF00) | 0x55, 12, 1.5)
+    r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r, 0xFFFFFFC8, 24, 1.5)
+    r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r * 1.45, (e.color & 0xFFFFFF00) | math.floor(0x50 * pulse), 24, 1.0)
   end
   if clip_dots then
     r.ImGui_DrawList_PopClipRect(dl)
@@ -664,7 +560,7 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   local closest = nil
   if hovered then
     local detect = state.dot_detection_multiplier or 16.0
-    local snap_r = math.max(MAP_CLICK_SNAP_MIN, dot_radius * detect)
+    local snap_r = math.max(MAP_CLICK_SNAP_MIN, base_dot_radius * detect)
     closest = map_find_hover_entry(cache, entries, mx, my, snap_r)
   end
 
@@ -677,13 +573,17 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
       dl, s, px, py, padded_x0 - MAP_GUTTER_LEFT, padded_y0 - MAP_GUTTER_TOP,
       padded_x0, padded_y0, padded_x0 + padded_width, padded_y0 + padded_height
     )
-    -- Soft halo in the dot's colour, then a crisp ring
-    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 7.0, (closest.color & 0xFFFFFF00) | 0x22, 20)
-    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 3.5, (closest.color & 0xFFFFFF00) | 0x40, 16)
+    -- Wide soft glow in the dot's colour, a bright core, then a crisp ring
+    local glow_col = closest.color & 0xFFFFFF00
+    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 14.0, glow_col | 0x18, 24)
+    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 8.0, glow_col | 0x38, 20)
+    r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius + 4.0, glow_col | 0x66, 16)
     if not is_currently_playing then
-      r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius * 1.4, closest.color, 12)
+      r.ImGui_DrawList_AddCircleFilled(dl, px, py, math.max(3.0, dot_radius * 1.7), closest.color | 0xFF, 12)
+      r.ImGui_DrawList_AddCircleFilled(dl, px, py, math.max(1.5, dot_radius * 0.75), 0xFFFFFFE0, 10)
     end
-    r.ImGui_DrawList_AddCircle(dl, px, py, dot_radius + 3.0, s.hot_color or hover_color, 16, 1.5)
+    r.ImGui_DrawList_AddCircle(dl, px, py, dot_radius + 4.0, s.hot_color or hover_color, 16, 1.8)
+    draw_map_star_flare(dl, px, py, closest.color, dot_radius + 16.0)
 
     -- Pin to the hovered dot so ImGui nav cannot relocate this tooltip.
     if r.ImGui_SetNextWindowPos then
@@ -964,6 +864,16 @@ function finish_scan_session(still_incomplete)
         clip[#clip + 1] = "  " .. row.path
       end
     end
+  end
+
+  -- Background scans that went fine end with a toast instead of a window.
+  if scan_in_background() and error_count == 0 and not note then
+    play_scan_complete_sound()
+    sm_notify(string.format("%s finished in %s  ·  library: %s samples",
+      kind, format_scan_clock(elapsed), sm_format_count(#state.samples)))
+    add_scan_log(string.format("%s finished in %s", kind, format_scan_clock(elapsed)))
+    state.scan_session = nil
+    return
   end
 
   state.scan_complete_dialog = {
@@ -1435,116 +1345,270 @@ function update_scan_eta(phase, done, remaining, now)
   return eta.remain
 end
 
-function draw_map_scan_progress_overlay(dl, x0, y0, width, height)
+-- "12,345"
+function sm_format_count(n)
+  local s = tostring(math.floor(tonumber(n) or 0))
+  local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  return (out:gsub("^,", ""))
+end
+
+-- What the running scan is doing, for the progress bars (nil when no scan runs):
+-- { phase, label, done, total, fraction, eta, elapsed, detail, indeterminate }.
+function sm_compute_scan_progress(now)
   if not state.scan_running then
-    return 0
+    return nil
   end
-  local file_scanning = #state.scan_queue > 0
-  local analyzing = (state.incomplete_analysis_total or 0) > 0
-      and state.scan_started > 0
-      and #state.scan_queue == 0
-      and (#state.analyzer_queue > 0 or #state.active_processes > 0)
-
-  if not file_scanning and not analyzing then
-    return 0
+  local session = state.scan_session
+  local started = (type(session) == "table" and session.started_at)
+    or (state.scan_started and state.scan_started > 0 and state.scan_started) or now
+  local elapsed = math.max(0, now - started + ((type(session) == "table" and session.elapsed_so_far) or 0))
+  local p = { elapsed = elapsed }
+  local enum = state.scan_enum
+  if enum then
+    p.phase = "list"
+    p.label = "Looking for files"
+    p.short = "Finding files"
+    p.indeterminate = true
+    p.detail = string.format("%s folders checked  ·  %s new files found",
+      sm_format_count(enum.dirs_done or 0), sm_format_count(#(enum.paths or {})))
+    return p
   end
-
-  local done, total, elapsed, label
-  if file_scanning then
-    done = state.scan_total - #state.scan_queue
-    total = state.scan_total
-    elapsed = r.time_precise() - state.scan_started
-    label = "Scanning"
+  local remaining
+  if #state.scan_queue > 0 then
+    local total = math.max(state.scan_total or 0, #state.scan_queue)
+    remaining = #state.scan_queue
+    p.phase = "index"
+    p.label = "Adding new files"
+    p.short = "Adding files"
+    p.done, p.total = total - remaining, total
   else
-    local remaining = #state.analyzer_queue + #state.active_processes
-    total = math.max(state.incomplete_analysis_total or 0, remaining)
-    done = math.max(0, total - remaining)
-    elapsed = r.time_precise() - state.scan_started
-    label = state.analyzer_job_label or "Analyzing incomplete"
+    remaining = #state.analyzer_queue + #state.active_processes
+    if remaining == 0 then
+      p.phase = "finish"
+      p.label = "Finishing up"
+      p.short = "Finishing"
+      p.indeterminate = true
+      p.detail = "Saving the library"
+      return p
+    end
+    local done = 0
+    if type(session) == "table" then
+      done = (session.analyzed or 0) + (session.analyze_errors or 0)
+    end
+    p.phase = "analyze"
+    p.label = (state.analyzer_job_label and state.analyzer_job_label ~= "") and state.analyzer_job_label or "Analyzing sounds"
+    p.short = "Analyzing"
+    p.done, p.total = done, done + remaining
   end
-  local progress = total > 0 and (done / total) or 0.0
+  p.fraction = p.total > 0 and math.max(0, math.min(1, p.done / p.total)) or 0
+  p.eta = update_scan_eta(p.phase, p.done, remaining, now)
+  p.detail = string.format("%s of %s files", sm_format_count(p.done), sm_format_count(p.total))
+  return p
+end
 
-  -- Floating card across the top of the plot: label + percentage, a slim
-  -- accent bar, then counts and the time estimate in dim text.
-  local overlay_height = 118.0
-  local overlay_y = y0
-  local card_margin = 10.0
-  local card_x0 = x0 + card_margin
-  local card_x1 = x0 + width - card_margin
-  local card_y0 = overlay_y + 6.0
-  local card_y1 = overlay_y + overlay_height - 4.0
-  r.ImGui_DrawList_AddRectFilled(dl, x0, overlay_y, x0 + width, overlay_y + overlay_height, 0x00000066, UI_METRICS.radius_panel)
-  r.ImGui_DrawList_AddRectFilled(dl, card_x0, card_y0, card_x1, card_y1, 0x111612F4, UI_METRICS.radius_panel)
-  r.ImGui_DrawList_AddRect(dl, card_x0 + 0.5, card_y0 + 0.5, card_x1 - 0.5, card_y1 - 0.5, UI_THEME.border, UI_METRICS.radius_panel, 0, 1.0)
-
-  local bar_padding = 26.0
-  local bar_y = overlay_y + 36.0
-  local bar_width = width - (bar_padding * 2)
-  local bar_height = 6.0
-
-  local pct_text = string.format("%.0f%%", progress * 100.0)
-  local head = label
-  local _, head_h = r.ImGui_CalcTextSize(ctx, head)
-  local pct_w = select(1, r.ImGui_CalcTextSize(ctx, pct_text)) or 30
-  local text_y = overlay_y + 14.0
-  local pulse = 0.55 + 0.45 * math.sin(r.time_precise() * 4.0)
-  r.ImGui_DrawList_AddCircleFilled(dl, x0 + bar_padding + 3, text_y + head_h * 0.5, 3.5,
-    (UI_THEME.accent & 0xFFFFFF00) | math.floor(120 + 135 * pulse), 12)
-  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + 12, text_y, UI_THEME.text, head)
-  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + 12.5, text_y, UI_THEME.text, head)
-  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + bar_width - pct_w, text_y, UI_THEME.accent, pct_text)
-
-  r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y, x0 + bar_padding + bar_width, bar_y + bar_height, 0x1E2621FF, bar_height * 0.5)
-  local fill_width = bar_width * math.max(0.0, math.min(1.0, progress))
-  if fill_width > bar_height then
-    r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y, x0 + bar_padding + fill_width, bar_y + bar_height, UI_THEME.accent, bar_height * 0.5)
-    r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y - 2, x0 + bar_padding + fill_width, bar_y + bar_height + 2, 0x1EFF5E1C, bar_height)
+-- Once per frame: the map card and the toolbar bar both read it.
+function sm_scan_progress()
+  local frame = (ctx and r.ImGui_GetFrameCount and r.ImGui_GetFrameCount(ctx)) or 0
+  local c = state._scan_progress_cache
+  if c and frame ~= 0 and c.frame == frame then
+    return c.p
   end
+  local p = sm_compute_scan_progress(r.time_precise())
+  state._scan_progress_cache = { frame = frame, p = p }
+  return p
+end
 
-  local text = string.format("%d of %d files  ·  %s elapsed", done, total, format_scan_clock(elapsed))
-  local remaining_y = bar_y + bar_height + 8.0
-  r.ImGui_DrawList_AddText(dl, x0 + bar_padding, remaining_y, UI_THEME.text_dim, text)
-
-  -- Estimate time remaining (right side, same row)
-  local remaining_count = file_scanning and #state.scan_queue or (#state.analyzer_queue + #state.active_processes)
-  local phase = file_scanning and "scan" or "analyze"
-  local eta_sec = update_scan_eta(phase, done, remaining_count, r.time_precise())
-  local remaining_text = nil
-  if remaining_count > 0 and type(eta_sec) == "number" and eta_sec > 0.5 then
-    remaining_text = "About " .. format_scan_clock(eta_sec) .. " left"
-  elseif remaining_count > 0 and done < 4 then
-    remaining_text = "Estimating time left…"
+-- "About 3 min left", "Estimating time left…" or nil.
+function sm_scan_eta_text(p)
+  if not p or p.indeterminate then
+    return nil
   end
-  if remaining_text then
-    local rw = select(1, r.ImGui_CalcTextSize(ctx, remaining_text)) or 0
-    r.ImGui_DrawList_AddText(dl, x0 + bar_padding + bar_width - rw, remaining_y, UI_THEME.text_dim, remaining_text)
+  if type(p.eta) == "number" and p.eta > 0.5 then
+    return "About " .. format_scan_clock(p.eta) .. " left"
   end
+  if (p.done or 0) < 4 and (p.total or 0) > (p.done or 0) then
+    return "Estimating time left…"
+  end
+  return nil
+end
 
-  local btn_w, btn_h = 72, 22
-  local btn_x = x0 + (width - btn_w) * 0.5
-  local btn_y = overlay_y + overlay_height - btn_h - 12.0
+-- Slim progress bar; an indeterminate bar shows a sliding segment.
+function sm_draw_progress_bar(dl, x0, y0, x1, y1, fraction, indeterminate, track_col, fill_col)
+  local h = y1 - y0
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, track_col or 0x1E2621FF, h * 0.5)
+  local w = x1 - x0
+  if indeterminate then
+    local seg = math.max(h * 2, w * 0.28)
+    local t = (r.time_precise() * 0.55) % 1.0
+    local sx = x0 - seg + (w + seg) * t
+    local a, b = math.max(x0, sx), math.min(x1, sx + seg)
+    if b - a > 1 then
+      r.ImGui_DrawList_AddRectFilled(dl, a, y0, b, y1, fill_col or UI_THEME.accent, h * 0.5)
+    end
+    return
+  end
+  local fw = w * math.max(0.0, math.min(1.0, fraction or 0))
+  if fw > 1 then
+    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + math.max(fw, h), y1, fill_col or UI_THEME.accent, h * 0.5)
+  end
+end
+
+-- Hit-tested button drawn over the map (the map's InvisibleButton sits under
+-- the card and would steal a normal item click).
+local function overlay_button(id, label, x, y, w, h, style, tip)
   local mx, my = r.ImGui_GetMousePos(ctx)
-  local over_btn = mx >= btn_x and mx <= (btn_x + btn_w) and my >= btn_y and my <= (btn_y + btn_h)
-  -- Ignore the rect while another window/popup covers the map.
-  if over_btn and r.ImGui_IsWindowHovered then
+  local over = mx >= x and mx <= (x + w) and my >= y and my <= (y + h)
+  if over and r.ImGui_IsWindowHovered then
     local hover_flags = 0
     if r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem then
       hover_flags = r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem()
     end
-    over_btn = r.ImGui_IsWindowHovered(ctx, hover_flags) and true or false
+    over = r.ImGui_IsWindowHovered(ctx, hover_flags) and true or false
   end
-  -- The map InvisibleButton sits under this overlay and steals ImGui item clicks.
-  -- Hit-test the Stop rect directly so the button always works.
-  if over_btn and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0) then
+  local clicked = over and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0)
+  r.ImGui_SetCursorScreenPos(ctx, x, y)
+  draw_ui_button(id, label, w, h, { style = style, compact = true })
+  if over and tip then
+    r.ImGui_SetTooltip(ctx, tip)
+  end
+  return clicked
+end
+
+-- Card across the top of the map while a full-speed scan runs. Hidden while
+-- scanning in the background (the toolbar bar still shows progress).
+function draw_map_scan_progress_overlay(dl, x0, y0, width, height)
+  local p = sm_scan_progress()
+  if not p or scan_in_background() then
+    return 0
+  end
+
+  local overlay_height = 108.0
+  local card_margin = 10.0
+  local card_x0 = x0 + card_margin
+  local card_x1 = x0 + width - card_margin
+  local card_y0 = y0 + 6.0
+  local card_y1 = y0 + overlay_height - 4.0
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + overlay_height, 0x00000066, UI_METRICS.radius_panel)
+  r.ImGui_DrawList_AddRectFilled(dl, card_x0, card_y0, card_x1, card_y1, 0x111612F4, UI_METRICS.radius_panel)
+  r.ImGui_DrawList_AddRect(dl, card_x0 + 0.5, card_y0 + 0.5, card_x1 - 0.5, card_y1 - 0.5, UI_THEME.border, UI_METRICS.radius_panel, 0, 1.0)
+
+  local pad = 26.0
+  local bar_w = width - pad * 2
+  local text_y = y0 + 16.0
+  local _, head_h = r.ImGui_CalcTextSize(ctx, p.label)
+  local pulse = 0.55 + 0.45 * math.sin(r.time_precise() * 4.0)
+  r.ImGui_DrawList_AddCircleFilled(dl, x0 + pad + 3, text_y + head_h * 0.5, 3.5,
+    (UI_THEME.accent & 0xFFFFFF00) | math.floor(120 + 135 * pulse), 12)
+  r.ImGui_DrawList_AddText(dl, x0 + pad + 12, text_y, UI_THEME.text, p.label)
+  r.ImGui_DrawList_AddText(dl, x0 + pad + 12.5, text_y, UI_THEME.text, p.label)
+  if not p.indeterminate then
+    local pct_text = string.format("%.0f%%", (p.fraction or 0) * 100.0)
+    local pct_w = select(1, r.ImGui_CalcTextSize(ctx, pct_text)) or 30
+    r.ImGui_DrawList_AddText(dl, x0 + pad + bar_w - pct_w, text_y, UI_THEME.accent, pct_text)
+  end
+
+  local bar_y = y0 + 40.0
+  sm_draw_progress_bar(dl, x0 + pad, bar_y, x0 + pad + bar_w, bar_y + 6.0, p.fraction, p.indeterminate)
+
+  local row_y = bar_y + 14.0
+  local left = (p.detail or "") .. "  ·  " .. format_scan_clock(p.elapsed) .. " elapsed"
+  r.ImGui_DrawList_AddText(dl, x0 + pad, row_y, UI_THEME.text_dim, left)
+  local eta_text = sm_scan_eta_text(p)
+  if eta_text then
+    local rw = select(1, r.ImGui_CalcTextSize(ctx, eta_text)) or 0
+    r.ImGui_DrawList_AddText(dl, x0 + pad + bar_w - rw, row_y, UI_THEME.text_dim, eta_text)
+  end
+
+  local btn_h = 22
+  local stop_w, bg_w = 64, 150
+  local btn_y = y0 + overlay_height - btn_h - 12.0
+  local total_w = stop_w + 8 + bg_w
+  local bx = x0 + (width - total_w) * 0.5
+  if overlay_button("scan_bg", "Run in background", bx, btn_y, bg_w, btn_h, nil,
+      "Keep scanning, slower, so REAPER and the map stay quick to use.\nProgress stays in the toolbar. Library > Scan in Background changes it back.") then
+    set_scan_background(true)
+  end
+  if overlay_button("scan_stop", "Stop", bx + bg_w + 8, btn_y, stop_w, btn_h, "danger",
+      "Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.") then
     stop_scan()
-  end
-  r.ImGui_SetCursorScreenPos(ctx, btn_x, btn_y)
-  draw_ui_button("scan_stop", "Stop", btn_w, btn_h, { style = "danger", compact = true })
-  if over_btn then
-    r.ImGui_SetTooltip(ctx, "Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.")
   end
 
   return overlay_height
+end
+
+-- Compact progress in the toolbar, shown during every scan in every view:
+-- what it's doing, a bar, the time left, and a stop button.
+SM_SCAN_CHIP_W = 250
+
+function draw_scan_progress_chip()
+  local p = sm_scan_progress()
+  if not p then
+    return false
+  end
+  local h = UI_METRICS.toolbar_h
+  local w = SM_SCAN_CHIP_W
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  r.ImGui_InvisibleButton(ctx, "##scan_chip", w, h)
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, hovered and 0x1A221DFF or 0x141A16FF, h * 0.5)
+  r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, UI_THEME.border, h * 0.5, 0, 1.0)
+
+  local pulse = 0.55 + 0.45 * math.sin(r.time_precise() * 4.0)
+  local _, th = r.ImGui_CalcTextSize(ctx, "Ag")
+  local ty = y + (h - th) * 0.5 - 3
+  r.ImGui_DrawList_AddCircleFilled(dl, x + 13, ty + th * 0.5, 3.2,
+    (UI_THEME.accent & 0xFFFFFF00) | math.floor(120 + 135 * pulse), 12)
+  local right
+  if p.indeterminate then
+    right = ""
+  else
+    right = string.format("%.0f%%", (p.fraction or 0) * 100)
+    if type(p.eta) == "number" and p.eta > 0.5 then
+      local sec = math.floor(p.eta + 0.5)
+      local clock = sec >= 3600 and string.format("%d:%02d:%02d", sec // 3600, (sec // 60) % 60, sec % 60)
+        or string.format("%d:%02d", sec // 60, sec % 60)
+      right = right .. "  ·  " .. clock .. " left"
+    end
+  end
+  local label = p.short or p.label
+  if scan_in_background() then
+    label = label .. " (bg)"
+  end
+  local rw = right ~= "" and (select(1, r.ImGui_CalcTextSize(ctx, right)) or 0) or 0
+  local text_x0, text_x1 = x + 22, x + w - 12
+  r.ImGui_DrawList_PushClipRect(dl, text_x0, y, text_x1 - rw - 8, y + h, true)
+  r.ImGui_DrawList_AddText(dl, text_x0, ty, UI_THEME.text, label)
+  r.ImGui_DrawList_PopClipRect(dl)
+  if rw > 0 then
+    r.ImGui_DrawList_AddText(dl, text_x1 - rw, ty, UI_THEME.accent, right)
+  end
+  local bar_y = y + h - 8
+  sm_draw_progress_bar(dl, x + 22, bar_y, x + w - 12, bar_y + 3, p.fraction, p.indeterminate)
+
+  if hovered then
+    local lines = { p.label }
+    if p.detail and p.detail ~= "" then lines[#lines + 1] = p.detail end
+    lines[#lines + 1] = format_scan_clock(p.elapsed) .. " elapsed"
+    local eta_text = sm_scan_eta_text(p)
+    if eta_text then lines[#lines + 1] = eta_text end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = scan_in_background()
+      and "Scanning in the background (slower). Click for full speed."
+      or "Click to keep scanning in the background (slower, REAPER stays quick)."
+    r.ImGui_SetTooltip(ctx, table.concat(lines, "\n"))
+  end
+  if r.ImGui_IsItemClicked(ctx, 0) then
+    set_scan_background(not scan_in_background())
+  end
+  r.ImGui_SameLine(ctx, 0, 4)
+  if draw_ui_button("scan_stop_toolbar", "Stop", nil, h, { style = "danger", compact = true }) then
+    stop_scan()
+  end
+  if r.ImGui_IsItemHovered(ctx) then
+    r.ImGui_SetTooltip(ctx, "Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.")
+  end
+  return true
 end
 
 
@@ -1577,10 +1641,17 @@ function render_map()
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local mx, my = r.ImGui_GetMousePos(ctx)
   -- Previous frame's drawn overlay height (0 when the overlay is hidden).
-  local overlay_h = (state.scan_running and (state.map_scan_overlay_h or 118)) or 0
+  local overlay_h = (state.scan_running and not scan_in_background() and (state.map_scan_overlay_h or 108)) or 0
   local over_scan_overlay = overlay_h > 0 and my >= y0 and my <= (y0 + overlay_h)
 
+  -- Region labels, edge counts, the overview map and the zoom chip sit on
+  -- the map; clicks on them (last frame's positions) never reach the dots.
+  local over_controls = hovered and not over_scan_overlay and map_overlay_hovered(mx, my)
+  local used_controls = handle_map_overlay_input(hovered and not over_scan_overlay, mx, my, width, height)
   handle_map_view_input(hovered and not over_scan_overlay, mx, my, width, height, x0, y0)
+  if used_controls and r.ImGui_IsMouseClicked(ctx, 0) then
+    clear_map_left_press()
+  end
 
   local label_padding_left = MAP_GUTTER_LEFT
   local label_padding_top = MAP_GUTTER_TOP
@@ -1596,11 +1667,17 @@ function render_map()
     rebuild_map_filtered_cache()
   end
   state._map_frame_filter_key = map_filter_key
+  map_atlas_update()
 
+  if #state.samples > 0 and state.samples[1].x then
+    map_atlas.frame_view = map_view_frame(padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
+  else
+    map_atlas.frame_view = nil
+  end
   draw_map_canvas_backdrop(dl, x0, y0, width, height, padded_x0, padded_y0)
   draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
 
-  local clicked_sample = render_map_samples(dl, hovered and not over_scan_overlay, mx, my, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
+  local clicked_sample = render_map_samples(dl, hovered and not over_scan_overlay and not over_controls, mx, my, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
   if clicked_sample and not over_scan_overlay and not sample_scan_folder_unavailable(clicked_sample) then
     local was_drag_audition = state.is_left_dragging
     preview_sample(clicked_sample)
@@ -1616,6 +1693,24 @@ function render_map()
     r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_Hand())
     update_pending_drop_tracking()
   end
+
+  local hits = {}
+  if #state.samples > 0 and state.samples[1].x then
+    local v = map_view_frame(padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
+    if r.ImGui_DrawList_PushClipRect then
+      r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, x0 + width, y0 + height, true)
+    end
+    draw_map_edge_counts(dl, v, hits)
+    draw_map_overview(dl, v, hits, 30)
+    local controls = {}
+    for i = 1, #hits do controls[i] = hits[i] end
+    draw_map_atlas_labels(dl, v, hits, controls)
+    if r.ImGui_DrawList_PopClipRect then
+      r.ImGui_DrawList_PopClipRect(dl)
+    end
+  end
+  state.map_atlas_hot_tag = state.map_atlas_hot_tag_next
+  state.map_overlay_hits = hits
 
   state.map_scan_overlay_h = tonumber(draw_map_scan_progress_overlay(dl, x0, y0, width, height)) or 0
   draw_map_status_overlay(dl, x0, y0, width, height)

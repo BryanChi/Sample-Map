@@ -716,6 +716,10 @@ function render_header()
         menu_item_tooltip("Only look for new and removed files (faster on big libraries).\nA file edited in place keeps its old analysis until a full Rescan.")
       end
     end
+    if r.ImGui_MenuItem(ctx, "Scan in Background (slower)", nil, scan_in_background()) then
+      set_scan_background(not scan_in_background())
+    end
+    menu_item_tooltip("Scans use less of the computer so REAPER and the map stay quick to use.\nThey take longer. Progress shows in the toolbar either way.")
     if r.ImGui_MenuItem(ctx, "Re-tag Library…", nil, false, not retag_running() and not state.scan_running) then
       sm_start_retag()
     end
@@ -804,6 +808,26 @@ function render_header()
       set_show_guessed_tags(not show_guessed_tags())
     end
     menu_item_tooltip("One-shots whose names don't say what they are get a drum type guessed from the sound\n(kick, snare, clap, hat, crash, tom, perc). Guesses count in tag filters and dot colours.")
+    if r.ImGui_MenuItem(ctx, "Map: Frequency Bands and Length Zones", nil, map_guides_enabled()) then
+      state.map_bands = not map_guides_enabled()
+      save_config()
+    end
+    menu_item_tooltip("Shade the map into SUB ... AIR bands and mark HITS / ONE-SHOTS / PHRASES / LOOPS by length.")
+    if r.ImGui_MenuItem(ctx, "Map: Tag Labels", nil, map_atlas_enabled()) then
+      state.map_atlas = not map_atlas_enabled()
+      save_config()
+    end
+    menu_item_tooltip("Name each tag's cluster (KICKS, HATS ...) with its count.\nClick a label to show only that tag; hover it to highlight its stars.")
+    if r.ImGui_MenuItem(ctx, "Map: Constellation Lines When Zoomed In", nil, map_constellations_enabled()) then
+      state.map_constellations = not map_constellations_enabled()
+      save_config()
+    end
+    menu_item_tooltip("Join nearby samples of the same tag with faint lines once you zoom in.")
+    if r.ImGui_MenuItem(ctx, "Map: Overview When Zoomed In", nil, map_overview_enabled()) then
+      state.map_overview = not map_overview_enabled()
+      save_config()
+    end
+    menu_item_tooltip("A small map of the whole library with your view boxed.\nClick or drag in it to move around.")
     if r.ImGui_MenuItem(ctx, "Hide Tags Until Search Is Clicked", nil, state.tags_hide_until_search == true) then
       set_tags_hide_until_search(not state.tags_hide_until_search)
     end
@@ -854,6 +878,11 @@ function render_header()
   if r.ImGui_MenuItem(ctx, "Settings", nil, state.settings_open) then
     state.settings_open = not state.settings_open
   end
+
+  if r.ImGui_MenuItem(ctx, "Feedback") then
+    sm_open_feedback()
+  end
+  menu_item_tooltip("Report a bug or suggest an idea.\nYou can add pictures and the usage log; it goes to the developer on GitHub.")
 
   if SampleMapUpdateState and SampleMapUpdateState.show_update_icon then
     r.ImGui_SameLine(ctx)

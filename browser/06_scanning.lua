@@ -258,9 +258,50 @@ function enqueue_weight_analysis()
   )
 end
 
+-- --- Background scanning -------------------------------------------------------
+-- Slower, but REAPER and the script stay responsive: 3 ms of scan work per
+-- frame instead of 12, and about a quarter of the CPU cores for analysis.
+SM_SCAN_SLICE_MS = 12.0
+SM_SCAN_SLICE_MS_BACKGROUND = 3.0
+
+function scan_in_background()
+  return state.scan_background == true
+end
+
+function set_scan_background(on)
+  on = on == true
+  if scan_in_background() == on then
+    return
+  end
+  state.scan_background = on
+  save_config()
+  if state.scan_running then
+    sm_notify(on and "Scanning in the background: slower, and the map stays free to use"
+      or "Scanning at full speed")
+  end
+end
+
+function sm_scan_slice_ms()
+  return scan_in_background() and SM_SCAN_SLICE_MS_BACKGROUND or SM_SCAN_SLICE_MS
+end
+
+-- How many analyzer workers get jobs (all of them unless scanning in the background).
+function sm_analyzer_active_worker_limit(n_workers)
+  if not scan_in_background() then
+    return n_workers
+  end
+  local cores = state.cpu_core_count or 4
+  return math.max(1, math.min(n_workers, math.floor(cores / 4)))
+end
+
 -- Folder enumeration for scans is time-sliced (see sm_scan_enum_step) so large
 -- libraries don't freeze the UI. process_scan_slice waits until it has finished.
 function sm_scan_enum_file(enum, dir, file)
+  -- Hidden files: macOS "._name.wav" resource forks on external drives and
+  -- placeholder files literally named ".wav" are never real samples.
+  if file:sub(1, 1) == "." then
+    return
+  end
   local ext = file:match("%.([^%.]+)$")
   if not ext or not AUDIO_EXTS["." .. ext:lower()] then
     return

@@ -570,6 +570,14 @@ function load_config()
         if type(cfg.tags_hide_until_search) == "boolean" then
           state.tags_hide_until_search = cfg.tags_hide_until_search
         end
+        if type(cfg.scan_background) == "boolean" then
+          state.scan_background = cfg.scan_background
+        end
+        for _, k in ipairs({ "map_bands", "map_atlas", "map_constellations", "map_overview" }) do
+          if type(cfg[k]) == "boolean" then
+            state[k] = cfg[k]
+          end
+        end
         if type(cfg.show_guessed_tags) == "boolean" then
           state.show_guessed_tags = cfg.show_guessed_tags
         end
@@ -840,7 +848,12 @@ function save_config_file()
     collapse_children_tags_width = state.collapse_children_tags_width,
     tags_hide_until_search = state.tags_hide_until_search == true,
     tag_groups_on_search_row = state.tag_groups_on_search_row ~= false,
+    scan_background = state.scan_background == true,
     show_guessed_tags = state.show_guessed_tags ~= false,
+    map_bands = state.map_bands == true,
+    map_atlas = state.map_atlas ~= false,
+    map_constellations = state.map_constellations ~= false,
+    map_overview = state.map_overview ~= false,
     retag_done_version = state.retag_done_version,
     retag_hint_shown = state.retag_hint_shown == true,
     custom_tags = state.custom_tags,
@@ -1262,9 +1275,13 @@ function python_has_numpy(bin)
     return sm_python_check(bin, "import numpy")
   end
   if line:match("^ok") then
+    -- A Python found later can work after an earlier one failed: show the working one.
+    state.analyzer_numpy_status = line
     return true
   end
-  state.analyzer_numpy_status = state.analyzer_numpy_status or line
+  if not (state.analyzer_numpy_status or ""):match("^ok") then
+    state.analyzer_numpy_status = line
+  end
   return false
 end
 
@@ -1701,10 +1718,12 @@ function process_analyzer_queue()
   -- Quiet single-file analysis (a drum layering glue) runs workers without a scan.
   if state.scan_running or (sm_quiet_analysis_pending and sm_quiet_analysis_pending()) then
     -- Spread a short queue over all workers instead of handing it to the first one.
-    local per = math.ceil(#state.analyzer_queue / math.max(1, #workers))
+    -- Background scanning feeds only a few workers; the others go idle.
+    local active = sm_analyzer_active_worker_limit(#workers)
+    local per = math.ceil(#state.analyzer_queue / math.max(1, active))
     local size = math.max(1, math.min(SM_ANALYZER_BATCH, per))
-    for _, w in ipairs(workers) do
-      if #state.analyzer_queue == 0 then
+    for idx, w in ipairs(workers) do
+      if #state.analyzer_queue == 0 or idx > active then
         break
       end
       local left = #sm_worker_pending_jobs(w)
