@@ -174,11 +174,18 @@ function map_view_frame(padded_x0, padded_y0, padded_width, padded_height, padde
   }
 end
 
--- Stars are small when zoomed out (0.8x the dot size) and grow as you zoom
+-- Stars are small when zoomed out (0.6x the dot size) and grow as you zoom
 -- in (~1x at 4x, 1.6x at 16x).
 function map_dot_zoom_scale()
   local d = map_zoom_depth()
-  return 0.8 + 0.8 * d * math.sqrt(d)
+  return 0.6 + 1.0 * d * math.sqrt(d)
+end
+
+-- Star brightness: dimmer when zoomed right out, where the nebula carries
+-- the picture, full from about 3x.
+function map_star_alpha_scale()
+  local d = map_zoom_depth()
+  return 0.5 + 0.5 * math.min(1.0, d / 0.4)
 end
 
 -- --- Formatting ----------------------------------------------------------------
@@ -996,10 +1003,12 @@ end
 -- tag kept bright while other tags dim). Cached per entry list.
 function map_star_colors(cache, n)
   local tag = state.map_atlas_hot_tag
+  local aq = math.floor(map_star_alpha_scale() * 16 + 0.5)
   local memo = map_atlas.star_memo
-  if memo and memo.tag == tag and memo.gen == cache.entries_gen and memo.n == n then
+  if memo and memo.tag == tag and memo.gen == cache.entries_gen and memo.n == n and memo.aq == aq then
     return memo.cols
   end
+  local af = aq / 16
   local keep = tag and map_atlas_tag_dot_colors(tag) or nil
   local src = cache.draw_col
   local out = {}
@@ -1009,6 +1018,7 @@ function map_star_colors(cache, n)
     local l = lifted[c]
     if not l then
       l = lift(c, 0.35)
+      l = (l & 0xFFFFFF00) | math.floor((l & 0xFF) * af + 0.5)
       lifted[c] = l
     end
     if keep and not keep[c] then
@@ -1016,7 +1026,7 @@ function map_star_colors(cache, n)
     end
     out[i] = l
   end
-  map_atlas.star_memo = { tag = tag, gen = cache.entries_gen, n = n, cols = out }
+  map_atlas.star_memo = { tag = tag, gen = cache.entries_gen, n = n, aq = aq, cols = out }
   return out
 end
 

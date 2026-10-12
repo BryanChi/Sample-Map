@@ -262,7 +262,7 @@ function draw_map_play_trace(dl, padded_x0, padded_y0, padded_width, padded_heig
   for i = 1, nseg do
     local t = i / nseg
     local alpha = math.floor(28 + t * 70 + 0.5)
-    local col = (0x1EFF5E00) | alpha
+    local col = (0xBFD2FF00) | alpha
     r.ImGui_DrawList_AddLine(dl, pts[i].px, pts[i].py, pts[i + 1].px, pts[i + 1].py, col, 1.15)
   end
   for i = 1, #pts do
@@ -271,7 +271,7 @@ function draw_map_play_trace(dl, padded_x0, padded_y0, padded_width, padded_heig
     local r0 = 2.2 + t * 1.4
     local is_current = current_path and pts[i].s.path == current_path
     if not is_current then
-      r.ImGui_DrawList_AddCircle(dl, pts[i].px, pts[i].py, r0, (0x1EFF5E00) | alpha, 10, 1.1)
+      r.ImGui_DrawList_AddCircle(dl, pts[i].px, pts[i].py, r0, (0xBFD2FF00) | alpha, 10, 1.1)
     end
   end
   if r.ImGui_DrawList_PopClipRect then
@@ -407,7 +407,6 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   local clicked_sample = nil
   local click_handled_this_frame = false
 
-  local outline_color = build_color_rrgbbaa(extract_rgb(state.dot_outline_color or 0xFF00FF))
   local hover_color = build_color_rrgbbaa(extract_rgb(state.dot_hover_color or 0xC84D))
   local outline_size = state.dot_outline_size or 4.0
 
@@ -536,8 +535,14 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
     end
     local elapsed = r.time_precise() - state.breathing_start_time
     local pulse = 0.85 + 0.15 * math.sin((elapsed % 1.5) / 1.5 * 2.0 * math.pi)
-    local ring_r = (selected_dot_radius + outline_size) * pulse
+    -- Playing star: soft glow in its colour, a bright core, a thin white
+    -- ring that breathes, and a small flare.
+    local ring_r = math.max(9.0, selected_dot_radius + 5.0) * pulse
+    r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, math.max(18.0, selected_dot_radius * 3.2), (e.color & 0xFFFFFF00) | 0x22, 24)
+    r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, math.max(9.0, selected_dot_radius * 1.9), (e.color & 0xFFFFFF00) | 0x40, 20)
+    draw_map_star_flare(dl, e.px, e.py, e.color, math.max(22.0, selected_dot_radius + 16.0))
     r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, selected_dot_radius, e.color, 16)
+    r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, selected_dot_radius * 0.45, 0xFFFFFFE6, 12)
     local playing_assigned = highlight_info[e.s.path]
     if playing_assigned then
       r.ImGui_DrawList_AddCircle(dl, e.px, e.py, selected_dot_radius + 3.0, assigned_ring, 16, 1.8)
@@ -545,8 +550,8 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
         r.ImGui_DrawList_AddCircle(dl, e.px, e.py, selected_dot_radius + 6.0, selected_ring, 16, 2.0)
       end
     end
-    r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r, outline_color, 16, state.dot_outline_thickness or 3.0)
-    r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r * 1.35, (e.color & 0xFFFFFF00) | 0x55, 12, 1.5)
+    r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r, 0xFFFFFFC8, 24, 1.5)
+    r.ImGui_DrawList_AddCircle(dl, e.px, e.py, ring_r * 1.45, (e.color & 0xFFFFFF00) | math.floor(0x50 * pulse), 24, 1.0)
   end
   if clip_dots then
     r.ImGui_DrawList_PopClipRect(dl)
