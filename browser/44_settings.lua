@@ -1045,6 +1045,10 @@ function draw_map_status_overlay(dl, x0, y0, width, height)
     r.ImGui_DrawList_AddRectFilled(dl, zx0, zy0, zx1, cy1, 0x090C0AE0, (cy1 - zy0) * 0.5)
     r.ImGui_DrawList_AddRect(dl, zx0 + 0.5, zy0 + 0.5, zx1 - 0.5, cy1 - 0.5, UI_THEME.border, (cy1 - zy0) * 0.5, 0, 1.0)
     r.ImGui_DrawList_AddText(dl, zx0 + 8, zy0 + 4, UI_THEME.text_dim, zoom_text)
+    if (state.zoom or 1.0) > 1.01 and state.map_overlay_hits then
+      local hits = state.map_overlay_hits
+      hits[#hits + 1] = { zx0, zy0, zx1, cy1, kind = "zoom" }
+    end
   end
   if r.ImGui_DrawList_PopClipRect then
     r.ImGui_DrawList_PopClipRect(dl)

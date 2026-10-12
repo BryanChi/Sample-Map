@@ -2170,76 +2170,101 @@ function draw_sample_wave_controls(dl, sample, x, y, w, h, duration, t0, t1, mx,
   end
   id_suffix = id_suffix or "wave"
 
+  -- Volume knob + menu button share a dark capsule in the top-right corner.
+  local btn_s = 18
+  local btn_r = btn_s * 0.5
+  local btn_cx = x + w - 4 - btn_r
+  local btn_cy = y + 4 + btn_r
+  local vol_r = 9.0
+  local vol_cx = btn_cx - btn_r - 4 - vol_r
+  local vol_cy = btn_cy
+  local gain = get_sample_gain(sample)
+  local over_vol = (mx - vol_cx) * (mx - vol_cx) + (my - vol_cy) * (my - vol_cy) <= (vol_r + 3) * (vol_r + 3)
+  local over_btn = math.abs(mx - btn_cx) <= btn_r + 1 and math.abs(my - btn_cy) <= btn_r + 1
+  local db_text
+  if gain <= 0.0001 then
+    db_text = "-inf dB"
+  else
+    local db = 20 * math.log(gain, 10)
+    db_text = math.abs(db) < 0.05 and "0 dB" or string.format("%+.1f dB", db)
+  end
+  local show_db = w >= 150 and (db_text ~= "0 dB" or over_vol or state.seq_header_vol_drag)
+  local db_w = show_db and ((select(1, r.ImGui_CalcTextSize(ctx, db_text)) or 40) + 8) or 0
+  local cap_x0 = vol_cx - vol_r - 5 - db_w
+  local cap_x1 = btn_cx + btn_r + 3
+  local cap_y0, cap_y1 = btn_cy - 12, btn_cy + 12
+
   local start_t = get_sample_start_offset(sample)
   local start_x = wave_time_to_x(start_t, x, w, t0, t1)
   if start_t > t0 then
     local dim_x1 = math.min(x + w, math.max(x, start_x))
     if dim_x1 > x then
-      r.ImGui_DrawList_AddRectFilled(dl, x, y, dim_x1, y + h, 0x00000099)
+      r.ImGui_DrawList_AddRectFilled(dl, x, y, dim_x1, y + h, WAVE_COL and WAVE_COL.dim or 0x00000099)
     end
   end
   local start_visible = start_x >= x - 2 and start_x <= x + w + 2
   local start_col = sample_start_has_session(sample) and 0x5CE1FFFF
       or (sample_start_is_saved(sample) and 0x7CFFB0FF or 0x8EC8E8CC)
-  local start_tri_half = 6.0
-  local start_tri_h = 8.0
+  -- Start marker: a line with a tab (the time once moved) to grab it by.
+  local tab_x0, tab_y0, tab_x1, tab_y1 = start_x - 5, y, start_x + 5, y + 10
   if start_visible then
-    r.ImGui_DrawList_AddLine(dl, start_x, y + 1, start_x, y + h - 1, start_col, 1.6)
-    r.ImGui_DrawList_AddTriangleFilled(dl,
-      start_x - start_tri_half, y + 1,
-      start_x + start_tri_half, y + 1,
-      start_x, y + 1 + start_tri_h,
-      start_col)
-    if start_t > 0.0005 then
-      r.ImGui_DrawList_AddText(dl, math.min(start_x + 8, x + w - 48), y + 2, start_col,
-        string.format("%.2fs", start_t))
+    r.ImGui_DrawList_AddLine(dl, start_x, y + 1, start_x, y + h - 1, (start_col & 0xFFFFFF00) | 0xD0, 1.5)
+    if start_t > 0.0005 and h >= 30 and wave_flag then
+      tab_x0, tab_y0, tab_x1, tab_y1 = wave_flag(dl, start_x, y + 3, string.format("%.2fs", start_t), start_col, "right", x, cap_x0 - 4)
+    else
+      r.ImGui_DrawList_AddRectFilled(dl, start_x - 1, y + 1, start_x + 7, y + 10, start_col, 2.0)
+      tab_x0, tab_y0, tab_x1, tab_y1 = start_x - 1, y + 1, start_x + 7, y + 10
     end
   end
 
-  local btn_r = 7.5
-  local btn_cx = x + w - 11
-  local btn_cy = y + 11
-  local vol_r = 8.0
-  local vol_cx = btn_cx - 20
-  local vol_cy = btn_cy
-  local gain = get_sample_gain(sample)
-  local over_vol = (mx - vol_cx) * (mx - vol_cx) + (my - vol_cy) * (my - vol_cy) <= (vol_r + 3) * (vol_r + 3)
+  r.ImGui_DrawList_AddRectFilled(dl, cap_x0, cap_y0, cap_x1, cap_y1, 0x0B0E0CD8, 12.0)
+  r.ImGui_DrawList_AddRect(dl, cap_x0 + 0.5, cap_y0 + 0.5, cap_x1 - 0.5, cap_y1 - 0.5, 0xFFFFFF16, 12.0, 0, 1.0)
+  if show_db then
+    local _, th = r.ImGui_CalcTextSize(ctx, db_text)
+    r.ImGui_DrawList_AddText(dl, cap_x0 + 7, vol_cy - (th or 13) * 0.5,
+      (over_vol or state.seq_header_vol_drag) and 0xE8EEEAFF or 0x95A098FF, db_text)
+  end
   local vol_col = sample_gain_has_session(sample) and 0x5CE1FFFF
       or (sample_gain_is_saved(sample) and 0x7CFFB0FF or 0x8EC8E8CC)
-  local vol_fill = (over_vol or state.seq_header_vol_drag) and 0x4A5A74FF or 0x2C384CFF
-  r.ImGui_DrawList_AddCircleFilled(dl, vol_cx, vol_cy, vol_r, vol_fill, 18)
-  r.ImGui_DrawList_AddCircle(dl, vol_cx, vol_cy, vol_r, vol_col, 18, 1.3)
+  local hot_vol = over_vol or state.seq_header_vol_drag
+  r.ImGui_DrawList_AddCircleFilled(dl, vol_cx, vol_cy, vol_r, hot_vol and 0x26302AFF or 0x19201BFF, 20)
+  r.ImGui_DrawList_AddCircle(dl, vol_cx, vol_cy, vol_r, hot_vol and 0xFFFFFF40 or 0xFFFFFF18, 20, 1.0)
   local ANGLE_MIN = math.pi * 0.75
   local ANGLE_MAX = math.pi * 2.25
   local vol_u = gain / 4.0
   if vol_u < 0 then vol_u = 0 elseif vol_u > 1 then vol_u = 1 end
   local angle = ANGLE_MIN + (ANGLE_MAX - ANGLE_MIN) * vol_u
-  local arc_r = vol_r - 2.5
-  local prev_ax, prev_ay
-  for i = 0, 12 do
-    local a = ANGLE_MIN + (angle - ANGLE_MIN) * (i / 12)
-    local ax = vol_cx + math.cos(a) * arc_r
-    local ay = vol_cy + math.sin(a) * arc_r
-    if prev_ax then
-      r.ImGui_DrawList_AddLine(dl, prev_ax, prev_ay, ax, ay, vol_col, 1.8)
+  local arc_r = vol_r - 2.0
+  local function arc(a0, a1, col, th)
+    local segs = math.max(2, math.ceil(math.abs(a1 - a0) / 0.25))
+    local px, py
+    for i = 0, segs do
+      local a = a0 + (a1 - a0) * (i / segs)
+      local ax, ay = vol_cx + math.cos(a) * arc_r, vol_cy + math.sin(a) * arc_r
+      if px then
+        r.ImGui_DrawList_AddLine(dl, px, py, ax, ay, col, th)
+      end
+      px, py = ax, ay
     end
-    prev_ax, prev_ay = ax, ay
   end
-  r.ImGui_DrawList_AddLine(dl, vol_cx, vol_cy,
-    vol_cx + math.cos(angle) * (vol_r - 3.5),
-    vol_cy + math.sin(angle) * (vol_r - 3.5),
-    0xFFFFFFFF, 1.4)
-  r.ImGui_DrawList_AddCircleFilled(dl, vol_cx, vol_cy, 1.6, 0xFFFFFFFF, 8)
+  arc(ANGLE_MIN, ANGLE_MAX, 0xFFFFFF1E, 2.4)
+  -- the value arc grows from 0 dB (the notch at the top-left) towards
+  -- boost or cut, so the knob reads at a glance
+  local ua = ANGLE_MIN + (ANGLE_MAX - ANGLE_MIN) * 0.25
+  if math.abs(angle - ua) > 0.02 then
+    arc(math.min(ua, angle), math.max(ua, angle), vol_col, 2.6)
+  end
+  r.ImGui_DrawList_AddLine(dl, vol_cx + math.cos(ua) * (arc_r - 1.6), vol_cy + math.sin(ua) * (arc_r - 1.6),
+    vol_cx + math.cos(ua) * (arc_r + 1.6), vol_cy + math.sin(ua) * (arc_r + 1.6), 0xFFFFFF90, 1.2)
+  r.ImGui_DrawList_AddCircleFilled(dl, vol_cx + math.cos(angle) * arc_r, vol_cy + math.sin(angle) * arc_r, 2.2, 0xFFFFFFF0, 10)
 
-  local over_btn = (mx - btn_cx) * (mx - btn_cx) + (my - btn_cy) * (my - btn_cy) <= (btn_r + 2) * (btn_r + 2)
-  r.ImGui_DrawList_AddCircleFilled(dl, btn_cx, btn_cy, btn_r, over_btn and 0x4A5A74FF or 0x2C384CFF, 16)
-  r.ImGui_DrawList_AddCircle(dl, btn_cx, btn_cy, btn_r, over_btn and 0xC8D4E8FF or 0x8090A8FF, 16, 1.2)
-  local dots = "..."
-  local dots_w, dots_h = 10, 12
-  if r.ImGui_CalcTextSize then
-    dots_w, dots_h = r.ImGui_CalcTextSize(ctx, dots)
+  if over_btn then
+    r.ImGui_DrawList_AddRectFilled(dl, btn_cx - btn_r, btn_cy - btn_r, btn_cx + btn_r, btn_cy + btn_r, 0xFFFFFF1C, 5.0)
   end
-  r.ImGui_DrawList_AddText(dl, btn_cx - dots_w * 0.5, btn_cy - dots_h * 0.5 - 1, 0xF4F7FCFF, dots)
+  local dot_col = over_btn and 0xF4F7FCFF or 0x95A098FF
+  for d = -1, 1 do
+    r.ImGui_DrawList_AddCircleFilled(dl, btn_cx + d * 4.0, btn_cy, 1.5, dot_col, 8)
+  end
 
   local restore_x, restore_y = r.ImGui_GetCursorScreenPos(ctx)
   r.ImGui_SetCursorScreenPos(ctx, vol_cx - vol_r, vol_cy - vol_r)
@@ -2250,7 +2275,7 @@ function draw_sample_wave_controls(dl, sample, x, y, w, h, duration, t0, t1, mx,
   local vol_active = r.ImGui_IsItemActive(ctx)
   local vol_double = r.ImGui_IsItemClicked(ctx, 0) and r.ImGui_IsMouseDoubleClicked(ctx, 0)
   r.ImGui_SetCursorScreenPos(ctx, btn_cx - btn_r, btn_cy - btn_r)
-  r.ImGui_InvisibleButton(ctx, "##sample_wave_dots_" .. id_suffix, btn_r * 2 + 2, btn_r * 2 + 2)
+  r.ImGui_InvisibleButton(ctx, "##sample_wave_dots_" .. id_suffix, btn_r * 2, btn_r * 2)
   if r.ImGui_IsItemHovered(ctx) then
     over_btn = true
   end
@@ -2290,7 +2315,7 @@ function draw_sample_wave_controls(dl, sample, x, y, w, h, duration, t0, t1, mx,
     local name = sample.name or ""
     if name ~= "" then
       if r.ImGui_DrawList_PushClipRect then
-        r.ImGui_DrawList_PushClipRect(dl, x + 4, y + 1, vol_cx - vol_r - 3, y + h - 1, true)
+        r.ImGui_DrawList_PushClipRect(dl, x + 4, y + 1, cap_x0 - 3, y + h - 1, true)
       end
       r.ImGui_DrawList_AddText(dl, x + 7, y + 4, 0x000000CC, name)
       r.ImGui_DrawList_AddText(dl, x + 6, y + 3, 0xF4F7FCFF, name)
@@ -2301,10 +2326,10 @@ function draw_sample_wave_controls(dl, sample, x, y, w, h, duration, t0, t1, mx,
   end
 
   local over_start = start_visible
-      and mx >= start_x - (start_tri_half + 2)
-      and mx <= start_x + (start_tri_half + 2)
+      and mx >= math.min(tab_x0, start_x - 5)
+      and mx <= math.max(tab_x1, start_x + 5)
       and my >= y
-      and my <= y + start_tri_h + 3
+      and my <= tab_y1 + 2
 
   if (over_btn and left_clicked) or dots_clicked then
     state.seq_header_menu_sample = sample

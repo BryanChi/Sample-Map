@@ -573,6 +573,11 @@ function load_config()
         if type(cfg.scan_background) == "boolean" then
           state.scan_background = cfg.scan_background
         end
+        for _, k in ipairs({ "map_bands", "map_atlas", "map_constellations", "map_overview" }) do
+          if type(cfg[k]) == "boolean" then
+            state[k] = cfg[k]
+          end
+        end
         if type(cfg.show_guessed_tags) == "boolean" then
           state.show_guessed_tags = cfg.show_guessed_tags
         end
@@ -845,6 +850,10 @@ function save_config_file()
     tag_groups_on_search_row = state.tag_groups_on_search_row ~= false,
     scan_background = state.scan_background == true,
     show_guessed_tags = state.show_guessed_tags ~= false,
+    map_bands = state.map_bands == true,
+    map_atlas = state.map_atlas ~= false,
+    map_constellations = state.map_constellations ~= false,
+    map_overview = state.map_overview ~= false,
     retag_done_version = state.retag_done_version,
     retag_hint_shown = state.retag_hint_shown == true,
     custom_tags = state.custom_tags,
@@ -1266,9 +1275,13 @@ function python_has_numpy(bin)
     return sm_python_check(bin, "import numpy")
   end
   if line:match("^ok") then
+    -- A Python found later can work after an earlier one failed: show the working one.
+    state.analyzer_numpy_status = line
     return true
   end
-  state.analyzer_numpy_status = state.analyzer_numpy_status or line
+  if not (state.analyzer_numpy_status or ""):match("^ok") then
+    state.analyzer_numpy_status = line
+  end
   return false
 end
 

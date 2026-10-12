@@ -34,6 +34,7 @@ import re
 import struct
 import subprocess
 import sys
+import shutil
 import tempfile
 import time
 import wave
@@ -327,7 +328,12 @@ def to_mono(samples: List[float], channels: int) -> List[float]:
         return samples
     if channels == 2:
         n = len(samples) - (len(samples) % 2)
-        return [(a + b) * 0.5 for a, b in zip(samples[0:n:2], samples[1:n:2])]
+        mid = [(a + b) * 0.5 for a, b in zip(samples[0:n:2], samples[1:n:2])]
+        if max((abs(v) for v in mid), default=0.0) < _CANCEL_PEAK:
+            side = [(a - b) * 0.5 for a, b in zip(samples[0:n:2], samples[1:n:2])]
+            if max((abs(v) for v in side), default=0.0) >= _CANCEL_PEAK:
+                return side  # L = -R: the plain mix cancels to silence
+        return mid
     frames = len(samples) // channels
     inv = 1.0 / channels
     mono: List[float] = []
@@ -357,6 +363,15 @@ _AUDIBLE_HANG_SEC = 0.040
 _AUDIBLE_CHUNK_SEC = 0.5
 _LEADING_SILENCE_PEAK = 10 ** (-40.0 / 20.0)  # -40 dBFS: treat first buffer as empty
 _LEADING_SKIP_MAX_SEC = 180.0
+# A stereo mix quieter than this while one side is louder means the channels
+# cancel (L = -R, common in widened hi-hat loops); analyze the side signal instead.
+_CANCEL_PEAK = 10 ** (-90.0 / 20.0)
+# Files shorter than this (stray 1-2 ms clicks, empty sampler placeholders) or
+# digitally silent ones can't give a pitch or spectrum; they get neutral values
+# so they stop showing up as "incomplete" on every launch.
+_TOO_SHORT_SEC = 0.02
+_SILENT_RMS = 1e-7
+_NEUTRAL_SPECTRUM = {"dominant_freq": 40.0, "brightness": 40.0, "sub_weight": 0.0}
 _ANALYSIS_BUF_SEC = 2.0
 
 
@@ -1401,7 +1416,15 @@ def _np_decode(raw: bytes, info: dict):
         x = _np.frombuffer(raw[: len(raw) // 4 * 4], dtype=be + "i4") / 2147483648.0
     if ch > 1:
         n = len(x) // ch * ch
-        x = (x[0:n:2] + x[1:n:2]) * 0.5 if ch == 2 else x[:n].reshape(-1, ch).mean(axis=1)
+        if ch == 2:
+            mid = (x[0:n:2] + x[1:n:2]) * 0.5
+            if n and float(_np.abs(mid).max()) < _CANCEL_PEAK:
+                side = (x[0:n:2] - x[1:n:2]) * 0.5
+                if float(_np.abs(side).max()) >= _CANCEL_PEAK:
+                    return side  # L = -R: the plain mix cancels to silence
+            x = mid
+        else:
+            x = x[:n].reshape(-1, ch).mean(axis=1)
     return x
 
 
@@ -1958,9 +1981,63 @@ def read_aiff_mono(
         return None
 
 
+def sniff_audio_ext(path: str) -> Optional[str]:
+    """The extension a file's content says it has ('.wav', '.mp3', '.m4a'...),
+    'zeros' for a file that starts with only zero bytes, or None if unknown."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+    except OSError:
+        return None
+    if len(head) < 12:
+        return None
+    if head[:4] in (b"RIFF", b"RIFX", b"RF64", b"BW64") or head[:4] == b"riff":
+        return ".wav"
+    if head[:4] == b"FORM":
+        return ".aif"
+    if head[4:8] == b"ftyp":
+        return ".m4a"
+    if head[:4] == b"OggS":
+        return ".ogg"
+    if head[:4] == b"fLaC":
+        return ".flac"
+    if head[:4] == b"caff":
+        return ".caf"
+    if head[:3] == b"ID3":
+        return ".mp3"
+    if head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return ".aac" if (head[1] & 0x06) == 0 else ".mp3"
+    if not any(head):
+        return "zeros"
+    return None
+
+
+ZEROS_ERROR = "file starts with empty (zero) bytes: damaged or not fully copied"
+
+
+def analyze_misnamed(path: str, real_ext: str, mode: str) -> Optional[Dict[str, float]]:
+    """A .wav/.aif whose content is another format: decode it under its real extension."""
+    tmp_dir = tempfile.mkdtemp(prefix="sm_misnamed_")
+    alias = os.path.join(tmp_dir, "audio" + real_ext)
+    try:
+        try:
+            os.symlink(os.path.abspath(path), alias)
+        except (OSError, NotImplementedError, AttributeError):
+            shutil.copyfile(path, alias)
+        return analyze_via_convert(alias, mode)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def analyze_file(path: str, mode: str = "full") -> Dict[str, float]:
     ext = os.path.splitext(path)[1].lower()
     data = None
+    if ext in _NATIVE_EXTS:
+        real = sniff_audio_ext(path)
+        if real == "zeros":
+            raise ValueError(ZEROS_ERROR)
+        if real is not None and real not in (".wav", ".aif"):
+            return analyze_misnamed(path, real, mode) or {}
     if ext in (".wav", ".wave"):
         data = analyze_wav(path, mode)
         # ADPCM / other compressed WAVs fail the PCM reader; ffmpeg/afconvert can decode them.
@@ -2009,6 +2086,15 @@ def analyze_job_payload(path: str, mode: str) -> Dict[str, object]:
                 payload["file_duration"] = info["total_frames"] / float(info["sr"])
                 payload["samplerate"] = info["sr"]
                 payload["channels"] = info["channels"]
+        if mode == "full" and data and payload.get("dominant_freq") is None:
+            dur = payload.get("file_duration") or payload.get("effective_duration") or 0.0
+            rms = payload.get("rms_energy")
+            if (rms is not None and rms <= _SILENT_RMS) or (0 < dur < _TOO_SHORT_SEC):
+                for k, v in _NEUTRAL_SPECTRUM.items():
+                    payload.setdefault(k, v)
+                if payload.get("effective_duration") is None:
+                    payload["effective_duration"] = dur if dur > 0 else _TOO_SHORT_SEC
+                payload["analysis_note"] = "silent" if (rms is not None and rms <= _SILENT_RMS) else "too short"
         useful = (
             payload.get("dominant_freq") is not None
             or payload.get("rms_energy") is not None
