@@ -43,7 +43,7 @@ function seq_set_playhead_qn(qn)
 end
 
 function imgui_text_input_active()
-  if state.seq_vary_filter_edit or state.seq_region_rename then
+  if state.seq_vary_filter_edit or state.seq_region_rename or state.seq_track_rename then
     return true
   end
   if state._text_input_item_active then
@@ -103,8 +103,46 @@ function seq_layering_blocks_input()
   return false
 end
 
+-- Side windows (Pattern Presets, Fill Designer) record their rect + hover via
+-- seq_side_window_track (34_seq_pattern_popup.lua); the sequencer reads last
+-- frame's values so hover cursors and clicks never reach the grid behind them.
+local function seq_grid_drag_active()
+  return state.seq_note_drag or state.seq_param_drag or state.seq_region_drag
+      or state.seq_razor_drag or state.seq_lane_h_drag or state.seq_track_reorder_drag
+      or state.pending_waveform_drop
+end
+
+function seq_side_windows_block_input()
+  local wins = state.seq_side_windows
+  if not wins or next(wins) == nil then
+    return false
+  end
+  -- A drag that started on the grid keeps tracking when it crosses the window.
+  if seq_grid_drag_active() then
+    return false
+  end
+  local mx, my
+  if r.ImGui_GetMousePos then
+    mx, my = r.ImGui_GetMousePos(ctx)
+    mx, my = tonumber(mx), tonumber(my)
+  end
+  for _, win in pairs(wins) do
+    if win.hovered then
+      return true
+    end
+    if mx and my and win.w and mx >= win.x and my >= win.y
+        and mx <= win.x + win.w and my <= win.y + win.h then
+      return true
+    end
+  end
+  return false
+end
+
 function imgui_any_popup_open()
   if seq_layering_blocks_input() then
+    return true
+  end
+  if seq_side_windows_block_input() then
     return true
   end
   if state.seq_region_rename then
@@ -967,9 +1005,19 @@ end
 
 function seq_build_visible_active_cells(start_qn, end_qn, step_qn, step_count)
   local active_cells = {}
-  for _, slot in ipairs(state.seq_tracks) do
+  local tracks = state.seq_tracks
+  for _, slot in ipairs(tracks) do
     active_cells[slot.id] = {}
   end
+  -- Runs every frame over every visible note, so seq_note_abs_qn,
+  -- seq_stutter_span_qn, seq_active_cells_put and seq_finish_active_cells are
+  -- inlined below (same expressions, same fallbacks).
+  local math_max, math_min, math_floor = math.max, math.min, math.floor
+  local grid_qn = step_qn or state.seq_grid_qn or 0.25
+  local min_col = start_qn - step_qn
+  local max_col = end_qn + step_qn
+  local last_col = step_count - 1
+  local multi, n_multi = nil, 0
   for _, reg in ipairs(state.seq_regions) do
     local reg_start = reg.start_qn or 0.0
     local reg_len = get_seq_region_length_qn(reg)
@@ -981,30 +1029,77 @@ function seq_build_visible_active_cells(start_qn, end_qn, step_qn, step_count)
         -- region length and absolute position computed once per note.
         local in_lo = reg_start - 1e-9
         local in_hi = reg_start + reg_len - 1e-9
-        for _, slot in ipairs(state.seq_tracks) do
+        local reg_id = reg.id
+        for _, slot in ipairs(tracks) do
           local notes = get_track_note_table(pattern, slot.id, false)
           if notes then
+            local slot_cells = active_cells[slot.id]
             for step_key, note in pairs(notes) do
-              local abs_qn = (type(note) == "table" and note.enabled ~= false)
-                and seq_note_abs_qn(reg, note, step_key, step_qn) or nil
-              if abs_qn and abs_qn >= in_lo and abs_qn < in_hi then
-                local vis_qn = abs_qn + (note.offset_qn or 0.0)
-                -- Hit-testing occupies the start cell (and stutter span). Head
-                -- and sustain that draw into later cells stay empty so those
-                -- grids can be painted.
-                local span = seq_stutter_span_qn(note, step_qn) or 0.0
-                local occupy_end = vis_qn + math.max(span, 1e-9)
-                if occupy_end > start_qn - step_qn and vis_qn < end_qn + step_qn then
-                  local entry = {
-                    key = step_key,
-                    note = note,
-                    region_id = reg.id,
-                    abs_qn = abs_qn,
-                  }
-                  local col0 = math.floor(((vis_qn - start_qn) / step_qn) + 1e-9)
-                  local col1 = math.floor(((occupy_end - 1e-9 - start_qn) / step_qn) + 1e-9)
-                  for col = math.max(0, col0), math.min(step_count - 1, col1) do
-                    seq_active_cells_put(active_cells, slot.id, col, entry, start_qn, step_qn, step_count)
+              if type(note) == "table" and note.enabled ~= false then
+                -- seq_note_abs_qn(reg, note, step_key, step_qn)
+                local qn_off = note.qn_offset
+                if type(qn_off) ~= "number" then
+                  qn_off = (tonumber(step_key) or tonumber(note.step) or 0) * grid_qn
+                end
+                local abs_qn = reg_start + qn_off
+                if abs_qn >= in_lo and abs_qn < in_hi then
+                  local vis_qn = abs_qn + (note.offset_qn or 0.0)
+                  -- Hit-testing occupies the start cell (and stutter span). Head
+                  -- and sustain that draw into later cells stay empty so those
+                  -- grids can be painted.
+                  -- seq_stutter_span_qn(note, step_qn) or 0.0
+                  local span = 0.0
+                  local len = tonumber(note.length_qn)
+                  local has_span = type(len) == "number" and len > 1e-9
+                  if math_max(1, math_floor((note.stutter or 1) + 0.5)) <= 1 then
+                    if has_span and len > grid_qn + 1e-9 then
+                      span = math_max(grid_qn * 0.25, len)
+                    end
+                  elseif has_span then
+                    span = math_max(grid_qn * 0.25, len)
+                  else
+                    span = grid_qn
+                  end
+                  local occupy_end = vis_qn + math_max(span, 1e-9)
+                  if occupy_end > min_col and vis_qn < max_col then
+                    local entry = {
+                      key = step_key,
+                      note = note,
+                      region_id = reg_id,
+                      abs_qn = abs_qn,
+                    }
+                    local col0 = math_floor(((vis_qn - start_qn) / step_qn) + 1e-9)
+                    local col1 = math_floor(((occupy_end - 1e-9 - start_qn) / step_qn) + 1e-9)
+                    for col = math_max(0, col0), math_min(last_col, col1) do
+                      -- seq_active_cells_put (col is always in range here).
+                      -- A one-note cell is the entry itself: it has the same
+                      -- key/note/region_id/abs_qn a cell copies from its top
+                      -- entry, and seq_active_cell_notes gives { entry } for a
+                      -- cell without .pack. Only a second note makes a cell.
+                      local cell = slot_cells[col]
+                      if not cell then
+                        slot_cells[col] = entry
+                      else
+                        local pack = cell.pack
+                        if pack then
+                          pack[#pack + 1] = entry
+                        else
+                          local multi_cell = {
+                            key = cell.key,
+                            note = cell.note,
+                            region_id = cell.region_id,
+                            abs_qn = cell.abs_qn,
+                            pack = { cell, entry },
+                          }
+                          slot_cells[col] = multi_cell
+                          n_multi = n_multi + 1
+                          if not multi then
+                            multi = {}
+                          end
+                          multi[n_multi] = multi_cell
+                        end
+                      end
+                    end
                   end
                 end
               end
@@ -1014,6 +1109,19 @@ function seq_build_visible_active_cells(start_qn, end_qn, step_qn, step_count)
       end
     end
   end
-  seq_finish_active_cells(active_cells)
+  -- seq_finish_active_cells: a one-note cell already holds its note's fields,
+  -- so only cells that received a second note need sorting / a new top.
+  for i = 1, n_multi do
+    local cell = multi[i]
+    local pack = cell.pack
+    seq_pack_sort_later_on_top(pack)
+    local top = pack[#pack]
+    if top then
+      cell.key = top.key
+      cell.note = top.note
+      cell.region_id = top.region_id
+      cell.abs_qn = top.abs_qn
+    end
+  end
   return active_cells
 end

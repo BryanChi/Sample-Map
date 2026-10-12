@@ -199,6 +199,9 @@ function insert_seq_note_hit(tr, region, track_id, step_key, note, resolved_path
   if not item then
     return nil
   end
+  if seq_item_scope then
+    seq_scope_item_added(tr, item)
+  end
   r.SetMediaItemPosition(item, start_time, false)
   r.SetMediaItemLength(item, item_len, false)
 
@@ -245,7 +248,13 @@ function insert_seq_note_hit(tr, region, track_id, step_key, note, resolved_path
     local slot = find_seq_track_by_id(track_id)
     if slot then
       seq_normalize_slot_mix(slot)
-      seq_apply_take_volume_envelope(take, item_len, slot.env, opts.time_offset_sec or 0.0)
+      if opts.layer_env and seq_layering_piece_env then
+        -- A drum layer with its own envelope: track envelope x corner envelope.
+        seq_apply_take_volume_envelope(take, item_len,
+          seq_layering_piece_env(slot.env, opts.layer_env, opts.time_offset_sec or 0.0, startoffs or 0.0, item_len), 0.0)
+      else
+        seq_apply_take_volume_envelope(take, item_len, slot.env, opts.time_offset_sec or 0.0)
+      end
     end
   end
   -- Volume last: item stays at 1, take is note velocity * blend.
@@ -409,6 +418,8 @@ function insert_seq_note_item(region, slot, track_id, step_key, note)
   local first_start_qn, first_len_qn, last_start_qn, last_len_qn
   local pieces = (seq_layering_is_active and seq_layering_is_active(slot))
     and seq_layering_build_pieces(slot) or {}
+  -- A layered hit lasts until its longest piece ends, not the track sample.
+  local layer_mix_dur = (#pieces > 0 and seq_layering_mix_duration) and seq_layering_mix_duration(slot) or nil
   for i = 0, stutter_count - 1 do
     local hit_idx = i + 1
     local hit_note = seq_note_for_stutter_hit(note, hit_idx)
@@ -417,8 +428,12 @@ function insert_seq_note_item(region, slot, track_id, step_key, note)
     if not hit_path then
       hit_path, hit_sample = resolved_path, resolved_sample
     end
+    local len_sample = hit_sample
+    if layer_mix_dur then
+      len_sample = { path = (hit_sample and hit_sample.path) or hit_path, effective_duration = layer_mix_dur }
+    end
     local hit_len_qn = seq_effective_note_length_qn(
-      region, pattern, slot, track_id, step_idx, span_note, hit_sample, grid_qn, hit_idx
+      region, pattern, slot, track_id, step_idx, span_note, len_sample, grid_qn, hit_idx
     )
     local hit_offset = hit_note.offset_qn or 0.0
     local off0 = seq_stutter_hit_span(span_note, hit_idx, grid_qn)
@@ -444,6 +459,7 @@ function insert_seq_note_item(region, slot, track_id, step_key, note)
               time_offset_sec = piece.time_offset_sec or 0.0,
               fade_in = piece.fade_in or 0.0,
               fade_out = piece.fade_out or 0.0,
+              layer_env = piece.env,
               note_fade_in = apply_fade_in and (p == 1),
               note_fade_out = apply_fade_out and (p == #pieces),
               hit_idx = hit_idx,
@@ -493,18 +509,21 @@ function remove_seq_rendered_items_for_track(region, slot, track_id)
   local region_id = region.id
   local track_key = tostring(track_id)
   local removed = 0
+  local function match(e)
+    return seq_scope_item_owned(e, region_id) and seq_scope_item_track_tag(e) == track_key
+  end
   local function scan_track(tr)
     if not tr then
       return
     end
-    for item_idx = r.CountTrackMediaItems(tr) - 1, 0, -1 do
-      local item = r.GetTrackMediaItem(tr, item_idx)
-      if item and seq_item_is_owned(item, region_id)
-         and tostring(get_item_ext(item, SEQ_EXT_TRACK) or "") == track_key then
-        if r.DeleteTrackMediaItem(tr, item) then
-          removed = removed + 1
-          seq_mark_self_arrange_write(tr, region_id)
-        end
+    local hits, rec = seq_scope_track_matches(tr, match)
+    for i = #hits, 1, -1 do
+      local e = hits[i]
+      local ok = r.DeleteTrackMediaItem(tr, e.item)
+      seq_scope_deleted(rec, e, ok)
+      if ok then
+        removed = removed + 1
+        seq_mark_self_arrange_write(tr, region_id)
       end
     end
   end
@@ -529,20 +548,27 @@ function remove_seq_rendered_items_for_step(region, slot, track_id, step_key)
   local track_key = tostring(track_id)
   local step = tostring(step_key)
   local removed = 0
+  local function match(e)
+    if e.flag == false or e.parent == true then
+      return false
+    end
+    -- Step first: it rules out almost every item with one read.
+    return seq_scope_item_step(e) == step
+      and seq_scope_item_track_tag(e) == track_key
+      and seq_scope_item_owned(e, region_id)
+  end
   local function scan_track(tr)
     if not tr then
       return
     end
-    for item_idx = r.CountTrackMediaItems(tr) - 1, 0, -1 do
-      local item = r.GetTrackMediaItem(tr, item_idx)
-      -- Step first: it rules out almost every item with one read.
-      if item and tostring(get_item_ext(item, SEQ_EXT_STEP) or "") == step
-         and tostring(get_item_ext(item, SEQ_EXT_TRACK) or "") == track_key
-         and seq_item_is_owned(item, region_id) then
-        if r.DeleteTrackMediaItem(tr, item) then
-          removed = removed + 1
-          seq_mark_self_arrange_write(tr, region_id)
-        end
+    local hits, rec = seq_scope_track_matches(tr, match)
+    for i = #hits, 1, -1 do
+      local e = hits[i]
+      local ok = r.DeleteTrackMediaItem(tr, e.item)
+      seq_scope_deleted(rec, e, ok)
+      if ok then
+        removed = removed + 1
+        seq_mark_self_arrange_write(tr, region_id)
       end
     end
   end
@@ -616,22 +642,22 @@ function seq_retarget_region_track_sources(region, slot)
   local track_key = tostring(slot.id)
   local items_by_step = {}
   local item_n = 0
-  for item_idx = 0, r.CountTrackMediaItems(tr) - 1 do
-    local item = r.GetTrackMediaItem(tr, item_idx)
-    if item and seq_item_is_owned(item, region_id)
-       and tostring(get_item_ext(item, SEQ_EXT_TRACK) or "") == track_key then
-      if seq_item_is_aux_piece(item) then
-        return false
-      end
-      local step = tostring(get_item_ext(item, SEQ_EXT_STEP) or "")
-      local list = items_by_step[step]
-      if not list then
-        list = {}
-        items_by_step[step] = list
-      end
-      list[#list + 1] = item
-      item_n = item_n + 1
+  local owned = seq_scope_track_matches(tr, function(e)
+    return seq_scope_item_owned(e, region_id) and seq_scope_item_track_tag(e) == track_key
+  end)
+  for i = 1, #owned do
+    local e = owned[i]
+    if seq_scope_item_aux(e) then
+      return false
     end
+    local step = seq_scope_item_step(e)
+    local list = items_by_step[step]
+    if not list then
+      list = {}
+      items_by_step[step] = list
+    end
+    list[#list + 1] = e.item
+    item_n = item_n + 1
   end
 
   local track_settings = get_seq_track_settings(pattern, slot.id, false) or {}
@@ -756,6 +782,7 @@ function sync_seq_region_track(region, slot, opts)
   if own_refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(1)
   end
+  local own_scope = seq_item_scope_open()
   local retargeted = (not opts.force_rebuild) and seq_retarget_region_track_sources(region, slot)
   if not retargeted then
     remove_seq_rendered_items_for_track(region, slot, slot.id)
@@ -782,6 +809,7 @@ function sync_seq_region_track(region, slot, opts)
       seq_pcm_take_src_end()
     end
   end
+  seq_item_scope_close(own_scope)
   if own_refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(-1)
   end
@@ -799,6 +827,7 @@ function sync_seq_pattern_track(pattern_id, slot, opts)
   if own_refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(1)
   end
+  local own_scope = seq_item_scope_open()
   for _, region in ipairs(state.seq_regions) do
     if region.pattern_id == pattern_id then
       sync_seq_region_track(region, slot, {
@@ -807,6 +836,7 @@ function sync_seq_pattern_track(pattern_id, slot, opts)
       })
     end
   end
+  seq_item_scope_close(own_scope)
   if own_refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(-1)
   end
@@ -824,12 +854,14 @@ function sync_seq_slot_all_regions(slot, opts)
   if own_refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(1)
   end
+  local own_scope = seq_item_scope_open()
   for _, region in ipairs(state.seq_regions or {}) do
     sync_seq_region_track(region, slot, {
       skip_arrange = true,
       force_rebuild = opts.force_rebuild,
     })
   end
+  seq_item_scope_close(own_scope)
   if own_refresh and r.PreventUIRefresh then
     r.PreventUIRefresh(-1)
   end
@@ -865,6 +897,7 @@ function sync_seq_single_note(region, slot, step_key, opts)
     return
   end
   step_key = tostring(step_key)
+  local own_scope = seq_item_scope_open()
   local note = get_seq_note(region, slot.id, step_key)
   remove_seq_rendered_items_for_step(region, slot, slot.id, step_key)
   if note and note.enabled ~= false and seq_note_in_region(region, note, step_key) then
@@ -881,17 +914,20 @@ function sync_seq_single_note(region, slot, step_key, opts)
       end
     end
   end
+  seq_item_scope_close(own_scope)
 end
 
 function sync_seq_pattern_note(pattern_id, slot, step_key, opts)
   if not pattern_id or not slot then
     return
   end
+  local own_scope = seq_item_scope_open()
   for _, region in ipairs(state.seq_regions) do
     if region.pattern_id == pattern_id then
       sync_seq_single_note(region, slot, step_key, opts)
     end
   end
+  seq_item_scope_close(own_scope)
 end
 
 function sync_seq_region(region, opts)
@@ -902,6 +938,7 @@ function sync_seq_region(region, opts)
   if not opts.skip_cache_clear then
     clear_seq_vary_rank_cache()
   end
+  local own_scope = seq_item_scope_open()
   if not opts.skip_remove then
     remove_seq_rendered_items(region)
   end
@@ -909,6 +946,7 @@ function sync_seq_region(region, opts)
   local pattern = get_seq_pattern(region.pattern_id, false)
   if not pattern or type(pattern.notes) ~= "table" then
     seq_sync_region_parent_item(region)
+    seq_item_scope_close(own_scope)
     if not opts.skip_arrange then
       r.UpdateArrange()
     end
@@ -948,6 +986,7 @@ function sync_seq_region(region, opts)
   seq_defer_item_updates = prev_defer
   if own_refresh and r.PreventUIRefresh then r.PreventUIRefresh(-1) end
   seq_sync_region_parent_item(region)
+  seq_item_scope_close(own_scope)
   if not opts.skip_arrange then
     r.UpdateArrange()
   end

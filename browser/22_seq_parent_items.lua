@@ -117,6 +117,9 @@ function seq_create_parent_midi_item(track, region)
     end_pos = start_pos + 2.0
   end
   local item = r.CreateNewMIDIItemInProj(track, start_pos, end_pos)
+  if item and seq_item_scope then
+    seq_scope_item_added(track, item)
+  end
   return item
 end
 
@@ -551,6 +554,8 @@ function seq_write_parent_item_ext(item, region)
   if not item or not region then
     return
   end
+  -- Retags an existing item: an open edit scope must read tags again.
+  seq_scope_forget()
   set_item_ext(item, SEQ_EXT_PARENT, "1")
   set_item_ext(item, SEQ_EXT_REGION, region.id)
   set_item_ext(item, SEQ_EXT_PATTERN, region.pattern_id)
@@ -567,6 +572,8 @@ function seq_apply_parent_item_props(item, region)
   local t0 = qn_to_time(start_qn)
   local t1 = qn_to_time(start_qn + length_qn)
   if t0 and t1 and t1 > t0 then
+    -- Moves an existing item (its track re-sorts): drop an open edit scope.
+    seq_scope_forget()
     r.SetMediaItemPosition(item, t0, false)
     r.SetMediaItemLength(item, t1 - t0, false)
   end
@@ -626,6 +633,7 @@ function seq_sync_region_parent_item(region)
     created = true
     item_tr = parent_tr
   elseif item_tr and item_tr ~= parent_tr and r.MoveMediaItemToTrack then
+    seq_scope_forget()
     r.MoveMediaItemToTrack(item, parent_tr)
     item_tr = parent_tr
   end

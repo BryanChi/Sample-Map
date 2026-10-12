@@ -305,6 +305,11 @@ state = {
   -- "on" | "off" | "dynamic" (dynamic uses collapse_children_tags_width).
   collapse_children_tags = "off",
   collapse_children_tags_width = 1100,
+  -- Sample Map tag band stays hidden until the search field is clicked.
+  tags_hide_until_search = false,
+  -- Group chips (Drum, Melodic, Library...) and Loop / One shot sit on the
+  -- search row; clicking a group opens its tags below.
+  tag_groups_on_search_row = true,
   selected_tag_parents = {}, -- Collapsed mode: which parent chips are expanded (drum/melodic/genre)
   played_history = {},  -- Array of played samples (history)
   history_index = 0,  -- Current position in history (0 = most recent, higher = older)
@@ -621,8 +626,18 @@ sample_path_miss_list = nil -- state.samples table the miss cache belongs to
 function rebuild_samples_path_index()
   samples_by_path = {}
   sample_path_miss = {}
+  local str_byte, str_find, str_lower = string.byte, string.find, string.lower
   for _, s in ipairs(state.samples) do
-    if s.path then
+    local path = s.path
+    if type(path) == "string" and path ~= "" and str_byte(path, -1) ~= 47 and not str_find(path, "\\", 1, true) then
+      -- Already normalized (the usual case): the normalized form is the path
+      -- itself and path_index_key() is just its lowercase.
+      samples_by_path[path] = s
+      local key = str_lower(path)
+      if key ~= path then
+        samples_by_path[key] = s
+      end
+    elseif s.path then
       samples_by_path[s.path] = s
       -- Also index forward-slash normalized form for analyzer path lookups
       local norm = tostring(s.path):gsub("\\", "/"):gsub("/+$", "")

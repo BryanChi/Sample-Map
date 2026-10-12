@@ -543,6 +543,23 @@ SEQ_PARAM_LANES = {
   { key = "locked", label = "Lock", mode_name = "Lock", hotkey = "L", shortcut_id = "edit_lock", min = 0.0, max = 1.0, default = 0.0, fmt = "%.0f", boolean = true },
 }
 
+-- Accent per parameter lane (see get_seq_row_lane_style).
+local seq_param_lane_accents = {
+  volume = 0xFFD166FF,
+  sample_vary = 0x8FD98FFF,
+  vary_filter = 0x7ECFA6FF,
+  stutter = 0xC9A8FFFF,
+  pan = 0x6EC8FFFF,
+  pitch = 0xFFB84DFF,
+  length_qn = 0x88DDAAFF,
+  decay = 0xFFD166FF,
+  stretch = 0x7ED0C8FF,
+  start = 0xA8E0C0FF,
+  locked = 0xE8C070FF,
+}
+
+-- Called for every drawn row every frame: builds only the one style table it
+-- returns (a fresh table, as before) instead of one per lane kind.
 function get_seq_row_lane_style(row)
   if row.type == "note" then
     return {
@@ -554,20 +571,8 @@ function get_seq_row_lane_style(row)
     }
   end
   if row.type == "param" and row.param then
-    local styles = {
-      volume = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0xFFD166FF },
-      sample_vary = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0x8FD98FFF },
-      vary_filter = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0x7ECFA6FF },
-      stutter = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0xC9A8FFFF },
-      pan = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0x6EC8FFFF },
-      pitch = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0xFFB84DFF },
-      length_qn = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0x88DDAAFF },
-      decay = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0xFFD166FF },
-      stretch = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0x7ED0C8FF },
-      start = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0xA8E0C0FF },
-      locked = { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = 0xE8C070FF },
-    }
-    return styles[row.param.key] or { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = UI_THEME.text_dim }
+    local accent = seq_param_lane_accents[row.param.key]
+    return { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = accent or UI_THEME.text_dim }
   end
   return { bg = UI_THEME.bg_panel, label_bg = UI_THEME.bg, timeline_bg = UI_THEME.surface, edge = UI_THEME.border, accent = UI_THEME.text_mute }
 end
@@ -577,15 +582,31 @@ function seq_lane_color_with_alpha(color, alpha)
   return build_color_rrgbbaa(cr, cg, cb, alpha or 255)
 end
 
+-- Pure function of the accent; drawn once per value bar, so the three colours
+-- are memoized per accent (a handful of lane accents; bounded anyway).
+local seq_lane_fill_memo, seq_lane_fill_memo_n = {}, 0
+
 function seq_lane_param_fill_colors(accent, bipolar, value)
-  local ar, ag, ab = extract_rgb_rrgbbaa(accent or 0xFFD166FF)
-  local fill = build_color_rrgbbaa(ar, ag, ab, 205)
-  local cap = build_color_rrgbbaa(math.min(255, ar + 45), math.min(255, ag + 45), math.min(255, ab + 45), 255)
-  local fill_neg = build_color_rrgbbaa(math.max(0, ar - 70), math.max(0, ag - 35), math.min(255, ab + 40), 205)
-  if bipolar and value ~= nil and value < 0 then
-    return fill_neg, cap
+  local key = accent or 0xFFD166FF
+  local set = seq_lane_fill_memo[key]
+  if not set then
+    local ar, ag, ab = extract_rgb_rrgbbaa(key)
+    local fill = build_color_rrgbbaa(ar, ag, ab, 205)
+    local cap = build_color_rrgbbaa(math.min(255, ar + 45), math.min(255, ag + 45), math.min(255, ab + 45), 255)
+    local fill_neg = build_color_rrgbbaa(math.max(0, ar - 70), math.max(0, ag - 35), math.min(255, ab + 40), 205)
+    set = { fill, cap, fill_neg }
+    if key == key and math.type(key) then
+      if seq_lane_fill_memo_n >= 256 then
+        seq_lane_fill_memo, seq_lane_fill_memo_n = {}, 0
+      end
+      seq_lane_fill_memo[key] = set
+      seq_lane_fill_memo_n = seq_lane_fill_memo_n + 1
+    end
   end
-  return fill, cap
+  if bipolar and value ~= nil and value < 0 then
+    return set[3], set[2]
+  end
+  return set[1], set[2]
 end
 
 function get_param_lane_def(param_key)

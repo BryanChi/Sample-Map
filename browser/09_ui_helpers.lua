@@ -3,6 +3,21 @@
 local r = reaper
 
 -- --- UI helpers --------------------------------------------------------------
+-- Text half of sample_passes_filters: does the (lowercased, non-empty) needle
+-- occur in the sample's name or path?
+function sample_matches_filter_text(sample, needle)
+  -- Lowercased name/path are memoized on the sample (underscore fields are
+  -- never written to the library cache) and refreshed if either changes.
+  local src_name, src_path = sample.name or "", sample.path or ""
+  if sample._lc_src_name ~= src_name or sample._lc_src_path ~= src_path then
+    sample._lc_src_name = src_name
+    sample._lc_src_path = src_path
+    sample._lc_name = string.lower(src_name)
+    sample._lc_path = string.lower(src_path)
+  end
+  return string.find(sample._lc_name, needle, 1, true) ~= nil or string.find(sample._lc_path, needle, 1, true) ~= nil
+end
+
 -- skip_tags: caller already restricted the candidate set via samples_by_tag
 function sample_passes_filters(sample, needle, skip_tags)
   if not sample then return false end
@@ -11,16 +26,7 @@ function sample_passes_filters(sample, needle, skip_tags)
     needle = (state.filter ~= "" and string.lower(state.filter)) or ""
   end
   if needle ~= "" then
-    -- Lowercased name/path are memoized on the sample (underscore fields are
-    -- never written to the library cache) and refreshed if either changes.
-    local src_name, src_path = sample.name or "", sample.path or ""
-    if sample._lc_src_name ~= src_name or sample._lc_src_path ~= src_path then
-      sample._lc_src_name = src_name
-      sample._lc_src_path = src_path
-      sample._lc_name = string.lower(src_name)
-      sample._lc_path = string.lower(src_path)
-    end
-    if not string.find(sample._lc_name, needle, 1, true) and not string.find(sample._lc_path, needle, 1, true) then
+    if not sample_matches_filter_text(sample, needle) then
       return false
     end
   end
@@ -135,6 +141,39 @@ function seq_assigned_view_fingerprint()
   return table.concat(bits, "\n")
 end
 
+-- Dot colour for a base colour value (state.dot_color or a tag colour) and its
+-- brightened mono variant. Both are pure functions of the value; the map
+-- recolours every sample after each tag change, so they're memoized.
+local dot_color_memo, dot_color_mono_memo, dot_color_memo_n = {}, {}, 0
+
+local function dot_color_for(base, mono)
+  local memo = mono and dot_color_mono_memo or dot_color_memo
+  local color = memo[base]
+  if color then
+    return color
+  end
+  local tr, tg, tb = extract_rgb(base)
+  color = build_color_rrgbbaa(tr, tg, tb, 255)
+  if mono then
+    local base_r, base_g, base_b = extract_rgb_rrgbbaa(color)
+    color = build_color_rrgbbaa(
+      math.min(255, math.floor(base_r * 1.5)),
+      math.min(255, math.floor(base_g * 1.5)),
+      math.min(255, math.floor(base_b * 1.5)),
+      255
+    )
+  end
+  if base == base then
+    if dot_color_memo_n >= 1024 then
+      dot_color_memo, dot_color_mono_memo, dot_color_memo_n = {}, {}, 0
+      memo = mono and dot_color_mono_memo or dot_color_memo
+    end
+    memo[base] = color
+    dot_color_memo_n = dot_color_memo_n + 1
+  end
+  return color
+end
+
 function get_sample_dot_color(sample)
   if not sample then
     return build_color_rrgbbaa(96, 96, 96, 255)
@@ -143,7 +182,7 @@ function get_sample_dot_color(sample)
     return sample._render_color
   end
 
-  local color = build_color_rrgbbaa(extract_rgb(state.dot_color or 0x44AA55))
+  local base = state.dot_color or 0x44AA55
   if sample.tags and type(sample.tags) == "table" and #sample.tags > 0 then
     local best_tag = nil
     local best_weight = 0
@@ -155,21 +194,11 @@ function get_sample_dot_color(sample)
       end
     end
     if best_tag and state.tag_colors[best_tag] then
-      local tr, tg, tb = extract_rgb(state.tag_colors[best_tag])
-      color = build_color_rrgbbaa(tr, tg, tb, 255)
+      base = state.tag_colors[best_tag]
     end
   end
 
-  if sample.channels == 1 then
-    local base_r, base_g, base_b = extract_rgb_rrgbbaa(color)
-    color = build_color_rrgbbaa(
-      math.min(255, math.floor(base_r * 1.5)),
-      math.min(255, math.floor(base_g * 1.5)),
-      math.min(255, math.floor(base_b * 1.5)),
-      255
-    )
-  end
-
+  local color = dot_color_for(base, sample.channels == 1)
   sample._render_color = color
   return color
 end

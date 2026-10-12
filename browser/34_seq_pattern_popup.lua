@@ -44,6 +44,36 @@ function open_seq_pattern_popup()
   end
 end
 
+-- Side windows (Pattern Presets, Fill Designer) dock over/next to the
+-- sequencer's right edge. Each records its screen rect + hover every frame it
+-- is drawn; the sequencer reads last frame's values so hover cursors and
+-- clicks under the window never reach the grid behind it.
+function seq_side_window_track(id, visible)
+  state.seq_side_windows = state.seq_side_windows or {}
+  if not visible then
+    state.seq_side_windows[id] = nil
+    return
+  end
+  local entry = {}
+  if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
+    local x, y = r.ImGui_GetWindowPos(ctx)
+    local w, h = r.ImGui_GetWindowSize(ctx)
+    entry.x, entry.y = tonumber(x) or 0, tonumber(y) or 0
+    entry.w, entry.h = tonumber(w) or 0, tonumber(h) or 0
+  end
+  if r.ImGui_IsWindowHovered then
+    local flags = 0
+    if r.ImGui_HoveredFlags_RootAndChildWindows then
+      flags = flags | r.ImGui_HoveredFlags_RootAndChildWindows()
+    end
+    if r.ImGui_HoveredFlags_AllowWhenBlockedByPopup then
+      flags = flags | r.ImGui_HoveredFlags_AllowWhenBlockedByPopup()
+    end
+    entry.hovered = r.ImGui_IsWindowHovered(ctx, flags) and true or false
+  end
+  state.seq_side_windows[id] = entry
+end
+
 -- Position the preset popup flush against the left or right edge of the main
 -- window (whichever side has room in the viewport) so it never covers the grid.
 function seq_position_pattern_popup()
@@ -1975,6 +2005,7 @@ end
 
 function render_seq_pattern_popup(region)
   if not state.seq_pattern_window_open then
+    seq_side_window_track("pattern", false)
     return
   end
   seq_position_pattern_popup()
@@ -1993,6 +2024,7 @@ function render_seq_pattern_popup(region)
   if keep_open == false then
     state.seq_pattern_window_open = false
   end
+  seq_side_window_track("pattern", visible and state.seq_pattern_window_open)
   if visible then
     state.seq_gen_style = normalize_seq_gen_style(state.seq_gen_style)
     local can_generate = region and seq_preset_can_generate(state.seq_gen_style)
@@ -2186,10 +2218,9 @@ end
 
 function render_seq_kit_random_genre_chips(tags, id_prefix, priority_set, counts, enabled)
   local flow = ui_flow_begin(6.0)
-  local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   local shown = 0
   for idx, tag in ipairs(tags) do
-    ui_flow_place(flow, select(1, r.ImGui_CalcTextSize(ctx, tag)) + pad_x * 2)
+    ui_flow_place(flow, tag_chip_width(tag))
     shown = shown + 1
     local used_in_project = priority_set and priority_set[tag:lower()] == true
     if draw_tag_button(ctx, tag, false, tag, id_prefix .. tostring(idx) .. "_") and enabled ~= false then

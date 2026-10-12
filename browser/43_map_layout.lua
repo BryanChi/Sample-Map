@@ -96,7 +96,10 @@ function map_ui_update_drop()
       local rel_x = (mx - rect.x0) / rw
       local rel_y = (my - rect.y0) / rh
       local edge
-      if math.min(rel_x, 1 - rel_x) < math.min(rel_y, 1 - rel_y) then
+      -- Middle of a module swaps the two; near an edge docks beside it.
+      if math.abs(rel_x - 0.5) < 0.2 and math.abs(rel_y - 0.5) < 0.2 then
+        edge = "center"
+      elseif math.min(rel_x, 1 - rel_x) < math.min(rel_y, 1 - rel_y) then
         edge = rel_x < 0.5 and "left" or "right"
       else
         edge = rel_y < 0.5 and "top" or "bottom"
@@ -122,7 +125,9 @@ function map_ui_draw_drop_preview()
   local x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
   local t = 0.38
   local hx0, hy0, hx1, hy1 = x0, y0, x1, y1
-  if drop.edge == "left" then
+  if drop.edge == "center" then
+    hx0, hy0, hx1, hy1 = x0 + 6, y0 + 6, x1 - 6, y1 - 6
+  elseif drop.edge == "left" then
     hx1 = x0 + (x1 - x0) * t
   elseif drop.edge == "right" then
     hx0 = x1 - (x1 - x0) * t
@@ -131,8 +136,28 @@ function map_ui_draw_drop_preview()
   else
     hy0 = y1 - (y1 - y0) * t
   end
-  r.ImGui_DrawList_AddRectFilled(dl, hx0, hy0, hx1, hy1, 0x1EFF5E55, 4)
-  r.ImGui_DrawList_AddRect(dl, hx0, hy0, hx1, hy1, UI_THEME.accent, 4, 0, 2)
+  r.ImGui_DrawList_AddRectFilled(dl, hx0, hy0, hx1, hy1, 0x1EFF5E40, 5)
+  r.ImGui_DrawList_AddRect(dl, hx0 + 1, hy0 + 1, hx1 - 1, hy1 - 1, UI_THEME.accent, 5, 0, 2)
+end
+
+-- Name of the module being moved, following the mouse.
+function map_ui_draw_drag_ghost()
+  local drag = state.map_ui_drag
+  if not drag then
+    return
+  end
+  local dl = r.ImGui_GetForegroundDrawList and r.ImGui_GetForegroundDrawList(ctx) or r.ImGui_GetWindowDrawList(ctx)
+  local mx, my = r.ImGui_GetMousePos(ctx)
+  local label = MAP_UI_LABELS[drag.id] or drag.id
+  local drop = state.map_ui_drop
+  if drop then
+    local where = ({ left = "left of", right = "right of", top = "above", bottom = "below", center = "swap with" })[drop.edge] or ""
+    label = label .. " \u{2192} " .. where .. " " .. (MAP_UI_LABELS[drop.id] or drop.id)
+  else
+    label = label .. "  \u{00B7}  drop on an edge to dock, the middle to swap"
+  end
+  map_ui_draw_badge(dl, mx + 16 + select(1, r.ImGui_CalcTextSize(ctx, label)) * 0.5, my + 20, label,
+    UI_THEME.text, UI_THEME.popup_bg, UI_THEME.border_hvr)
 end
 
 function map_ui_finish_drag()
@@ -170,10 +195,24 @@ function render_sample_map_body()
   end
   map_ui_render_node(state.map_ui_layout, layout_w, tab_avail_y, "root")
   if state.map_ui_edit then
+    map_ui_draw_edit_chrome()
     map_ui_update_drop()
     map_ui_draw_drop_preview()
+    map_ui_draw_drag_ghost()
     map_ui_finish_drag()
+    -- Escape leaves edit mode (cancels a move first).
+    if r.ImGui_IsKeyPressed and r.ImGui_Key_Escape and not imgui_text_input_active()
+        and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
+      if state.map_ui_drag then
+        state.map_ui_drag = nil
+        state.map_ui_drop = nil
+      else
+        state.map_ui_edit = false
+        state.map_ui_split_drag = nil
+      end
+    end
   else
+    state.map_ui_chrome = nil
     state.map_ui_drag = nil
     state.map_ui_drop = nil
     state.map_ui_split_drag = nil
@@ -326,7 +365,7 @@ function render_map_y_axis_combo()
   end
 end
 
-function render_filter_input()
+function render_filter_input(reserve_right)
   local function draw_search_icon(dl, x, y, height, color)
     local size = math.min(height - 4, 16)
     local lens_r = size * 0.32
@@ -355,10 +394,13 @@ function render_filter_input()
     return ordered
   end
 
+  -- "+N" overflow labels draw as the dotless "__hidden_tags__" chip.
+  -- Measured with the same compact padding they are drawn with.
   local function calc_tag_button_width(label)
-    local text_w = r.ImGui_CalcTextSize(ctx, label)
-    local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
-    return text_w + (pad_x or 4) * 2
+    tag_chips_compact_push()
+    local w = tag_chip_width(label, label:sub(1, 1) == "+" and "__hidden_tags__" or label)
+    tag_chips_compact_pop()
+    return w
   end
 
   local function calc_compact_button_width(label)
@@ -369,7 +411,12 @@ function render_filter_input()
 
   local avail_x = r.ImGui_GetContentRegionAvail(ctx)
   local loop_reserve = 132
-  local filter_height = 26
+  if reserve_right and reserve_right > 0 then
+    -- The caller keeps room on this row for controls pinned to the right.
+    avail_x = math.max(220, avail_x - reserve_right)
+    loop_reserve = 0
+  end
+  local filter_height = UI_METRICS.toolbar_h
   local icon_pad = 22
   local right_pad = 6
   local min_input_width = 72
@@ -479,7 +526,7 @@ function render_filter_input()
     draw_search_icon(dl, x0 + 6, y0 + 3, filter_height - 6, hovered_field and UI_THEME.text_dim or UI_THEME.text_mute)
 
     r.ImGui_SetCursorPosX(ctx, icon_pad)
-    r.ImGui_SetCursorPosY(ctx, 3)
+    r.ImGui_SetCursorPosY(ctx, 4)
     r.ImGui_SetNextItemWidth(ctx, input_width)
     r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBg(), 0x00000000)
     r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBgHovered(), 0x00000000)
@@ -488,9 +535,15 @@ function render_filter_input()
 
     local ret, input
     if r.ImGui_InputTextWithHint then
+      local hint = "Search samples..."
+      if has_active_tags then
+        hint = "Type to refine..."
+      elseif state.tags_hide_until_search and not state.tag_band_open then
+        hint = "Search or pick tags..."
+      end
       ret, input = r.ImGui_InputTextWithHint(
         ctx, "##sample_filter",
-        has_active_tags and "Type to refine..." or "Search samples...",
+        hint,
         state.filter or ""
       )
     else
@@ -506,9 +559,19 @@ function render_filter_input()
       or (r.ImGui_IsItemDeactivated and r.ImGui_IsItemDeactivated(ctx))
       or (r.ImGui_IsItemFocused and r.ImGui_IsItemFocused(ctx))
     local input_hovered = r.ImGui_IsItemHovered(ctx)
+    -- Only while typing: focus can linger on the field after a click elsewhere.
+    state.sample_filter_focused = (r.ImGui_IsItemActive and r.ImGui_IsItemActive(ctx)) and true or false
+    local _, input_y1 = r.ImGui_GetItemRectMax(ctx)
+    local _, input_y0 = r.ImGui_GetItemRectMin(ctx)
 
+    tag_chips_compact_push()
     for _, tag in ipairs(visible_tags) do
       r.ImGui_SameLine(ctx, 0, spacing)
+      -- Compact pills are shorter than the field; centre them on it.
+      local _, th = r.ImGui_CalcTextSize(ctx, tag)
+      local chip_h = th + TAG_CHIP_COMPACT_PAD_Y * 2
+      local _, wy = r.ImGui_GetWindowPos(ctx)
+      r.ImGui_SetCursorPosY(ctx, (input_y0 + input_y1) * 0.5 - chip_h * 0.5 - wy)
       if tag:sub(1, 1) == "+" then
         draw_tag_button(ctx, tag, false, "__hidden_tags__", "filter_active_", { allow_delete = false })
       else
@@ -517,9 +580,11 @@ function render_filter_input()
         end
       end
     end
+    tag_chips_compact_pop()
 
     if has_active_tags then
       r.ImGui_SameLine(ctx, 0, spacing)
+      r.ImGui_SetCursorPosY(ctx, 4)
       if draw_ui_button("filter_clear_active_tags", clear_label, nil, nil, { compact = true, style = "danger" }) then
         state.active_tags = {}
         state.selected_tag_parents = {}
@@ -721,7 +786,15 @@ function render_header()
       if seq_floating then dock_floating_view("sequencer") else pop_out_view("sequencer") end
     end
     r.ImGui_Separator(ctx)
-    if r.ImGui_BeginMenu(ctx, "Collapse Children Tags") then
+    if r.ImGui_MenuItem(ctx, "Tag Groups on Search Row", nil, tag_groups_on_search_row()) then
+      set_tag_groups_on_search_row(not tag_groups_on_search_row())
+    end
+    menu_item_tooltip("Drum, Melodic, Library and Loop / One shot sit on the search row.\nClick a group to show its tags.\nTurn off to list every tag in rows under the search field.")
+    if r.ImGui_MenuItem(ctx, "Hide Tags Until Search Is Clicked", nil, state.tags_hide_until_search == true) then
+      set_tags_hide_until_search(not state.tags_hide_until_search)
+    end
+    menu_item_tooltip("Keep the Sample Map tag rows hidden.\nClick the search field to show them.")
+    if r.ImGui_BeginMenu(ctx, "Collapse Children Tags", not tag_groups_on_search_row()) then
       local mode = state.collapse_children_tags or "off"
       if r.ImGui_MenuItem(ctx, "Off", nil, mode == "off") then
         set_collapse_children_tags_mode("off")

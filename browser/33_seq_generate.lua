@@ -619,17 +619,124 @@ function seq_draw_lane_notes_lod(dl, active, row_y0, row_y1, selected_region_id,
   end
 end
 
-function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, selected_region_id, now_t, step_qn, qn_to_x, edit_def, edit_style, mx, my, hover_on_razor, hover_qn, start_qn, col)
-  local pack = seq_active_cell_notes(active)
-  if not pack then
+-- One note row's cells, exactly as render_sequencer_map used to draw them
+-- column by column: for every column in col_lo..col_hi whose cell holds a note
+-- start (the seq_active_cell_has_visual_start test), seq_draw_unfocused_note_marks
+-- and then seq_draw_lane_notes_lod (lod) or seq_draw_lane_packed_notes. The
+-- row colours are built once per row and qn_to_x is inlined where it is hot
+-- (tx0 + ((qn - view_qn) / span_qn) * tw, the closure's own expression).
+function seq_draw_note_row_cells(dl, slot, slot_cells, col_lo, col_hi, row_y0, row_y1, selected_region_id,
+    now_t, step_qn, start_qn, qn_to_x, tx0, view_qn, span_qn, tw, lod, base_color,
+    edit_def, edit_style, mx, my, hover_on_razor, hover_qn)
+  if not slot_cells then
     return
   end
+  local add_rect_filled = r.ImGui_DrawList_AddRectFilled
+  local math_max = math.max
+  local br, bg, bb = extract_rgb_rrgbbaa(base_color or get_sample_dot_color(nil))
+  local mark = build_color_rrgbbaa(br, bg, bb, 88)
+  local lod_color = build_color_rrgbbaa(br, bg, bb, 220)
+  local y0 = row_y0 + 4.0
+  local y1 = row_y1 - 4.0
+  local row_ctx = nil
+  for col = col_lo, col_hi do
+    local active = slot_cells[col]
+    if active then
+      -- seq_active_cell_notes(active) without allocating: a cell without
+      -- .pack stands for { active }.
+      local pack = active.pack
+      local n = pack and #pack or 1
+      local cell_qn = start_qn + col * step_qn
+      local cell_end = cell_qn + step_qn
+      local starts = false
+      for i = 1, n do
+        local e = active
+        if pack then
+          e = pack[i]
+        end
+        local vis = e and ((e.abs_qn or 0.0) + ((e.note and e.note.offset_qn) or 0.0)) or 0.0
+        if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+          starts = true
+          break
+        end
+      end
+      if starts then
+        -- seq_draw_unfocused_note_marks
+        for pi = 1, n do
+          local entry = active
+          if pack then
+            entry = pack[pi]
+          end
+          if type(entry) == "table" and type(entry.note) == "table"
+              and entry.region_id ~= selected_region_id then
+            local vis = (entry.abs_qn or 0.0) + ((entry.note and entry.note.offset_qn) or 0.0)
+            if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+              local x0 = (tx0 + ((vis - view_qn) / span_qn) * tw) + 1.0
+              local x1 = (tx0 + ((cell_end - view_qn) / span_qn) * tw) - 1.0
+              if x1 > x0 + 1.0 then
+                add_rect_filled(dl, x0, y0, x1, y1, mark, 0)
+              end
+            end
+          end
+        end
+        if lod then
+          -- seq_draw_lane_notes_lod
+          for pi = 1, n do
+            local entry = active
+            if pack then
+              entry = pack[pi]
+            end
+            local note = entry and entry.note
+            if type(note) == "table" and entry.region_id == selected_region_id then
+              local vis = (entry.abs_qn or 0.0) + ((entry.note and entry.note.offset_qn) or 0.0)
+              if vis + 1e-9 >= cell_qn and vis < cell_end + 1e-9 then
+                local draw_x0 = tx0 + ((vis - view_qn) / span_qn) * tw
+                local end_qn = vis + seq_note_lod_length_qn(note, step_qn)
+                local draw_x1 = math_max(draw_x0 + 1.0, tx0 + ((end_qn - view_qn) / span_qn) * tw)
+                add_rect_filled(dl, draw_x0, y0, draw_x1, y1, lod_color, 0)
+              end
+            end
+          end
+        else
+          if not row_ctx then
+            row_ctx = { region = get_seq_region_by_id(selected_region_id) }
+          end
+          seq_draw_lane_packed_notes(
+            dl, slot, active, row_y0, row_y1, qn_to_x(start_qn + col * step_qn), qn_to_x(start_qn + (col + 1) * step_qn),
+            selected_region_id, now_t, step_qn, qn_to_x,
+            edit_def, edit_style, mx, my, hover_on_razor,
+            hover_qn, start_qn, col, row_ctx
+          )
+        end
+      end
+    end
+  end
+end
+
+-- row_ctx (optional, from seq_draw_note_row_cells): one table per row holding
+-- region = get_seq_region_by_id(selected_region_id). Only notes of the
+-- selected region are drawn, so that is every drawn note's region; the row's
+-- pattern and track settings are then looked up once, at the first drawn note
+-- (get_seq_pattern / get_seq_track_settings only fill in missing tables, so
+-- later calls in the same row change nothing).
+function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, selected_region_id, now_t, step_qn, qn_to_x, edit_def, edit_style, mx, my, hover_on_razor, hover_qn, start_qn, col, row_ctx)
+  if not active then
+    return
+  end
+  -- seq_active_cell_notes(active) without allocating: a cell without .pack
+  -- stands for { active }.
+  local pack = active.pack
+  local pack_n = pack and #pack or 1
   local hover_pick = nil
   if (not hover_on_razor) and type(hover_qn) == "number" and my >= row_y0 and my <= row_y1 then
     hover_pick = seq_pick_packed_note(active, hover_qn, start_qn, col, step_qn)
   end
-  for pi = 1, #pack do
-    local entry = pack[pi]
+  local decay_mode = seq_is_decay_def(edit_def)
+  for pi = 1, pack_n do
+    local entry = active
+    if pack then
+      entry = pack[pi]
+    end
     local note = entry.note
     if type(note) == "table" and entry.region_id == selected_region_id then
       local note_qn = entry.abs_qn or 0.0
@@ -644,8 +751,15 @@ function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, 
       -- Skip the live copy so the click frame does not draw both.
       if not (note_fx and note_fx.kind == "delete") then
       local fx_t = note_fx and note_fx.t or 1.0
-      local prob_region = get_seq_region_by_id(entry.region_id)
-      local draw_note = (seq_stutter_count(note) > 1) and seq_note_for_stutter_hit(note, 1) or note
+      local prob_region
+      if row_ctx then
+        prob_region = row_ctx.region
+      else
+        prob_region = get_seq_region_by_id(entry.region_id)
+      end
+      -- note.stutter is not changed while the note draws.
+      local stutter_count = seq_stutter_count(note)
+      local draw_note = (stutter_count > 1) and seq_note_for_stutter_hit(note, 1) or note
       local vary_amt = seq_random_vary_amount(note, prob_region, slot.id, entry.key, 1)
       local resolved_path, resolved_sample = seq_resolve_note_sample(draw_note, slot, vary_amt, prob_region, slot.id, entry.key)
       local origin_path = seq_note_vary_origin_path(note, slot, prob_region)
@@ -656,8 +770,17 @@ function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, 
         vary_r, vary_g, vary_b = seq_note_vary_rgb(note, resolved_path)
       end
       if prob_region then
-      local pattern = get_seq_pattern(prob_region.pattern_id, false)
-      local track_settings = get_seq_track_settings(pattern, slot.id, false)
+      local pattern, track_settings
+      if row_ctx and row_ctx.has_pattern then
+        pattern, track_settings = row_ctx.pattern, row_ctx.track_settings
+      else
+        pattern = get_seq_pattern(prob_region.pattern_id, false)
+        track_settings = get_seq_track_settings(pattern, slot.id, false)
+        if row_ctx then
+          row_ctx.has_pattern = true
+          row_ctx.pattern, row_ctx.track_settings = pattern, track_settings
+        end
+      end
       local skipped = not seq_note_passes_probability(
         prob_region,
         slot.id,
@@ -668,7 +791,7 @@ function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, 
       local note_len = seq_note_draw_length_qn(
         prob_region, pattern, slot, slot.id, entry.key, note, resolved_sample, step_qn
       )
-      local draw_x0 = qn_to_x(note_qn + note_off) + 2
+      local draw_x0 = vis_x + 2
       local draw_x1 = math.max(draw_x0 + 6.0, qn_to_x(note_qn + note_off + note_len) - 2)
       local row_pad = 4.0
       local block_y0 = row_y0 + row_pad
@@ -690,9 +813,7 @@ function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, 
       end
       local block_h = block_y1 - block_y0
       local br, bg, bb = extract_rgb_rrgbbaa(base)
-      local stutter_count = seq_stutter_count(note)
       local is_stutter = seq_note_has_stutter_span(note, step_qn)
-      local decay_mode = seq_is_decay_def(edit_def)
       local head_x1 = seq_note_head_end_x(qn_to_x, note_qn, note, step_qn)
       local sustain_split_x = nil
       if not is_stutter and not decay_mode and head_x1 and draw_x1 > head_x1 + 1.0 then
@@ -721,7 +842,7 @@ function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, 
         )
       elseif seq_is_span_overlay_def(edit_def) then
         -- Lock / vary-filter spans are drawn once per contiguous range on the lane.
-      elseif seq_is_decay_def(edit_def) then
+      elseif decay_mode then
         local overlay_accent = (edit_style and edit_style.accent) or 0xFFD166FF
         draw_seq_decay_handles(
           dl, note, slot, prob_region, pattern, entry.key, note_qn, step_qn, qn_to_x,
@@ -792,7 +913,7 @@ function seq_draw_lane_packed_notes(dl, slot, active, row_y0, row_y1, cx0, cx1, 
         -- Decay can hover the full body. Otherwise only the originating cell
         -- counts as the note; spilled min-grid / sustain tails look empty.
         -- Locked notes use the lock-span hover instead of this cell outline.
-        local hover_x1 = seq_is_decay_def(edit_def) and draw_x1 or math.min(trigger_x1, cx1)
+        local hover_x1 = decay_mode and draw_x1 or math.min(trigger_x1, cx1)
         draw_seq_note_hover(dl, mx, my, draw_x0, block_y0, draw_x1, block_y1, hover_x1)
       end
       end

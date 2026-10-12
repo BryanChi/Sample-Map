@@ -122,58 +122,55 @@ function estimate_dominant_frequency(samples, sample_rate)
 end
 
 -- Convert frequency to color (spectral mapping: low=red, mid=yellow/green, high=blue)
+-- Spectral colour for a waveform column, as RRGGBBAA (what the ImGui draw
+-- list expects). Log-frequency blend through warm lows, the accent green in
+-- the mids and cool highs, so the waveform matches the rest of the UI.
+WAVE_FREQ_STOPS = {
+  { 40.0,    0xFF, 0x7A, 0x3D },
+  { 250.0,   0xFF, 0xC4, 0x4A },
+  { 1000.0,  0x5E, 0xEE, 0x86 },
+  { 4000.0,  0x3F, 0xD6, 0xE0 },
+  { 12000.0, 0x86, 0x9E, 0xFF },
+}
+local wave_freq_cache = {}
+
 function frequency_to_color(freq)
   if not freq then
     return UI_THEME.text_dim  -- Gray for no frequency data
   end
-  
-  -- Map frequency to hue (0-360 degrees)
-  -- 20Hz = red (0°), 2000Hz = yellow (60°), 20000Hz = blue (240°)
-  local hue
-  if freq < 2000 then
-    -- Low to mid: red to yellow (0° to 60°)
-    local t = (freq - 20) / (2000 - 20)
-    hue = t * 60
-  elseif freq < 8000 then
-    -- Mid to high-mid: yellow to cyan (60° to 180°)
-    local t = (freq - 2000) / (8000 - 2000)
-    hue = 60 + t * 120
-  else
-    -- High: cyan to blue (180° to 240°)
-    local t = (freq - 8000) / (20000 - 8000)
-    hue = 180 + t * 60
+  -- Quantize to ~1/48 octave so the colour table stays small.
+  local key = math.floor(math.log(math.max(20.0, freq)) * 70.0)
+  local cached = wave_freq_cache[key]
+  if cached then
+    return cached
   end
-  
-  -- Convert HSV to RGB
-  local c = 1.0  -- Chroma
-  local x = c * (1 - math.abs((hue / 60) % 2 - 1))
-  local m = 0.3  -- Lightness adjustment (make it darker for visibility)
-  
-  local r, g, b = 0, 0, 0
-  if hue < 60 then
-    r, g, b = c, x, 0
-  elseif hue < 120 then
-    r, g, b = x, c, 0
-  elseif hue < 180 then
-    r, g, b = 0, c, x
-  elseif hue < 240 then
-    r, g, b = 0, x, c
-  else
-    r, g, b = x, 0, c
+  local stops = WAVE_FREQ_STOPS
+  local lf = math.log(math.max(stops[1][1], math.min(stops[#stops][1], freq)))
+  local cr, cg, cb = stops[#stops][2], stops[#stops][3], stops[#stops][4]
+  for i = 1, #stops - 1 do
+    local a, b = stops[i], stops[i + 1]
+    local la, lb = math.log(a[1]), math.log(b[1])
+    if lf <= lb then
+      local t = (lf - la) / (lb - la)
+      cr = a[2] + (b[2] - a[2]) * t
+      cg = a[3] + (b[3] - a[3]) * t
+      cb = a[4] + (b[4] - a[4]) * t
+      break
+    end
   end
-  
-  -- Convert to 0-255 and apply lightness
-  r = math.floor((r + m) * 255)
-  g = math.floor((g + m) * 255)
-  b = math.floor((b + m) * 255)
-  
-  -- Clamp values
-  r = math.max(0, math.min(255, r))
-  g = math.max(0, math.min(255, g))
-  b = math.max(0, math.min(255, b))
-  
-  -- Return as ARGB (0xAARRGGBB format)
-  return (0xFF << 24) | (r << 16) | (g << 8) | b
+  local color = (math.floor(cr) << 24) | (math.floor(cg) << 16) | (math.floor(cb) << 8) | 0xFF
+  wave_freq_cache[key] = color
+  return color
+end
+
+-- Average of two RRGGBBAA colours (opaque result).
+function wave_mix_color(a, b)
+  if a == b then
+    return a
+  end
+  local r1, g1, b1 = (a >> 24) & 0xFF, (a >> 16) & 0xFF, (a >> 8) & 0xFF
+  local r2, g2, b2 = (b >> 24) & 0xFF, (b >> 16) & 0xFF, (b >> 8) & 0xFF
+  return (((r1 + r2) // 2) << 24) | (((g1 + g2) // 2) << 16) | (((b1 + b2) // 2) << 8) | 0xFF
 end
 
 -- --- Waveform generation -----------------------------------------------------

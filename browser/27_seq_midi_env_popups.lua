@@ -255,6 +255,174 @@ function render_seq_midi_assign_popup()
   return false
 end
 
+-- ===== Envelope editor window ==========================================
+-- A card with a title row, the graph (dB rows, ms columns, the waveform as the
+-- envelope shapes it) and a row of shape presets.
+
+SEQ_ENV_POPUP = {
+  w = 470.0,
+  pad = 8.0,
+  header_h = 22.0,
+  graph_h = 190.0,
+  footer_h = 18.0,
+  gap = 6.0,
+}
+
+SEQ_ENV_PRESETS = {
+  { key = "flat",  label = "Flat",  tip = "Flat\nNo shaping: the whole hit at 0 dB", hint = "Flat: no shaping, 0 dB" },
+  { key = "punch", label = "Punch", tip = "Punch\nBoost the transient, then settle at 0 dB", hint = "Punch: boost the transient" },
+  { key = "tight", label = "Tight", tip = "Tight\nKeep the body, then gate the tail", hint = "Tight: keep the body, gate the tail" },
+  { key = "fade",  label = "Fade",  tip = "Fade\nFast exponential fade over the whole hit", hint = "Fade: fast fade over the hit" },
+  { key = "swell", label = "Swell", tip = "Swell\nSoften the attack", hint = "Swell: soft attack" },
+}
+
+-- One line of hint text: "Key: action" pieces separated by " · ", keys a
+-- little brighter, clipped to the line.
+function seq_env_draw_hint_line(dl, x, y, w, h, text)
+  if r.ImGui_DrawList_PushClipRect then
+    r.ImGui_DrawList_PushClipRect(dl, x, y, x + w, y + h, true)
+  end
+  local cx = x
+  local first = true
+  for piece in (text .. " · "):gmatch("(.-) · ") do
+    if not first then
+      local sw, sh = r.ImGui_CalcTextSize(ctx, "  ·  ")
+      r.ImGui_DrawList_AddText(dl, cx, y + (h - sh) * 0.5, UI_THEME.text_mute, "  ·  ")
+      cx = cx + sw
+    end
+    first = false
+    local key, rest = piece:match("^([^:]+:)(.*)$")
+    if key then
+      local kw, kh = r.ImGui_CalcTextSize(ctx, key)
+      r.ImGui_DrawList_AddText(dl, cx, y + (h - kh) * 0.5, UI_THEME.text, key)
+      cx = cx + kw
+      piece = rest
+    end
+    local pw, ph = r.ImGui_CalcTextSize(ctx, piece)
+    r.ImGui_DrawList_AddText(dl, cx, y + (h - ph) * 0.5, UI_THEME.text_dim, piece)
+    cx = cx + pw
+    if cx > x + w then
+      break
+    end
+  end
+  if r.ImGui_DrawList_PopClipRect then
+    r.ImGui_DrawList_PopClipRect(dl)
+  end
+end
+
+function seq_env_popup_height()
+  local P = SEQ_ENV_POPUP
+  return P.pad * 2 + P.header_h + P.gap + P.graph_h + P.gap + P.footer_h
+end
+
+-- Points for a preset over a hit of length len (seconds). trans is the
+-- sample's transient end when known.
+function seq_env_preset_points(kind, len, trans)
+  len = math.max(0.01, tonumber(len) or 1.0)
+  trans = tonumber(trans)
+  if not trans or trans <= 0.0 or trans >= len * 0.8 then
+    trans = math.min(0.03, len * 0.15)
+  end
+  if kind == "punch" then
+    local settle = math.min(len * 0.6, math.max(trans * 2.0, 0.02))
+    return {
+      { t = 0.0, amp = 2.0, curve = -0.35 },
+      { t = settle, amp = 1.0, curve = 0.0 },
+      { t = len, amp = 1.0, curve = 0.0 },
+    }
+  elseif kind == "tight" then
+    local hold = math.min(len * 0.45, math.max(trans * 3.0, 0.05))
+    local stop = math.min(len, hold + math.max(0.02, len * 0.18))
+    local pts = {
+      { t = 0.0, amp = 1.0, curve = 0.0 },
+      { t = hold, amp = 1.0, curve = -0.45 },
+      { t = stop, amp = 0.0, curve = 0.0 },
+    }
+    if stop < len - 0.0005 then
+      pts[#pts + 1] = { t = len, amp = 0.0, curve = 0.0 }
+    end
+    return pts
+  elseif kind == "fade" then
+    return {
+      { t = 0.0, amp = 1.0, curve = -0.55 },
+      { t = len, amp = 0.0, curve = 0.0 },
+    }
+  elseif kind == "swell" then
+    local atk = math.min(len * 0.3, math.max(trans * 2.5, 0.025))
+    return {
+      { t = 0.0, amp = 0.0, curve = -0.4 },
+      { t = atk, amp = 1.0, curve = 0.0 },
+      { t = len, amp = 1.0, curve = 0.0 },
+    }
+  end
+  return {
+    { t = 0.0, amp = 1.0, curve = 0.0 },
+    { t = len, amp = 1.0, curve = 0.0 },
+  }
+end
+
+function seq_env_apply_preset(slot, preset)
+  if not slot or not preset then
+    return false
+  end
+  local sample = slot.sample_path and find_sample_by_path(slot.sample_path) or nil
+  local len = state.seq_env_graph_len or (sample and tonumber(sample.duration)) or 1.0
+  local label = begin_seq_undo("Envelope preset: " .. preset.label)
+  slot.env = seq_normalize_track_env({
+    points = seq_env_preset_points(preset.key, len, sample and sample.transient_end),
+  })
+  seq_normalize_slot_mix(slot)
+  seq_on_slot_mix_changed(slot, { resync = true })
+  end_seq_undo(label)
+  if seq_schedule_ingest_save then
+    seq_schedule_ingest_save()
+  end
+  if seq_env_view_reset then
+    seq_env_view_reset()
+  end
+  return true
+end
+
+-- Small text chip / icon button drawn on dl. Returns clicked, hovered.
+function seq_env_popup_button(id, dl, x, y, w, h, opts)
+  r.ImGui_SetCursorScreenPos(ctx, x, y)
+  local clicked = r.ImGui_InvisibleButton(ctx, id, w, h)
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local pressed = r.ImGui_IsItemActive(ctx)
+  local bg, _, text_col, border = ui_button_colors(opts.style or "default", hovered, pressed, opts.selected)
+  ui_draw_panel(dl, x, y, x + w, y + h, 5.0, bg, border, hovered, pressed)
+  local cx, cy = x + w * 0.5, y + h * 0.5 + (pressed and 0.5 or 0.0)
+  if opts.icon then
+    ui_button_draw_icon(dl, opts.icon, cx, cy, math.min(w, h), hovered and 0xFFFFFFFF or text_col)
+  end
+  if opts.glyph then
+    opts.glyph(dl, cx, cy, h, hovered and 0xFFFFFFFF or text_col)
+  end
+  if opts.label then
+    local tw, th = r.ImGui_CalcTextSize(ctx, opts.label)
+    r.ImGui_DrawList_AddText(dl, cx - tw * 0.5, cy - th * 0.5, hovered and 0xFFFFFFFF or text_col, opts.label)
+  end
+  return clicked, hovered
+end
+
+-- Tiny curve drawn on each preset chip so the shape reads before the name.
+function seq_env_preset_glyph(dl, kind, x, y, w, h, col)
+  local pts = seq_env_preset_points(kind, 1.0, 0.08)
+  local env = { points = pts }
+  local steps = 10
+  local prev_x, prev_y
+  for i = 0, steps do
+    local t = i / steps
+    local a = seq_env_levels_at_norm(env, t)
+    local px = x + t * w
+    local py = y + h - math.min(1.0, a / 2.0) * h
+    if prev_x then
+      r.ImGui_DrawList_AddLine(dl, prev_x, prev_y, px, py, col, 1.2)
+    end
+    prev_x, prev_y = px, py
+  end
+end
+
 -- Transparent popup containing only the envelope graph (with sample waveform).
 -- Returns true when the envelope was changed this frame.
 function seq_env_popup_anchor_pos(graph_w, graph_h)
@@ -309,6 +477,9 @@ function seq_close_env_editor_popup()
   if seq_env_view_reset then
     seq_env_view_reset()
   end
+  if seq_env_popup_on_close then
+    seq_env_popup_on_close()
+  end
 end
 
 function render_seq_env_editor_popup()
@@ -316,7 +487,13 @@ function render_seq_env_editor_popup()
     return false
   end
 
-  local slot = seq_find_slot_by_id and seq_find_slot_by_id(state.seq_env_popup_slot_id)
+  -- Another target (a drum layering corner) may stand in for the track: a
+  -- table with id, name, env and sample_path, plus optional popup_anchor and
+  -- keep_open callbacks.
+  local slot = seq_env_popup_custom_target and seq_env_popup_custom_target() or nil
+  if not slot then
+    slot = seq_find_slot_by_id and seq_find_slot_by_id(state.seq_env_popup_slot_id)
+  end
   if not slot then
     for _, s in ipairs(state.seq_tracks or {}) do
       if s.id == state.seq_env_popup_slot_id then
@@ -330,8 +507,15 @@ function render_seq_env_editor_popup()
     return false
   end
 
-  local graph_w, graph_h = 380.0, 168.0
-  local px, py = seq_env_popup_anchor_pos(graph_w, graph_h)
+  local P = SEQ_ENV_POPUP
+  local graph_w, graph_h = P.w, seq_env_popup_height()
+  local px, py = nil, nil
+  if slot.popup_anchor then
+    px, py = slot.popup_anchor(graph_w, graph_h)
+  end
+  if not px then
+    px, py = seq_env_popup_anchor_pos(graph_w, graph_h)
+  end
   if not px or not py then
     return false
   end
@@ -378,6 +562,7 @@ function render_seq_env_editor_popup()
   if r.ImGui_WindowFlags_NoFocusOnAppearing then flags = flags | r.ImGui_WindowFlags_NoFocusOnAppearing() end
   if r.ImGui_WindowFlags_NoNav then flags = flags | r.ImGui_WindowFlags_NoNav() end
   if r.ImGui_WindowFlags_NoBackground then flags = flags | r.ImGui_WindowFlags_NoBackground() end
+  if r.ImGui_WindowFlags_TopMost then flags = flags | r.ImGui_WindowFlags_TopMost() end
 
   local visible = r.ImGui_Begin(ctx, "##seq_env_editor", true, flags)
   local popup_dl = (r.ImGui_GetWindowDrawList and r.ImGui_GetWindowDrawList(ctx))
@@ -390,21 +575,90 @@ function render_seq_env_editor_popup()
   local changed = false
   if visible then
     seq_normalize_slot_mix(slot)
+    local dl = popup_dl
+    local x0, y0 = gx, gy
+    local x1, y1 = gx + graph_w, gy + graph_h
+    -- Card
+    r.ImGui_DrawList_AddRectFilled(dl, x0 + 2, y0 + 5, x1 + 2, y1 + 5, 0x00000050, 10.0)
+    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, UI_THEME.popup_bg, 8.0)
+    r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, UI_THEME.border, 8.0, 0, 1.0)
+
+    -- Top row: shape presets, close. No hover tooltips in the card: the
+    -- bottom line says what the hovered control does.
+    local hx, hy = x0 + P.pad, y0 + P.pad
+    local hh = P.header_h
+    local hint = nil
+    local close_x = x1 - P.pad - hh
+    local close_clicked, close_hot = seq_env_popup_button("##seq_env_close", dl, close_x, hy, hh, hh,
+      { icon = "close" })
+    if close_hot then
+      hint = "Close · Esc"
+    end
+    local fx = hx
+    local preset_hit = nil
+    for i, preset in ipairs(SEQ_ENV_PRESETS) do
+      local lw = r.ImGui_CalcTextSize(ctx, preset.label)
+      local bw = lw + 30.0
+      if fx + bw > close_x - 6.0 then
+        break
+      end
+      local clicked, hot = seq_env_popup_button("##seq_env_preset_" .. i, dl, fx, hy, bw, hh, {
+        glyph = function(gdl, cx, cy, size, col)
+          local gw, gh = 14.0, size * 0.42
+          local gx0 = cx - bw * 0.5 + 7.0
+          seq_env_preset_glyph(gdl, preset.key, gx0, cy - gh * 0.5, gw, gh, col)
+          local _, lh = r.ImGui_CalcTextSize(ctx, preset.label)
+          r.ImGui_DrawList_AddText(gdl, gx0 + gw + 5.0, cy - lh * 0.5, col, preset.label)
+        end,
+      })
+      if hot then
+        hint = preset.hint
+      end
+      if clicked then
+        preset_hit = preset
+      end
+      fx = fx + bw + 4.0
+    end
+
+    -- Graph
+    local graph_x = x0 + P.pad
+    local graph_y = hy + hh + P.gap
     local env_hot, tip
     changed, env_hot, tip = seq_render_env_graph_editor(
-      popup_dl, slot, gx, gy, graph_w, graph_h, { show_waveform = true }
+      dl, slot, graph_x, graph_y, graph_w - P.pad * 2, P.graph_h,
+      { show_waveform = true, shaped_waveform = true }
     )
-    if (env_hot or tip) and tip and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, tip)
+    if env_hot and tip then
+      hint = tip
     end
+
+    -- Bottom line: hint for whatever is hovered.
+    local fy = graph_y + P.graph_h + P.gap
+    seq_env_draw_hint_line(dl, x0 + P.pad, fy, graph_w - P.pad * 2, P.footer_h,
+      hint or "Click: add point · Scroll: zoom · Shift+scroll: pan · Dbl-click: full view")
+
+    r.ImGui_SetCursorScreenPos(ctx, x0, y0)
     r.ImGui_Dummy(ctx, graph_w, graph_h)
 
+    if preset_hit then
+      seq_env_apply_preset(slot, preset_hit)
+      -- Applied with its own undo point and resync; don't report it to the host.
+      changed = false
+    end
+    if close_clicked then
+      seq_close_env_editor_popup()
+    end
+
     local dragging = state.seq_env_graph_drag and state.seq_env_graph_drag.slot_id
-    local win_hovered = r.ImGui_IsWindowHovered and r.ImGui_IsWindowHovered(ctx)
+    -- Test the pointer against the card itself: IsWindowHovered turns false as
+    -- soon as any item is pressed, which made a click on the editor's own
+    -- buttons count as a click outside and close it before the click landed.
+    local pmx, pmy = r.ImGui_GetMousePos(ctx)
+    local win_hovered = pmx and pmy and pmx >= x0 and pmx < x1 and pmy >= y0 and pmy < y1
     local escape = r.ImGui_IsKeyPressed and r.ImGui_Key_Escape
       and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false)
     local clicked_outside = r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0)
-      and not win_hovered and not env_hot
+      and not win_hovered and not env_hot and not (slot.keep_open and slot.keep_open())
     if state.seq_env_popup_just_opened then
       state.seq_env_popup_just_opened = nil
     elseif escape or (clicked_outside and not dragging) then
@@ -419,6 +673,13 @@ function render_seq_env_editor_popup()
 end
 
 function seq_render_env_editor_host()
+  -- The host is called from both the map layout and the sequencer view; draw
+  -- the editor once per frame so its buttons aren't submitted twice.
+  local frame = r.ImGui_GetFrameCount and r.ImGui_GetFrameCount(ctx)
+  if frame and state.seq_env_host_frame == frame then
+    return false
+  end
+  state.seq_env_host_frame = frame
   if not render_seq_env_editor_popup() then
     return false
   end

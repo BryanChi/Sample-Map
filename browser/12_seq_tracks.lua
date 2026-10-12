@@ -439,6 +439,26 @@ function seq_compact_sample_candidates(slot)
   if type(src) ~= "table" then
     return false
   end
+  -- This runs several times per track per frame and almost never finds a
+  -- hole (a free square after a filled one, with a filled one later), so
+  -- look for one first without allocating. The test is
+  -- seq_candidate_entry_taken, inlined.
+  local any_taken, gap, hole = false, false, false
+  for i = 1, SEQ_SAMPLE_CANDIDATES_MAX do
+    local entry = src[i]
+    if type(entry) == "table" and type(entry.path) == "string" and entry.path ~= "" then
+      if gap then
+        hole = true
+        break
+      end
+      any_taken = true
+    elseif any_taken then
+      gap = true
+    end
+  end
+  if not hole then
+    return false
+  end
   local old_idx = tonumber(slot.sample_candidate_idx)
   local dense = {}
   local mapped = nil
@@ -526,12 +546,14 @@ function seq_normalize_slot_candidates(slot)
   slot._cand_norm = true
 end
 
+-- seq_candidate_entry_taken inlined (these run every frame per track).
 function seq_candidate_highest_taken(slot)
   local list = slot and slot.sample_candidates
   local high = 0
   if type(list) == "table" then
     for i = 1, SEQ_SAMPLE_CANDIDATES_MAX do
-      if seq_candidate_entry_taken(list[i]) then
+      local entry = list[i]
+      if type(entry) == "table" and type(entry.path) == "string" and entry.path ~= "" then
         high = i
       end
     end
@@ -547,7 +569,8 @@ function seq_candidate_visible_count(slot)
   local all_taken = high > 0
   if all_taken then
     for i = 1, visible do
-      if not seq_candidate_entry_taken(list and list[i]) then
+      local entry = list and list[i]
+      if not (type(entry) == "table" and type(entry.path) == "string" and entry.path ~= "") then
         all_taken = false
         break
       end
@@ -878,6 +901,28 @@ function seq_clone_region_track_samples(src)
 end
 
 function seq_effective_slot_sample_path(slot, region)
+  -- While the sequencer rows draw (seq_trigger_memo set; tracks, regions and
+  -- notes are only read there) every drawn note of a row asks this for the
+  -- same slot and region; remember the last answer.
+  local memo = seq_trigger_memo
+  if memo then
+    local last = memo.eff_path
+    if last then
+      if last[1] == slot and last[2] == region then
+        return last[3], last[4]
+      end
+    else
+      last = {}
+      memo.eff_path = last
+    end
+    local path, name = seq_effective_slot_sample_path_uncached(slot, region)
+    last[1], last[2], last[3], last[4] = slot, region, path, name
+    return path, name
+  end
+  return seq_effective_slot_sample_path_uncached(slot, region)
+end
+
+function seq_effective_slot_sample_path_uncached(slot, region)
   local rec = seq_get_region_track_sample(region, slot and slot.id)
   if rec then
     return rec.path, rec.name

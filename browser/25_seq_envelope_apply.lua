@@ -338,7 +338,9 @@ end
 
 -- Draw waveform peaks across [x, x+w]. bins are evenly spaced over the sample duration.
 -- Optional t0, t1, duration zoom the same time window as the envelope editor.
-function seq_draw_env_waveform(dl, x, y, w, h, peaks, t0, t1, duration)
+-- With env (normalized), the original is drawn faint and the waveform as the
+-- envelope shapes it is drawn on top, so edits show what the hit will sound like.
+function seq_draw_env_waveform(dl, x, y, w, h, peaks, t0, t1, duration, env)
   if not peaks or #peaks == 0 or w < 2 or h < 2 then return end
   local mid = y + h * 0.5
   local amp = h * 0.42
@@ -348,12 +350,15 @@ function seq_draw_env_waveform(dl, x, y, w, h, peaks, t0, t1, duration)
   local view1 = t1 or dur
   if view1 <= view0 then view1 = view0 + 0.001 end
   local span = view1 - view0
-  local col_fill = 0x5A7A9855
-  local col_line = 0x8AA8C888
+  local col_fill = env and 0x5A7A9826 or 0x5A7A9855
+  local col_line = env and 0x8AA8C830 or 0x8AA8C888
+  local shaped_fill = 0x7FB4E070
+  local shaped_line = 0xB4D6F4C0
+  local max_half = h * 0.5 - 1.0
   if r.ImGui_DrawList_PushClipRect then
     r.ImGui_DrawList_PushClipRect(dl, x, y, x + w, y + h, true)
   end
-  local prev_x, prev_y = nil, nil
+  local prev_x, prev_y, prev_sy = nil, nil, nil
   for i = 1, n do
     local v = peaks[i] or 0.0
     local bin0 = ((i - 1) / n) * dur
@@ -363,10 +368,24 @@ function seq_draw_env_waveform(dl, x, y, w, h, peaks, t0, t1, duration)
       local x1 = x + ((bin1 - view0) / span) * w
       local px = (x0 + x1) * 0.5
       local half = v * amp
-      r.ImGui_DrawList_AddLine(dl, px, mid - half, px, mid + half, col_fill, math.max(1.0, x1 - x0))
+      local bar_w = math.max(1.0, x1 - x0)
+      r.ImGui_DrawList_AddLine(dl, px, mid - half, px, mid + half, col_fill, bar_w)
       local py = mid - v * amp
       if prev_x then
         r.ImGui_DrawList_AddLine(dl, prev_x, prev_y, px, py, col_line, 1.0)
+      end
+      if env then
+        local g = seq_env_levels_at_norm(env, (bin0 + bin1) * 0.5)
+        local sh = math.min(max_half, half * g)
+        if sh > 0.25 then
+          r.ImGui_DrawList_AddLine(dl, px, mid - sh, px, mid + sh, shaped_fill, bar_w)
+        end
+        py = mid - sh
+        if prev_x and prev_sy then
+          r.ImGui_DrawList_AddLine(dl, prev_x, prev_sy, px, py, shaped_line, 1.0)
+        end
+        prev_sy = py
+        py = mid - v * amp
       end
       prev_x, prev_y = px, py
     end
@@ -545,6 +564,199 @@ function seq_draw_env_trans_sustain_markers(dl, sample, time_to_x, iy0, iy1)
   end
 end
 
+-- dB rows and millisecond columns behind the envelope. Labels sit inside the
+-- plot edges so the graph keeps its full width.
+SEQ_ENV_GRID_DB = { { 2.0, "+6" }, { 1.0, "0 dB" }, { 0.5, "-6" }, { 0.25, "-12" } }
+SEQ_ENV_GRID_MS = { 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000 }
+
+function seq_draw_env_grid(dl, ix0, iy0, ix1, iy1, t0, t1, amp_max)
+  local ih = iy1 - iy0
+  local iw = ix1 - ix0
+  if iw < 20 or ih < 20 then
+    return
+  end
+  local line_col = 0xFFFFFF0D
+  local text_col = 0x8FA396A0
+  for _, row in ipairs(SEQ_ENV_GRID_DB) do
+    local y = iy1 - (row[1] / amp_max) * ih
+    if y > iy0 + 8 and y < iy1 - 8 then
+      if row[1] ~= 1.0 then
+        r.ImGui_DrawList_AddLine(dl, ix0, y, ix1, y, line_col, 1.0)
+      end
+      local _, th = r.ImGui_CalcTextSize(ctx, row[2])
+      r.ImGui_DrawList_AddText(dl, ix0 + 3, y - (th or 12) - 1, text_col, row[2])
+    end
+  end
+  local span_ms = math.max(0.001, (t1 - t0) * 1000.0)
+  local step = SEQ_ENV_GRID_MS[#SEQ_ENV_GRID_MS]
+  for _, s in ipairs(SEQ_ENV_GRID_MS) do
+    if span_ms / s <= math.max(2, math.floor(iw / 70)) then
+      step = s
+      break
+    end
+  end
+  local first = math.ceil((t0 * 1000.0) / step) * step
+  local ms = first
+  local guard = 0
+  while ms <= t1 * 1000.0 and guard < 64 do
+    guard = guard + 1
+    local x = ix0 + ((ms / 1000.0 - t0) / (t1 - t0)) * iw
+    if x > ix0 + 1 then
+      r.ImGui_DrawList_AddLine(dl, x, iy0, x, iy1, line_col, 1.0)
+      local label = (ms >= 1000) and string.format("%g s", ms / 1000.0) or string.format("%g ms", ms)
+      local tw, th = r.ImGui_CalcTextSize(ctx, label)
+      if x + 3 + (tw or 0) < ix1 - 2 then
+        r.ImGui_DrawList_AddText(dl, x + 3, iy1 - (th or 12) - 2, text_col, label)
+      end
+    end
+    ms = ms + step
+  end
+end
+
+-- ===== Envelope edges: fade in, end position, fade out ======================
+-- These live in the ordinary points so every player (arrange items, live MIDI)
+-- hears them: a fade in is a first point at 0 amp rising to the next point;
+-- the end is where the envelope drops to 0 and stays there, and the fade out
+-- is the segment that leads into it.
+
+SEQ_ENV_SILENT = 0.0001
+SEQ_ENV_CUT = 0.0008   -- a "hard" end: hold point this far before the end
+
+function seq_env_edges(points, len)
+  local e = { len = len, end_t = len }
+  local n = #points
+  if n >= 2 and (points[1].t or 0.0) <= 0.0005 and (points[1].amp or 1.0) <= SEQ_ENV_SILENT
+      and (points[2].amp or 0.0) > SEQ_ENV_SILENT then
+    e.fi = true
+    e.fi_len = points[2].t or 0.0
+  end
+  local k = nil
+  for i = n, 1, -1 do
+    if (points[i].amp or 1.0) <= SEQ_ENV_SILENT then
+      k = i
+    else
+      break
+    end
+  end
+  if k and k >= 2 then
+    e.k = k
+    e.end_t = points[k].t or len
+    e.fo_start = points[k - 1].t or e.end_t
+    e.fo_len = e.end_t - e.fo_start
+    if e.fo_len <= SEQ_ENV_CUT + 0.0002 then
+      e.fo_len = 0.0
+    end
+  end
+  return e
+end
+
+-- Cut the envelope at t_end: hold the current level, drop to 0, silent to len.
+function seq_env_make_end(points, t_end, len)
+  t_end = math.max(SEQ_ENV_CUT * 2, math.min(len, t_end))
+  local lvl = seq_env_levels_at_norm({ points = points }, t_end - SEQ_ENV_CUT)
+  for i = #points, 1, -1 do
+    if (points[i].t or 0.0) >= t_end - SEQ_ENV_CUT - 0.0002 then
+      table.remove(points, i)
+    end
+  end
+  points[#points + 1] = { t = t_end - SEQ_ENV_CUT, amp = lvl, curve = 0.0 }
+  points[#points + 1] = { t = t_end, amp = 0.0, curve = 0.0 }
+  if t_end < len - 0.0005 then
+    points[#points + 1] = { t = len, amp = 0.0, curve = 0.0 }
+  end
+end
+
+-- Remove the end: the level before the cut carries on to the end of the sample.
+function seq_env_clear_end(points, len)
+  local e = seq_env_edges(points, len)
+  if not e.k then
+    return false
+  end
+  local lvl = points[e.k - 1].amp or 1.0
+  for i = #points, e.k, -1 do
+    table.remove(points, i)
+  end
+  points[#points + 1] = { t = len, amp = lvl, curve = 0.0 }
+  return true
+end
+
+function seq_env_set_fade_in(points, fi_len, len)
+  local e = seq_env_edges(points, len)
+  local limit = (e.k and (points[e.k - 1].t or len) or len) - 0.0005
+  if e.fi then
+    if points[3] then
+      limit = math.min(limit, (points[3].t or len) - 0.0005)
+    end
+    if fi_len <= 0.0008 then
+      points[1].amp = points[2].amp or 1.0
+      return
+    end
+    points[2].t = math.max(0.0008, math.min(limit, fi_len))
+    return
+  end
+  if fi_len <= 0.0008 then
+    return
+  end
+  -- New fade: silence at 0, rising to the level the envelope had there.
+  local first_t = points[1] and (points[1].t or 0.0) or len
+  if first_t <= 0.0005 and points[2] then
+    limit = math.min(limit, (points[2].t or len) - 0.0005)
+  elseif first_t > 0.0005 then
+    limit = math.min(limit, first_t - 0.0005)
+  end
+  local t = math.max(0.0008, math.min(limit, fi_len))
+  local lvl = seq_env_levels_at_norm({ points = points }, t)
+  if first_t <= 0.0005 then
+    points[1].amp = 0.0
+  else
+    table.insert(points, 1, { t = 0.0, amp = 0.0, curve = 0.0 })
+  end
+  table.insert(points, 2, { t = t, amp = lvl, curve = 0.0 })
+end
+
+function seq_env_set_fade_out(points, fo_start, len)
+  local e = seq_env_edges(points, len)
+  if not e.k then
+    seq_env_make_end(points, len, len)
+    e = seq_env_edges(points, len)
+    if not e.k then
+      return
+    end
+  end
+  local k = e.k
+  local tmin = (k >= 3 and (points[k - 2].t or 0.0) or 0.0) + 0.0005
+  if e.fi and k - 1 == 2 then
+    tmin = math.max(tmin, 0.0008)
+  end
+  local tmax = e.end_t - SEQ_ENV_CUT
+  points[k - 1].t = math.max(tmin, math.min(tmax, fo_start))
+end
+
+function seq_env_move_end(points, t_end, len)
+  local e = seq_env_edges(points, len)
+  if not e.k then
+    if t_end < len - 0.002 then
+      seq_env_make_end(points, t_end, len)
+    end
+    return
+  end
+  local k = e.k
+  local tmin = (points[k - 1].t or 0.0) + SEQ_ENV_CUT
+  if t_end >= len - 0.0005 then
+    t_end = len
+  end
+  t_end = math.max(tmin, math.min(len, t_end))
+  points[k].t = t_end
+  for i = #points, k + 1, -1 do
+    if (points[i].t or 0.0) <= t_end + 0.0002 then
+      table.remove(points, i)
+    end
+  end
+  if t_end < len - 0.0005 and (points[#points].t or 0.0) < len - 0.0005 then
+    points[#points + 1] = { t = len, amp = 0.0, curve = 0.0 }
+  end
+end
+
 function seq_env_view_min_span(duration)
   duration = math.max(0.001, duration or 1.0)
   return math.max(0.02, duration * 0.02)
@@ -711,32 +923,14 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
   if r.ImGui_DrawList_PushClipRect then
     r.ImGui_DrawList_PushClipRect(dl, ix0, iy0, ix1, iy1, true)
   end
+  seq_draw_env_grid(dl, ix0, iy0, ix1, iy1, view_t0, view_t1, AMP_MAX)
   if wave_peaks then
-    seq_draw_env_waveform(dl, ix0, iy0, iw, ih, wave_peaks, view_t0, view_t1, PREVIEW_LEN)
-  end
-  if sample and sample.path then
-    local grip_w, grip_h = 16, 14
-    local gx, gy = ix1 - grip_w - 1, iy0 + 1
-    r.ImGui_SetCursorScreenPos(ctx, gx, gy)
-    r.ImGui_InvisibleButton(ctx, "##seq_env_wave_drag_" .. tostring(slot.id), grip_w, grip_h)
-    local grip_hov = r.ImGui_IsItemHovered(ctx)
-    local grip_col = grip_hov and UI_THEME.accent or UI_THEME.text_dim
-    for row = 0, 1 do
-      for col = 0, 2 do
-        r.ImGui_DrawList_AddCircleFilled(dl,
-          gx + 4 + col * 4, gy + 5 + row * 5, 1.2, grip_col, 6)
-      end
-    end
-    if grip_hov and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, "Drag to drop this sample")
-    end
-    if waveform_drag_should_start(grip_hov) then
-      begin_waveform_sample_drag(sample)
-    end
+    seq_draw_env_waveform(dl, ix0, iy0, iw, ih, wave_peaks, view_t0, view_t1, PREVIEW_LEN,
+      opts.shaped_waveform and env or nil)
   end
   seq_draw_env_trans_sustain_markers(dl, sample, time_to_x, iy0, iy1)
   local unity_y = amp_to_y(1.0)
-  r.ImGui_DrawList_AddLine(dl, ix0, unity_y, ix1, unity_y, 0xFFFFFF22, 1.0)
+  r.ImGui_DrawList_AddLine(dl, ix0, unity_y, ix1, unity_y, 0xFFFFFF30, 1.0)
 
   local line_col = live and 0x9FE3B5FF or 0x6A849EFF
   local function dist2(ax, ay, bx, by)
@@ -758,6 +952,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     local px_span = math.abs(time_to_x(t1) - time_to_x(t0))
     return math.max(8, math.min(28, math.floor(px_span / 6.0 + 0.5)))
   end
+  local area_col = live and 0x9FE3B51C or 0x6A849E14
   local function draw_env_segment(x0, y0, t0, amp0, t1, amp1, curve, col, thickness)
     local steps = seg_sample_count(t0, t1)
     local prev_x, prev_y = x0, y0
@@ -765,8 +960,19 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
       local u = k / steps
       local sx = time_to_x(t0 + (t1 - t0) * u)
       local sy = amp_to_y(seq_env_seg_eval(amp0, amp1, u, curve))
+      if r.ImGui_DrawList_AddQuadFilled and sx > prev_x then
+        r.ImGui_DrawList_AddQuadFilled(dl, prev_x, prev_y, sx, sy, sx, iy1, prev_x, iy1, area_col)
+      end
       r.ImGui_DrawList_AddLine(dl, prev_x, prev_y, sx, sy, col, thickness)
       prev_x, prev_y = sx, sy
+    end
+  end
+  local function draw_hold(t0, t1, amp)
+    local hx0, hx1 = time_to_x(t0), time_to_x(t1)
+    local hy = amp_to_y(amp)
+    if hx1 > hx0 then
+      r.ImGui_DrawList_AddRectFilled(dl, hx0, hy, hx1, iy1, area_col, 0)
+      r.ImGui_DrawList_AddLine(dl, hx0, hy, hx1, hy, line_col, 1.8)
     end
   end
 
@@ -812,6 +1018,32 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
       / math.max(1.0, time_to_x(points[nearest_seg + 1].t or 0.0) - time_to_x(points[nearest_seg].t or 0.0))))
   end
 
+  -- Edge handles: fade-in knob, fade-out knob (top) and the end line.
+  local edges = seq_env_edges(points, PREVIEW_LEN)
+  local knob_y = iy0 + 8.0
+  local fi_x = time_to_x(edges.fi and edges.fi_len or 0.0)
+  local end_x = time_to_x(edges.end_t)
+  local fo_x = time_to_x(edges.k and edges.fo_start or edges.end_t)
+  local edge_hot = nil
+  if hovered and not dragging and not panning then
+    if dist2(mx, my, fo_x, knob_y) <= 49.0 then
+      edge_hot = "fo"
+    elseif dist2(mx, my, fi_x, knob_y) <= 49.0 then
+      edge_hot = "fi"
+    elseif math.abs(mx - end_x) <= 4.0 and my > knob_y + 7.0 then
+      edge_hot = "end"
+    end
+  elseif dragging and state.seq_env_graph_drag then
+    local hnd = state.seq_env_graph_drag.handle
+    if hnd == "fi" or hnd == "fo" or hnd == "end" then
+      edge_hot = hnd
+    end
+  end
+  if edge_hot then
+    nearest_idx = nil
+    nearest_seg = nil
+  end
+
   local alt = is_alt_down()
   local shift = is_shift_down()
   local right_clicked = hovered and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 1)
@@ -821,7 +1053,25 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
   local deleting = (not panning) and nearest_idx and #points > 1 and (right_clicked or (left_clicked and alt))
   local reset_curve = (not panning) and dbl and nearest_seg and not nearest_idx
 
-  if hovered and not dragging and dbl and not nearest_seg and not nearest_idx then
+  if hovered and not dragging and dbl and edge_hot then
+    -- Double-click a knob or the end line to remove that fade or the end.
+    if edge_hot == "fi" then
+      seq_env_set_fade_in(points, 0.0, PREVIEW_LEN)
+    elseif edge_hot == "fo" then
+      local e = seq_env_edges(points, PREVIEW_LEN)
+      if e.k then
+        seq_env_make_end(points, e.end_t, PREVIEW_LEN)
+      end
+    else
+      seq_env_clear_end(points, PREVIEW_LEN)
+    end
+    slot.env = seq_normalize_track_env({ points = points })
+    env = slot.env
+    points = env.points
+    changed = true
+    state.seq_env_graph_drag = { slot_id = slot.id, handle = "none" }
+    drag = state.seq_env_graph_drag
+  elseif hovered and not dragging and dbl and not nearest_seg and not nearest_idx then
     seq_env_view_reset()
     view_t0, view_t1 = 0.0, PREVIEW_LEN
     view_span = PREVIEW_LEN
@@ -854,7 +1104,9 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
       -- Swallow the rest of the click that deleted a point or reset a curve.
     else
       if (not drag) or drag.slot_id ~= slot.id then
-        if nearest_idx then
+        if edge_hot then
+          state.seq_env_graph_drag = { slot_id = slot.id, handle = edge_hot }
+        elseif nearest_idx then
           state.seq_env_graph_drag = { slot_id = slot.id, handle = nearest_idx }
         elseif nearest_seg then
           state.seq_env_graph_drag = {
@@ -879,7 +1131,17 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
         end
         drag = state.seq_env_graph_drag
       end
-      if drag and drag.handle == "curve" then
+      if drag and (drag.handle == "fi" or drag.handle == "fo" or drag.handle == "end") then
+        local t = x_to_time(mx)
+        if drag.handle == "fi" then
+          seq_env_set_fade_in(points, t, PREVIEW_LEN)
+        elseif drag.handle == "fo" then
+          seq_env_set_fade_out(points, t, PREVIEW_LEN)
+        else
+          seq_env_move_end(points, t, PREVIEW_LEN)
+        end
+        changed = true
+      elseif drag and drag.handle == "curve" then
         local idx = tonumber(drag.seg)
         local a = idx and points[idx]
         local b = idx and points[idx + 1]
@@ -891,7 +1153,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
             u = math.max(0.08, math.min(0.92, (mx - time_to_x(t0)) / span_x))
           end
           a.curve = seq_env_seg_curve_for_amp(a.amp, b.amp, u, y_to_amp(my))
-          tip = string.format("Curve %+.2f  ·  double-click to flatten", a.curve)
+          tip = string.format("Curve: %+.2f", a.curve)
           changed = true
         end
       else
@@ -929,9 +1191,8 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     curve_idx = nearest_seg
   end
   if points and #points > 0 then
-    local hold_y = amp_to_y(points[1].amp or 1.0)
     if (points[1].t or 0.0) > 0.0005 then
-      r.ImGui_DrawList_AddLine(dl, time_to_x(0.0), hold_y, time_to_x(points[1].t), hold_y, line_col, 1.8)
+      draw_hold(0.0, points[1].t, points[1].amp or 1.0)
     end
     for i = 1, #points - 1 do
       local a, b = points[i], points[i + 1]
@@ -947,8 +1208,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     end
     local last = points[#points]
     if (last.t or 0.0) < PREVIEW_LEN - 0.0005 then
-      local ly = amp_to_y(last.amp or 1.0)
-      r.ImGui_DrawList_AddLine(dl, time_to_x(last.t or 0.0), ly, time_to_x(PREVIEW_LEN), ly, line_col, 1.8)
+      draw_hold(last.t or 0.0, PREVIEW_LEN, last.amp or 1.0)
     end
   end
   if curve_idx and points[curve_idx] and points[curve_idx + 1] then
@@ -974,6 +1234,76 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
       r.ImGui_DrawList_AddCircle(dl, hx, hy, rad + 1.2, hot and UI_THEME.accent_hvr or UI_THEME.accent, 12, 1.1)
     end
   end
+  -- Edges: silence after the end, the end line with its grab tab, and the
+  -- two fade knobs with a bar showing each fade's length.
+  local ed = seq_env_edges(points, PREVIEW_LEN)
+  local e_end_x = time_to_x(ed.end_t)
+  local e_fi_x = time_to_x(ed.fi and ed.fi_len or 0.0)
+  local e_fo_x = time_to_x(ed.k and ed.fo_start or ed.end_t)
+  local end_col = ed.k and 0xFFB84DFF or 0xFFB84D70
+  if ed.k and e_end_x < ix1 then
+    r.ImGui_DrawList_AddRectFilled(dl, e_end_x, iy0, ix1, iy1, 0x00000070, 0)
+  end
+  r.ImGui_DrawList_AddLine(dl, e_end_x, iy0, e_end_x, iy1, end_col, edge_hot == "end" and 2.4 or 1.5)
+  local tab_hot = edge_hot == "end"
+  r.ImGui_DrawList_AddRectFilled(dl, e_end_x - 4, iy1 - 16, e_end_x + 4, iy1 - 2,
+    tab_hot and 0xFFD699FF or end_col, 2.0)
+  r.ImGui_DrawList_AddLine(dl, ix0 + 0.5, iy0, ix0 + 0.5, iy1, 0x7FD7FF70, 1.5)
+  local fade_col = 0x7FD7FFFF
+  if ed.fi and e_fi_x > ix0 + 1 then
+    r.ImGui_DrawList_AddLine(dl, ix0, knob_y, e_fi_x, knob_y, 0x7FD7FF80, 2.0)
+  end
+  if ed.k and ed.fo_len > 0 and e_end_x > e_fo_x + 1 then
+    r.ImGui_DrawList_AddLine(dl, e_fo_x, knob_y, e_end_x, knob_y, 0xFFB84D90, 2.0)
+  end
+  local function knob(kx, hot, col)
+    local rr = hot and 5.5 or 4.5
+    r.ImGui_DrawList_AddRectFilled(dl, kx - rr, knob_y - rr, kx + rr, knob_y + rr, hot and 0xFFFFFFFF or col, 2.0)
+    r.ImGui_DrawList_AddRect(dl, kx - rr, knob_y - rr, kx + rr, knob_y + rr, 0x000000AA, 2.0, 0, 1.0)
+  end
+  knob(e_fi_x, edge_hot == "fi", fade_col)
+  knob(e_fo_x, edge_hot == "fo", end_col)
+
+  -- Value readouts show only while dragging; hover hints go to the caller's tip.
+  local drag_live = state.seq_env_graph_drag and state.seq_env_graph_drag.slot_id == slot.id
+    and r.ImGui_IsMouseDown and r.ImGui_IsMouseDown(ctx, 0)
+  local edge_label = nil
+  if not drag_live then
+    edge_label = nil
+  elseif edge_hot == "fi" then
+    edge_label = string.format("Fade in %.0f ms", (ed.fi and ed.fi_len or 0.0) * 1000.0)
+  elseif edge_hot == "fo" then
+    edge_label = string.format("Fade out %.0f ms", (ed.k and ed.fo_len or 0.0) * 1000.0)
+  elseif edge_hot == "end" then
+    edge_label = ed.k and string.format("End %.0f ms", ed.end_t * 1000.0) or "End: sample end"
+  end
+  if edge_label then
+    local tw, th = r.ImGui_CalcTextSize(ctx, edge_label)
+    local ax = (edge_hot == "fi") and e_fi_x or ((edge_hot == "fo") and e_fo_x or e_end_x)
+    local bw, bh = tw + 10.0, th + 4.0
+    local bx = math.max(ix0 + 2.0, math.min(ix1 - bw - 2.0, ax - bw * 0.5))
+    local by = knob_y + 9.0
+    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, 0x0B0F0CE8, 4.0)
+    r.ImGui_DrawList_AddRect(dl, bx, by, bx + bw, by + bh, edge_hot == "fi" and fade_col or end_col, 4.0, 0, 1.0)
+    r.ImGui_DrawList_AddText(dl, bx + 5.0, by + 2.0, UI_THEME.text, edge_label)
+  end
+
+  -- Value readout on the point being dragged, kept inside the graph.
+  local readout_p = drag_live and (not edge_hot) and active_idx and points[active_idx]
+  if readout_p and not panning then
+    local label = seq_env_format_point_tip(readout_p.t, readout_p.amp)
+    local tw, th = r.ImGui_CalcTextSize(ctx, label)
+    local hx, hy = time_to_x(readout_p.t or 0.0), amp_to_y(readout_p.amp or 1.0)
+    local bw, bh = tw + 10.0, th + 4.0
+    local bx = math.max(ix0 + 2.0, math.min(ix1 - bw - 2.0, hx - bw * 0.5))
+    local by = hy - bh - 9.0
+    if by < iy0 + 2.0 then
+      by = hy + 9.0
+    end
+    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, 0x0B0F0CE8, 4.0)
+    r.ImGui_DrawList_AddRect(dl, bx, by, bx + bw, by + bh, UI_THEME.accent, 4.0, 0, 1.0)
+    r.ImGui_DrawList_AddText(dl, bx + 5.0, by + 2.0, UI_THEME.text, label)
+  end
   if r.ImGui_DrawList_PopClipRect then
     r.ImGui_DrawList_PopClipRect(dl)
   end
@@ -986,25 +1316,36 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     local bx1 = ix0 + (view_t1 / PREVIEW_LEN) * iw
     r.ImGui_DrawList_AddRectFilled(dl, bx0, by, bx1, iy1, 0x9FE3B5AA, 1.0)
     local label = string.format("%.0f–%.0f ms", view_t0 * 1000.0, view_t1 * 1000.0)
-    r.ImGui_DrawList_AddText(dl, ix0 + 4, iy0 + 2, UI_THEME.text_dim, label)
+    local lw = r.ImGui_CalcTextSize(ctx, label)
+    r.ImGui_DrawList_AddText(dl, ix0 + (iw - (lw or 0)) * 0.5, iy0 + 2, UI_THEME.text_dim, label)
   end
 
+  if not tip and edge_hot and not dragging then
+    if edge_hot == "fi" then
+      tip = "Drag: fade in · Dbl-click: remove"
+    elseif edge_hot == "fo" then
+      tip = "Drag: fade out · Dbl-click: hard cut"
+    else
+      tip = "Drag: end of hit · Dbl-click: full length"
+    end
+  end
   if not tip and hovered then
     if nearest_idx then
       local p = points[nearest_idx]
-      tip = seq_env_format_point_tip(p.t, p.amp) .. "  ·  Alt/RMB delete"
+      tip = "Drag: move · Shift: 0 dB · Alt/Right-click: delete"
     elseif nearest_seg then
       local c = points[nearest_seg].curve or 0.0
       if math.abs(c) > 0.001 then
-        tip = string.format("Drag to reshape  ·  %.2f  ·  double-click: flatten", c)
+        tip = "Drag: bend · Dbl-click: straighten"
       else
-        tip = "Drag segment to change curve  ·  double-click: flatten"
+        tip = "Drag: bend · Dbl-click: straighten"
       end
     else
-      tip = "Click: add point  ·  Drag segment: curve  ·  Scroll: zoom"
+      tip = "Click: add point · Scroll: zoom · Shift+scroll: pan · Dbl-click: full view"
     end
   end
 
+  state.seq_env_graph_len = PREVIEW_LEN
   return changed, hovered or active or panning, tip
 end
 

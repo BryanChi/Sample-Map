@@ -283,9 +283,32 @@ function seq_note_uses_sustain_length(slot, resolved_sample)
 end
 
 function seq_note_trigger_qn(region, step_idx, note, grid_qn)
-  local cell_start_qn = seq_note_abs_qn(region, note, step_idx, grid_qn)
+  -- Hot (several times per drawn note per frame): seq_note_abs_qn,
+  -- get_seq_region_groove and seq_groove_offset_qn are inlined here with the
+  -- same expressions and fallbacks.
+  local qn_off = note and note.qn_offset
+  if not (note and type(qn_off) == "number") then
+    qn_off = (tonumber(step_idx) or (note and tonumber(note.step)) or 0) * (grid_qn or state.seq_grid_qn or 0.25)
+  end
+  local cell_start_qn = (region and region.start_qn or 0.0) + qn_off
   local offset_qn = (note and note.offset_qn) or 0.0
-  local groove_qn = seq_groove_offset_qn(cell_start_qn, get_seq_region_groove(region))
+  local presets = SEQ_GROOVE_PRESETS
+  local groove_key = "off"
+  if type(region) == "table" then
+    local key = region.groove
+    if type(key) == "string" and presets[key] ~= nil then
+      groove_key = key
+    end
+  end
+  local groove_qn = 0.0
+  local preset = presets[groove_key] or presets["off"]
+  if preset and preset.steps then
+    local sixteenth = math.floor((cell_start_qn / SEQ_SIXTEENTH_QN) + 0.5)
+    local idx = sixteenth % 16
+    if idx < 0 then idx = idx + 16 end
+    local frac = preset.steps[idx + 1] or 0.0
+    groove_qn = frac * SEQ_SIXTEENTH_QN
+  end
   local qn = cell_start_qn + groove_qn + offset_qn
   if qn < 0.0 then
     qn = 0.0
@@ -335,8 +358,12 @@ function seq_next_note_trigger_qn(region, pattern, track_id, step_idx, grid_qn, 
   if not track_notes then
     return (region.start_qn or 0.0) + get_seq_region_length_qn(region)
   end
+  return seq_next_trigger_after_qn(region, track_notes, grid_qn, seq_note_trigger_qn(region, step_idx, note, grid_qn))
+end
 
-  local start_qn = seq_note_trigger_qn(region, step_idx, note, grid_qn)
+-- seq_next_note_trigger_qn once the region is known, the track's notes table
+-- exists and the note's own trigger (start_qn) has been computed.
+function seq_next_trigger_after_qn(region, track_notes, grid_qn, start_qn)
   local memo = seq_trigger_memo
   if memo then
     -- Smallest trigger strictly after start_qn (same threshold as the scan).
@@ -735,8 +762,18 @@ function seq_gap_to_next_hit_qn(region, pattern, track_id, step_idx, note, grid_
   if not region then
     return nil
   end
-  local start_qn = seq_note_trigger_qn(region, step_idx, note, grid_qn)
-  local end_qn = seq_next_note_trigger_qn(region, pattern, track_id, step_idx, grid_qn, note)
+  return seq_gap_after_trigger_qn(region, pattern, track_id, grid_qn, seq_note_trigger_qn(region, step_idx, note, grid_qn))
+end
+
+-- seq_gap_to_next_hit_qn for a region whose note trigger (start_qn) is known.
+function seq_gap_after_trigger_qn(region, pattern, track_id, grid_qn, start_qn)
+  local end_qn
+  local track_notes = get_track_note_table(pattern, track_id, false)
+  if track_notes then
+    end_qn = seq_next_trigger_after_qn(region, track_notes, grid_qn, start_qn)
+  else
+    end_qn = (region.start_qn or 0.0) + get_seq_region_length_qn(region)
+  end
   local region_end = (region.start_qn or 0.0) + get_seq_region_length_qn(region)
   if math.abs(end_qn - region_end) <= 1e-9 then
     return nil
@@ -745,6 +782,14 @@ function seq_gap_to_next_hit_qn(region, pattern, track_id, step_idx, note, grid_
 end
 
 function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn, hit_idx)
+  return (seq_effective_note_length_trig_qn(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn, hit_idx))
+end
+
+-- seq_effective_note_length_qn, plus the note's trigger QN
+-- (seq_note_trigger_qn(region, step_idx, note, grid_qn)) when it was needed,
+-- else nil. The trigger is computed once and reused for the sample-length
+-- position, the gap to the next hit and the region-end cap.
+function seq_effective_note_length_trig_qn(region, pattern, slot, track_id, step_idx, note, resolved_sample, grid_qn, hit_idx)
   grid_qn = grid_qn or state.seq_grid_qn or 0.25
   local resolved_path = (resolved_sample and resolved_sample.path)
     or (note and note.frozen_sample_path)
@@ -756,10 +801,15 @@ function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx,
     if not slice_qn or slice_qn <= 1e-9 then
       slice_qn = (seq_stutter_span_qn(note, grid_qn) or grid_qn) / stutter_count
     end
-    return seq_cap_length_to_sample_qn(slice_qn * 0.98, resolved_path, resolved_sample, note)
+    return seq_cap_length_to_sample_qn(slice_qn * 0.98, resolved_path, resolved_sample, note), nil
   end
 
-  local at_qn = region and step_idx ~= nil and seq_note_trigger_qn(region, step_idx, note, grid_qn) or nil
+  local trig = nil
+  local at_qn = nil
+  if region and step_idx ~= nil then
+    trig = seq_note_trigger_qn(region, step_idx, note, grid_qn)
+    at_qn = trig
+  end
   local sample_qn = seq_sample_length_qn(resolved_path, resolved_sample, at_qn)
   if not sample_qn or sample_qn <= 0 then
     sample_qn = grid_qn
@@ -768,20 +818,35 @@ function seq_effective_note_length_qn(region, pattern, slot, track_id, step_idx,
   -- length_qn (one grid cell) which is only a stutter-span placeholder.
   local decay_qn = tonumber(note and note.decay_qn)
   if type(decay_qn) == "number" and decay_qn > 1e-9 then
-    return seq_cap_length_to_sample_qn(math.max(grid_qn * 0.05, decay_qn), resolved_path, resolved_sample, note, nil, at_qn)
+    return seq_cap_length_to_sample_qn(math.max(grid_qn * 0.05, decay_qn), resolved_path, resolved_sample, note, nil, at_qn), trig
   end
   -- Default: full effective length, cropped so it does not overlap the next hit.
   -- Per-track overlap lets the sample ring out over later notes, unless a
   -- copy/move asked to keep items butted against the next start.
   if state.seq_force_item_crop or not (slot and slot.overlap) then
-    local gap_qn = seq_gap_to_next_hit_qn(region, pattern, track_id, step_idx, note, grid_qn)
-    if gap_qn then
-      sample_qn = math.min(sample_qn, gap_qn)
+    -- seq_gap_to_next_hit_qn(region, pattern, track_id, step_idx, note, grid_qn)
+    if region then
+      if trig == nil then
+        trig = seq_note_trigger_qn(region, step_idx, note, grid_qn)
+      end
+      local gap_qn = seq_gap_after_trigger_qn(region, pattern, track_id, grid_qn, trig)
+      if gap_qn then
+        sample_qn = math.min(sample_qn, gap_qn)
+      end
     end
   end
   -- Auto sustain stays inside the region. Explicit decay_qn may cross it.
-  sample_qn = seq_cap_length_to_region_end_qn(sample_qn, region, step_idx, note, grid_qn)
-  return seq_cap_length_to_sample_qn(sample_qn, resolved_path, resolved_sample, note, nil, at_qn)
+  -- seq_cap_length_to_region_end_qn(sample_qn, region, step_idx, note, grid_qn)
+  if region and sample_qn and sample_qn > 0 then
+    if trig == nil then
+      trig = seq_note_trigger_qn(region, step_idx, note, grid_qn)
+    end
+    local remain = seq_region_end_qn(region) - trig
+    if remain > 0 then
+      sample_qn = math.min(sample_qn, remain)
+    end
+  end
+  return seq_cap_length_to_sample_qn(sample_qn, resolved_path, resolved_sample, note, nil, at_qn), trig
 end
 
 SEQ_FADE_SHAPE_COUNT = 7

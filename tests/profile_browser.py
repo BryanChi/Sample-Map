@@ -7,7 +7,10 @@ frame times. Requires `pip install lupa`.
 
 usage: python3 tests/profile_browser.py [repo_dir] [frames] [samples] [tracks] [top]
 Set PROFILE_NOWRAP=1 to skip per-function timing and report plain frame time
-(the timing wrappers inflate the cost of small functions)."""
+(the timing wrappers inflate the cost of small functions). Set PROFILE_SAMPLE=1
+for a sampling profile instead (an instruction-count hook records the running
+line and the call stack): less skewed toward tiny functions, and it names hot
+lines."""
 import sys, os, re, tempfile
 from lupa import lua54
 
@@ -24,7 +27,7 @@ stub = re.search(r"L\.execute\(r'''(.*?)local report = \{\}", src, re.S).group(1
 L = lua54.LuaRuntime(unpack_returned_tuples=True)
 g = L.globals()
 g.REPO = repo; g.RES = tempfile.mkdtemp(); g.FRAMES = frames
-g.NOWRAP = bool(os.environ.get('PROFILE_NOWRAP')); g.NSAMPLES = n_samples; g.NTRACKS = n_tracks; g.TOP = top
+g.NOWRAP = bool(os.environ.get('PROFILE_NOWRAP') or os.environ.get('PROFILE_SAMPLE')); g.SAMPLE = bool(os.environ.get('PROFILE_SAMPLE')); g.NSAMPLES = n_samples; g.NTRACKS = n_tracks; g.TOP = top
 
 out = L.execute(stub + r'''
 -- Fake project: NTRACKS tracks with stable GUIDs and names; no items.
@@ -163,6 +166,48 @@ for k, v in pairs(NOWRAP and {} or _G) do
 end
 
 local report = {}
+-- Sampling mode: every INTERVAL VM instructions, count the running line (leaf)
+-- and every distinct function on the stack (inclusive).
+local INTERVAL = 200
+local leaf, incl, nsamp = {}, {}, 0
+local function fname(info)
+  return (info.name or "?") .. "@" .. (info.short_src or "?"):gsub(".*/", "") .. ":" .. (info.linedefined or 0)
+end
+local function sample_hook()
+  nsamp = nsamp + 1
+  local info = debug.getinfo(2, "Snl")
+  if not info then return end
+  local k = fname(info) .. " L" .. tostring(info.currentline or 0)
+  leaf[k] = (leaf[k] or 0) + 1
+  local seen, lvl = {}, 2
+  while lvl <= 60 do
+    local inf = debug.getinfo(lvl, "Sn")
+    if not inf then break end
+    if inf.what ~= "C" then
+      local kk = fname(inf)
+      if not seen[kk] then seen[kk] = true; incl[kk] = (incl[kk] or 0) + 1 end
+    end
+    lvl = lvl + 1
+  end
+end
+local function sample_report(label)
+  leaf, incl, nsamp = {}, {}, 0
+  debug.sethook(sample_hook, "", INTERVAL)
+  local e3 = run_frames(FRAMES)
+  debug.sethook()
+  if e3 then report[#report+1] = label .. " " .. e3 end
+  local function top(t, title)
+    local rows = {}
+    for k, v in pairs(t) do rows[#rows+1] = { k, v } end
+    table.sort(rows, function(a, b) return a[2] > b[2] end)
+    report[#report+1] = "  -- " .. title .. " (% of samples)"
+    for i = 1, math.min(TOP, #rows) do
+      report[#report+1] = ("  %5.1f%%  %s"):format(rows[i][2] * 100 / math.max(1, nsamp), rows[i][1])
+    end
+  end
+  top(incl, "inclusive")
+  top(leaf, "hot lines")
+end
 local function profile(label, view)
   state.active_view = view
   local warm = run_frames(5); if warm then report[#report+1] = label .. " " .. warm; return end
@@ -182,10 +227,12 @@ local function profile(label, view)
   local rows = {}
   for _, st in pairs(stat) do if st.calls > 0 then rows[#rows+1] = st end end
   table.sort(rows, function(a, b) return a.self > b.self end)
-  report[#report+1] = "  self ms/f  incl ms/f  calls/f  function"
-  for i = 1, math.min(TOP, #rows) do
-    local st = rows[i]
-    report[#report+1] = ("  %9.3f  %9.3f  %7.1f  %s"):format(st.self * 1000 / FRAMES, st.incl * 1000 / FRAMES, st.calls / FRAMES, st.name)
+  if not SAMPLE then
+    report[#report+1] = "  self ms/f  incl ms/f  calls/f  function"
+    for i = 1, math.min(TOP, #rows) do
+      local st = rows[i]
+      report[#report+1] = ("  %9.3f  %9.3f  %7.1f  %s"):format(st.self * 1000 / FRAMES, st.incl * 1000 / FRAMES, st.calls / FRAMES, st.name)
+    end
   end
   local api = {}
   local api_total = 0
@@ -194,6 +241,9 @@ local function profile(label, view)
   report[#report+1] = ("  REAPER/ImGui calls per frame: %.0f; top:"):format(api_total / FRAMES)
   for i = 1, math.min(15, #api) do
     report[#report+1] = ("    %8.1f  %s"):format(api[i][2] / FRAMES, api[i][1])
+  end
+  if SAMPLE then
+    sample_report(label)
   end
 end
 profile("Sample Map", "sample_map")

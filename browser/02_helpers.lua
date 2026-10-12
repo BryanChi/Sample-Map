@@ -555,19 +555,28 @@ function build_color(r, g, b, a)
   return 0xFF000000 | (math.floor(r) << 16) | (math.floor(g) << 8) | math.floor(b)
 end
 
+-- The colour helpers run thousands of times per frame, so they use local
+-- math functions and, for integer colours (the usual case), bit operations.
+-- Both give the same results as the float arithmetic they replace.
+local floor = math.floor
+local math_type = math.type
+
 -- Extract RGB components from RRGGBBAA format color
 function extract_rgb_rrgbbaa(color)
   if not color then return 0, 0, 0 end
-  local r = math.floor((color / 16777216) % 256)   -- Extract red (first byte)
-  local g = math.floor((color / 65536) % 256)     -- Extract green
-  local b = math.floor((color / 256) % 256)       -- Extract blue
+  if math_type(color) == "integer" then
+    return (color >> 24) & 255, (color >> 16) & 255, (color >> 8) & 255
+  end
+  local r = floor((color / 16777216) % 256)   -- Extract red (first byte)
+  local g = floor((color / 65536) % 256)     -- Extract green
+  local b = floor((color / 256) % 256)       -- Extract blue
   return r, g, b
 end
 
 -- Build RRGGBBAA color from RGB components (0-255) and alpha (0-255, default 255)
 function build_color_rrgbbaa(r, g, b, a)
   a = a or 255
-  return (math.floor(r) * 16777216) + (math.floor(g) * 65536) + (math.floor(b) * 256) + math.floor(a)
+  return (floor(r) * 16777216) + (floor(g) * 65536) + (floor(b) * 256) + floor(a)
 end
 
 -- Extract RGB from RRGGBB color (24-bit)
@@ -981,12 +990,27 @@ function apply_discovered_library_tags()
     return false
   end
 
-  local function scan_root_and_relative(path)
-    path = normalize_path(path or "")
+  -- Scan roots, normalized once (the folder list doesn't change during this pass).
+  local folder_roots = {}
+  for _, folder in ipairs(state.folders or {}) do
+    folder_roots[#folder_roots + 1] = normalize_path(folder)
+  end
+
+  -- Root/relative split of a sample's directory. It only depends on the
+  -- directory, so it's worked out once per directory: { root, rel, key, extra }.
+  local dir_info_cache = {}
+  local str_byte, str_find = string.byte, string.find
+  local function dir_info(path)
+    if type(path) ~= "string" or path == "" or str_byte(path, -1) == 47 or str_find(path, "\\", 1, true) then
+      path = normalize_path(path or "")
+    end
     local dir = path:match("(.+)/[^/]+$") or ""
+    local info = dir_info_cache[dir]
+    if info then
+      return info
+    end
     local best = ""
-    for _, folder in ipairs(state.folders or {}) do
-      local root = normalize_path(folder)
+    for _, root in ipairs(folder_roots) do
       if root ~= "" and (dir == root or dir:sub(1, #root + 1) == root .. "/") then
         if #root > #best then
           best = root
@@ -994,12 +1018,14 @@ function apply_discovered_library_tags()
       end
     end
     if best == "" then
-      return "", dir
+      info = { root = "", rel = dir }
+    elseif dir == best then
+      info = { root = best, rel = "" }
+    else
+      info = { root = best, rel = dir:sub(#best + 2) }
     end
-    if dir == best then
-      return best, ""
-    end
-    return best, dir:sub(#best + 2)
+    dir_info_cache[dir] = info
+    return info
   end
 
   local function tokens_from_library_path(rel, root)
@@ -1052,8 +1078,13 @@ function apply_discovered_library_tags()
   local n = #samples
   for i = 1, n do
     local sample = samples[i]
-    local root, rel = scan_root_and_relative(sample and sample.path)
-    local key = (root .. "\t" .. rel):lower()
+    local info = dir_info(sample and sample.path)
+    local root, rel = info.root, info.rel
+    local key = info.key
+    if not key then
+      key = (root .. "\t" .. rel):lower()
+      info.key = key
+    end
     dir_counts[key] = (dir_counts[key] or 0) + 1
     if not dir_tokens[key] then
       dir_tokens[key] = tokens_from_library_path(rel, root)
@@ -1129,39 +1160,67 @@ function apply_discovered_library_tags()
 
   local dir_match_cache = {}
   local function matching_tags_for_path(path)
-    local root, rel = scan_root_and_relative(path)
-    local hay = library_haystack(rel, root)
-    local cached = dir_match_cache[hay]
+    local info = dir_info(path)
+    local cached = info.extra
     if cached then
       return cached
     end
-    local extra = {}
-    for i = 1, #ranked do
-      local tag = ranked[i].tag
-      if genre_key_matches(hay, tag) then
-        extra[#extra + 1] = tag
+    local hay = library_haystack(info.rel, info.root)
+    cached = dir_match_cache[hay]
+    if not cached then
+      cached = {}
+      for i = 1, #ranked do
+        local tag = ranked[i].tag
+        if genre_key_matches(hay, tag) then
+          cached[#cached + 1] = tag
+        end
       end
+      dir_match_cache[hay] = cached
     end
-    dir_match_cache[hay] = extra
-    return extra
+    info.extra = cached
+    return cached
   end
 
+  -- Lowercase and deleted-tag checks repeat for every sample with the same tag.
+  local custom_tags = state.custom_tags
+  local no_custom_tags = type(custom_tags) == "table" and next(custom_tags) == nil
+  local no_custom = {}
+  local lower_of, suppressed_of = {}, {}
   for i = 1, n do
     local sample = samples[i]
     if sample then
-      local custom = {}
+      local custom = no_custom
       local path = sample.path or ""
-      local custom_list = state.custom_tags and (state.custom_tags[path] or state.custom_tags[normalize_path(path)])
-      if type(custom_list) == "table" then
-        for _, tag in ipairs(custom_list) do
-          custom[tostring(tag):lower()] = true
+      if not no_custom_tags then
+        custom = {}
+        local custom_list = state.custom_tags and (state.custom_tags[path] or state.custom_tags[normalize_path(path)])
+        if type(custom_list) == "table" then
+          for _, tag in ipairs(custom_list) do
+            custom[tostring(tag):lower()] = true
+          end
         end
       end
       local kept = {}
       for _, tag in ipairs(sample.tags or {}) do
-        local low = tostring(tag):lower()
-        if (core_keep[low] or custom[low]) and not (tag_is_suppressed and tag_is_suppressed(low)) then
-          kept[#kept + 1] = tag
+        local low
+        if type(tag) == "string" then
+          low = lower_of[tag]
+          if not low then
+            low = tag:lower()
+            lower_of[tag] = low
+          end
+        else
+          low = tostring(tag):lower()
+        end
+        if core_keep[low] or custom[low] then
+          local suppressed = suppressed_of[low]
+          if suppressed == nil then
+            suppressed = (tag_is_suppressed and tag_is_suppressed(low)) and true or false
+            suppressed_of[low] = suppressed
+          end
+          if not suppressed then
+            kept[#kept + 1] = tag
+          end
         end
       end
       sample.tags = append_unique_tags(kept, matching_tags_for_path(path))
@@ -1176,6 +1235,8 @@ end
 function rebuild_tag_index()
   local counts = {}
   local by_tag = {}
+  -- tag_is_suppressed only reads state.deleted_tags, which this pass doesn't change.
+  local suppressed_of = {}
   for _, s in ipairs(state.samples) do
     s._render_color = nil
     local set = {}
@@ -1192,7 +1253,12 @@ function rebuild_tag_index()
       end
       s.tags = tags
       for _, tag in ipairs(tags) do
-        if not (tag_is_suppressed and tag_is_suppressed(tag)) then
+        local suppressed = suppressed_of[tag]
+        if suppressed == nil then
+          suppressed = (tag_is_suppressed and tag_is_suppressed(tag)) and true or false
+          suppressed_of[tag] = suppressed
+        end
+        if not suppressed then
           set[tag] = true
           counts[tag] = (counts[tag] or 0) + 1
           local list = by_tag[tag]

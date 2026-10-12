@@ -549,26 +549,35 @@ function draw_preview_volume_knob(knob_size)
 end
 
 
+local floor, max, min = math.floor, math.max, math.min
+local math_type = math.type
+
 -- Helper function to change color alpha (set alpha value 0.0-1.0)
 function change_color_alpha(color, alpha_value)
   if not color then return color end
+  local new_alpha = max(0, min(255, floor(alpha_value * 255)))
+  if math_type(color) == "integer" then
+    -- Same as rebuilding from the extracted bytes: the low 32 bits with the
+    -- alpha byte replaced.
+    return (color & 0xFFFFFF00) + new_alpha
+  end
   local r, g, b = extract_rgb_rrgbbaa(color)
-  local new_alpha = math.max(0, math.min(255, math.floor(alpha_value * 255)))
   return build_color_rrgbbaa(r, g, b, new_alpha)
 end
 
 -- Helper function to blend two colors
 function blend_colors(color1, color2, t)
-  t = math.max(0.0, math.min(1.0, t))
+  t = max(0.0, min(1.0, t))
   local r1, g1, b1 = extract_rgb_rrgbbaa(color1)
   local r2, g2, b2 = extract_rgb_rrgbbaa(color2)
-  local r = math.floor(r1 * (1.0 - t) + r2 * t)
-  local g = math.floor(g1 * (1.0 - t) + g2 * t)
-  local b = math.floor(b1 * (1.0 - t) + b2 * t)
+  local u = 1.0 - t
+  local r = floor(r1 * u + r2 * t)
+  local g = floor(g1 * u + g2 * t)
+  local b = floor(b1 * u + b2 * t)
   local a1 = color1 % 256
   local a2 = color2 % 256
-  local a = math.floor(a1 * (1.0 - t) + a2 * t)
-  return build_color_rrgbbaa(r, g, b, a)
+  local a = floor(a1 * u + a2 * t)
+  return (r * 16777216) + (g * 65536) + (b * 256) + a
 end
 
 -- Helper function to brighten a color while preserving hue

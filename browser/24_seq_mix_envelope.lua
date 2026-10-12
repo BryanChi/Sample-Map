@@ -843,27 +843,28 @@ end
 function seq_player_collect_layers(slot)
   local layers = {}
   if slot and seq_layering_is_active and seq_layering_is_active(slot) then
-    seq_normalize_slot_layers(slot)
-    local function add_side(side)
-      if type(side) ~= "table" or type(side.verts) ~= "table" then
-        return
+    -- The layered mix's pieces: blend weight, transient / sustain split and
+    -- crossfade, as the arrange items play them.
+    local pieces = seq_layering_build_pieces(slot) or {}
+    for i = 1, math.min(6, #pieces) do
+      local p = pieces[i]
+      local fade_in, fade_out = p.fade_in or 0.0, p.fade_out or 0.0
+      -- The player has no per-layer envelope: a corner envelope's fades
+      -- stand in for it (its end already shortened the piece).
+      local e = p.env and seq_layering_env_edges and seq_layering_env_edges(p.env)
+      if e then
+        fade_in = math.max(fade_in, e.fade_in or 0.0)
+        fade_out = math.max(fade_out, e.fade_out or 0.0)
       end
-      for i = 1, 3 do
-        local vert = side.verts[i]
-        if vert and type(vert.path) == "string" and vert.path ~= "" then
-          layers[#layers + 1] = {
-            path = vert.path,
-            vol = math.max(0.0, tonumber(vert.vol) or 1.0),
-          }
-          if #layers >= 6 then
-            return
-          end
-        end
-      end
-    end
-    add_side(slot.layers.transient)
-    if #layers < 6 then
-      add_side(slot.layers.sustain)
+      layers[#layers + 1] = {
+        path = p.path,
+        vol = math.max(0.0, tonumber(p.weight) or 1.0),
+        start = p.startoffs or 0.0,
+        len = p.length_sec or 0.0,
+        delay = p.time_offset_sec or 0.0,
+        fade_in = fade_in,
+        fade_out = fade_out,
+      }
     end
   end
   if #layers == 0 and slot and type(slot.sample_path) == "string" and slot.sample_path ~= "" then
@@ -888,8 +889,10 @@ function seq_player_config_sig(slot)
   local layers = seq_player_collect_layers(slot)
   parts[#parts + 1] = tostring(#layers)
   for i = 1, #layers do
-    parts[#parts + 1] = layers[i].path
-    parts[#parts + 1] = string.format("%.5f", layers[i].vol or 1)
+    local l = layers[i]
+    parts[#parts + 1] = l.path
+    parts[#parts + 1] = string.format("%.5f %.5f %.5f %.5f %.5f %.5f",
+      l.vol or 1, l.start or 0, l.len or 0, l.delay or 0, l.fade_in or 0, l.fade_out or 0)
   end
   local env = seq_normalize_track_env(slot.env)
   local pts = env.points or {}
@@ -961,7 +964,8 @@ function seq_player_write_cfg(slot, proj_key)
   for i = 1, #layers do
     local layer = layers[i]
     lines[#lines + 1] = string.format(
-      "%.9g %.9g %.9g %.9g %.9g %.9g", 0, 0, 0, 0, 0, layer.vol or 1)
+      "%.9g %.9g %.9g %.9g %.9g %.9g", layer.start or 0, layer.len or 0, layer.delay or 0,
+      layer.fade_in or 0, layer.fade_out or 0, layer.vol or 1)
     lines[#lines + 1] = tostring(layer.path or ""):gsub("[\r\n]", "")
   end
   local body = table.concat(lines, "\n") .. "\n"

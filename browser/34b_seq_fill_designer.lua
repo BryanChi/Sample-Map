@@ -1488,6 +1488,7 @@ end
 function render_seq_fill_window()
   local f = seq_fill_state()
   if not f.open then
+    seq_side_window_track("fill", false)
     return
   end
   seq_position_pattern_popup()
@@ -1507,6 +1508,7 @@ function render_seq_fill_window()
     f.open = false
     seq_fill_keep()
   end
+  seq_side_window_track("fill", visible and f.open)
   if visible then
     seq_fill_window_header()
     local spots = seq_fill_render_where(f)

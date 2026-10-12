@@ -160,6 +160,7 @@ function apply_seq_project_state(cfg)
           overlap = entry.overlap,
           env = entry.env,
           layers = entry.layers,
+          layer_versions = entry.layer_versions,
           midi_lo = entry.midi_lo,
           midi_hi = entry.midi_hi,
           sample_candidates = entry.sample_candidates,
@@ -288,8 +289,16 @@ function save_seq_project_state(proj)
     local set_ok = pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER, serialized)
     if set_ok then
       state.seq_last_ext_state = serialized
+      local count_after = nil
       if count_before and state.seq_last_proj_change == count_before then
-        state.seq_last_proj_change = r.GetProjectStateChangeCount(0)
+        count_after = r.GetProjectStateChangeCount(0)
+        state.seq_last_proj_change = count_after
+      end
+      -- Saving moves no arrange item: an arrange baseline that was current
+      -- stays current (seq_scope_baseline_current).
+      local meta = state.seq_arrange_fp_meta
+      if count_before and type(meta) == "table" and meta.count == count_before then
+        meta.count = count_after or r.GetProjectStateChangeCount(0)
       end
     end
   end
@@ -555,6 +564,12 @@ function load_config()
             or cfg.collapse_children_tags == "dynamic" then
           state.collapse_children_tags = cfg.collapse_children_tags
         end
+        if type(cfg.tag_groups_on_search_row) == "boolean" then
+          state.tag_groups_on_search_row = cfg.tag_groups_on_search_row
+        end
+        if type(cfg.tags_hide_until_search) == "boolean" then
+          state.tags_hide_until_search = cfg.tags_hide_until_search
+        end
         if type(cfg.collapse_children_tags_width) == "number" then
           state.collapse_children_tags_width = math.max(400, math.min(4000, cfg.collapse_children_tags_width))
         end
@@ -814,6 +829,8 @@ function save_config_file()
     keyboard_shortcuts = state.keyboard_shortcuts,
     collapse_children_tags = state.collapse_children_tags,
     collapse_children_tags_width = state.collapse_children_tags_width,
+    tags_hide_until_search = state.tags_hide_until_search == true,
+    tag_groups_on_search_row = state.tag_groups_on_search_row ~= false,
     custom_tags = state.custom_tags,
     deleted_tags = state.deleted_tags,
     explorer_open = state.explorer_open and true or false,
@@ -1482,7 +1499,8 @@ function process_analyzer_queue()
     end
   end
 
-  if state.scan_running then
+  -- Quiet single-file analysis (a drum layering glue) runs workers without a scan.
+  if state.scan_running or (sm_quiet_analysis_pending and sm_quiet_analysis_pending()) then
     for _, w in ipairs(workers) do
       if not w.path and #state.analyzer_queue > 0 then
         local path = table.remove(state.analyzer_queue, 1)
@@ -2309,14 +2327,19 @@ function save_samples()
   -- Compact JSON for companion scripts (Quick Swap, etc.)
   local function encode_samples_lines(list)
     local out = {"["}
-    for i, row in ipairs(list) do
-      out[#out + 1] = SampleCacheCodec.encode_row_json(row)
-      if i < #list then
-        out[#out + 1] = ",\n"
+    local n = 1
+    local count = #list
+    local encode_row_into = SampleCacheCodec.encode_row_json_into
+    for i = 1, count do
+      n = encode_row_into(list[i], out, n)
+      if i < count then
+        n = n + 1
+        out[n] = ",\n"
       end
     end
-    out[#out + 1] = "]"
-    return table.concat(out)
+    n = n + 1
+    out[n] = "]"
+    return table.concat(out, "", 1, n)
   end
 
   local ok_json_enc, json_str = pcall(function() return table.concat({

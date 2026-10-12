@@ -103,6 +103,9 @@ function settings_section_should_show(label)
       "Update", "GitHub", "Download", "version", "Check for updates", "install"
     )
   end
+  if label == "Drum Layering" then
+    return settings_matches("Render folder", "Commit", "glue", "Layered Renders")
+  end
   return false
 end
 
@@ -396,6 +399,22 @@ function settings_render_dot_appearance()
 end
 
 function settings_render_tag_layout()
+  if settings_show("Tag groups on search row", "Search", "Tags", "Drum", "Melodic", "Library") then
+    local changed, v = draw_ui_checkbox("settings_tag_groups_row", "Tag groups on search row", tag_groups_on_search_row())
+    if changed then
+      set_tag_groups_on_search_row(v)
+    end
+    r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Drum, Melodic, Library and Loop / One shot sit next to the search field. Click a group to show its tags. Collapse children tags below only applies when this is off.")
+    r.ImGui_Spacing(ctx)
+  end
+  if settings_show("Hide tags until search is clicked", "Search", "Tags") then
+    local changed, v = draw_ui_checkbox("settings_tags_hide_until_search", "Hide tags until search is clicked", state.tags_hide_until_search == true)
+    if changed then
+      set_tags_hide_until_search(v)
+    end
+    r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Sample Map tag rows stay hidden until you click the search field.")
+    r.ImGui_Spacing(ctx)
+  end
   if settings_show("Collapse children tags", "Drum", "Melodic", "Genre", "Library", "Off", "On", "Dynamic") then
     r.ImGui_Text(ctx, "Collapse children tags")
     r.ImGui_TextColored(ctx, UI_THEME.text_dim, "When on, Drum / Melodic / Library sit on the search row. Select a parent to reveal its child tags on the right; they wrap to the next line if needed.")
@@ -789,6 +808,33 @@ end
 
 -- Settings are grouped by what they affect; each group gets a caption and
 -- its sections stay individually collapsible (search expands everything).
+-- Where Commit in the drum layering window writes its glued samples.
+function settings_render_drum_layering()
+  r.ImGui_Text(ctx, "Render folder")
+  r.ImGui_TextColored(ctx, UI_THEME.text_dim,
+    "Commit in the drum layering window glues the stack into a WAV here and adds it to the library.")
+  r.ImGui_Spacing(ctx)
+  local folder = seq_layering_render_folder()
+  local custom = folder ~= seq_layering_default_render_folder()
+  r.ImGui_TextColored(ctx, custom and UI_THEME.text or UI_THEME.text_dim, folder .. (custom and "" or "  (default)"))
+  if draw_ui_button("settings_layer_render_browse", "Browse", nil, nil, { compact = true }) then
+    if r.APIExists("JS_Dialog_BrowseForFolder") then
+      local ok, picked = r.JS_Dialog_BrowseForFolder("Folder for glued drum layers", folder)
+      if ok == 1 and picked and picked ~= "" then
+        seq_layering_set_render_folder(picked)
+      end
+    else
+      r.ShowMessageBox("JS_ReaScriptAPI extension is required for folder browsing.\n\nPlease install it via ReaPack:\nExtensions > ReaPack > Browse Packages > Search for 'js_ReaScriptAPI'", "Extension Required", 0)
+    end
+  end
+  if custom then
+    r.ImGui_SameLine(ctx)
+    if draw_ui_button("settings_layer_render_default", "Use default", nil, nil, { compact = true }) then
+      seq_layering_set_render_folder(nil)
+    end
+  end
+end
+
 function settings_groups()
   local groups = {
     { caption = "Library", sections = {
@@ -804,6 +850,7 @@ function settings_groups()
     } },
     { caption = "Sequencer", sections = {
       { label = "Sequencer Controls", open = true, draw = settings_render_sequencer_controls },
+      { label = "Drum Layering", open = false, draw = settings_render_drum_layering },
     } },
     { caption = "General", sections = {
       { label = "Keyboard Shortcuts", open = false, draw = settings_render_keyboard_shortcuts },
@@ -912,20 +959,18 @@ function draw_map_status_overlay(dl, x0, y0, width, height)
     local filtered_count = map_cache.filtered_count or #state.samples
     if map_cache.dots_capped then
       lines[#lines + 1] = string.format(
-        "Showing %d of %d in view (Zoom: %.1fx)",
+        "Showing %d of %d in view",
         map_cache.draw_count or 0,
-        map_cache.visible_total or 0,
-        state.zoom
+        map_cache.visible_total or 0
       )
     elseif filtered_count < #state.samples then
       lines[#lines + 1] = string.format(
-        "Showing %d of %d samples (Zoom: %.1fx)",
+        "Showing %d of %d samples",
         filtered_count,
-        #state.samples,
-        state.zoom
+        #state.samples
       )
     else
-      lines[#lines + 1] = string.format("Showing %d samples on map (Zoom: %.1fx)", #state.samples, state.zoom)
+      lines[#lines + 1] = string.format("%d samples", #state.samples)
     end
     local missing_volume_count = 0
     for _ in pairs(state.missing_volumes or {}) do
@@ -955,28 +1000,51 @@ function draw_map_status_overlay(dl, x0, y0, width, height)
     return
   end
 
-  -- Compact translucent card in the bottom-left corner: first line is the
-  -- primary status, the rest are secondary notes.
-  local line_h = 16.0
+  -- Compact translucent card in the bottom-left of the plot: an accent dot
+  -- and the primary status, then dim secondary notes. Offline warnings are
+  -- amber. The zoom level gets its own chip in the bottom-right corner.
+  local line_h = 17.0
   local margin = 10.0
   local pad_x, pad_y = 10.0, 6.0
+  local dot_w = 14.0
+  local plot_x0 = x0 + (MAP_GUTTER_LEFT or 0)
+  local plot_w = width - (MAP_GUTTER_LEFT or 0)
   local max_w = 0
   for _, line in ipairs(lines) do
     max_w = math.max(max_w, (r.ImGui_CalcTextSize(ctx, line)))
   end
-  local card_w = math.min(max_w + pad_x * 2, math.max(40, width - margin * 2))
+  local card_w = math.min(max_w + pad_x * 2 + dot_w, math.max(40, plot_w - margin * 2 - 70))
   local card_h = #lines * line_h + pad_y * 2 - 2
-  local cx0 = x0 + margin
+  local cx0 = plot_x0 + margin
   local cy1 = y0 + height - margin
   local cy0 = cy1 - card_h
   if r.ImGui_DrawList_PushClipRect then
     r.ImGui_DrawList_PushClipRect(dl, x0, y0, x0 + width, y0 + height, true)
   end
-  r.ImGui_DrawList_AddRectFilled(dl, cx0, cy0, cx0 + card_w, cy1, 0x0B0E0CD0, UI_METRICS.radius_ctrl)
+  r.ImGui_DrawList_AddRectFilled(dl, cx0, cy0, cx0 + card_w, cy1, 0x090C0AE0, UI_METRICS.radius_ctrl)
   r.ImGui_DrawList_AddRect(dl, cx0 + 0.5, cy0 + 0.5, cx0 + card_w - 0.5, cy1 - 0.5, UI_THEME.border, UI_METRICS.radius_ctrl, 0, 1.0)
   for i, line in ipairs(lines) do
     local ty = cy0 + pad_y + (i - 1) * line_h
-    r.ImGui_DrawList_AddText(dl, cx0 + pad_x, ty, i == 1 and UI_THEME.text or UI_THEME.text_dim, line)
+    local col = i == 1 and UI_THEME.text or UI_THEME.text_dim
+    if line:find("offline", 1, true) then
+      col = 0xFFB870FF
+    end
+    if i == 1 then
+      local _, th = r.ImGui_CalcTextSize(ctx, line)
+      r.ImGui_DrawList_AddCircleFilled(dl, cx0 + pad_x + 3, ty + th * 0.5, 3.0, UI_THEME.accent, 10)
+    end
+    r.ImGui_DrawList_AddText(dl, cx0 + pad_x + dot_w, ty, col, line)
+  end
+
+  if #state.samples > 0 then
+    local zoom_text = string.format("%.1fx", state.zoom or 1.0)
+    local zw, zh = r.ImGui_CalcTextSize(ctx, zoom_text)
+    local zx1 = x0 + width - margin
+    local zx0 = zx1 - zw - 16
+    local zy0 = cy1 - zh - 8
+    r.ImGui_DrawList_AddRectFilled(dl, zx0, zy0, zx1, cy1, 0x090C0AE0, (cy1 - zy0) * 0.5)
+    r.ImGui_DrawList_AddRect(dl, zx0 + 0.5, zy0 + 0.5, zx1 - 0.5, cy1 - 0.5, UI_THEME.border, (cy1 - zy0) * 0.5, 0, 1.0)
+    r.ImGui_DrawList_AddText(dl, zx0 + 8, zy0 + 4, UI_THEME.text_dim, zoom_text)
   end
   if r.ImGui_DrawList_PopClipRect then
     r.ImGui_DrawList_PopClipRect(dl)

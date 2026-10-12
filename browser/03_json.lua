@@ -41,14 +41,69 @@ local function json_key(k)
   return cached
 end
 
+-- ',"key":' pieces for every key after an object's first, so a key and its
+-- comma go into the buffer as one piece.
+local json_comma_key_cache = {}
+local json_comma_key_n = 0
+
+local function json_comma_key(k)
+  local cached = json_comma_key_cache[k]
+  if cached then
+    return cached
+  end
+  cached = "," .. json_key(k)
+  if json_comma_key_n >= 8192 then
+    json_comma_key_cache = {}
+    json_comma_key_n = 0
+  end
+  json_comma_key_cache[k] = cached
+  json_comma_key_n = json_comma_key_n + 1
+  return cached
+end
+
+-- Number text, reused across calls: a sequencer save writes ~18k numbers with
+-- under a hundred distinct values. Integers and floats are kept apart (1 and
+-- 1.0 are one table key but print as "1" and "1.0"), and float zero, NaN and
+-- the infinities are never cached (0.0 and -0.0 are one key but print
+-- differently), so a cache miss always goes through json_number_text. Float
+-- zero (every note's pan) takes its text by sign instead.
+local json_num_int, json_num_float, json_num_n = {}, {}, 0
+local json_math_type, json_floor, json_huge = math.type, math.floor, math.huge
+local json_find = string.find
+local json_float_zero = 0.0
+local json_zero_text, json_neg_zero_text = tostring(json_float_zero), tostring(-json_float_zero)
+
+local function json_number_text(val)
+  local kind = json_math_type(val)
+  if kind == "float" and (val ~= val or val == json_huge or val == -json_huge) then
+    return "null"
+  end
+  if kind == "float" and val == 0 then
+    return tostring(val)
+  end
+  local s = tostring(val)
+  if json_num_n >= 4096 then
+    json_num_int, json_num_float, json_num_n = {}, {}, 0
+  end
+  if kind == "integer" then
+    json_num_int[val] = s
+  else
+    json_num_float[val] = s
+  end
+  json_num_n = json_num_n + 1
+  return s
+end
+
 -- Appends val's JSON to buf after index n; returns the new last index.
+-- Object members with number, string or boolean values are written inline
+-- (the bulk of a save); everything else recurses.
 local function json_encode_into(val, buf, n)
   local t = type(val)
   if t == "table" then
     local is_array = true
     local max_idx = 0
     for k in pairs(val) do
-      if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then
+      if type(k) ~= "number" or k ~= json_floor(k) or k < 1 then
         is_array = false
         break
       end
@@ -73,33 +128,58 @@ local function json_encode_into(val, buf, n)
       buf[n] = "{"
       local first = true
       for k, v in pairs(val) do
+        n = n + 1
         if first then
           first = false
+          buf[n] = json_key(k)
         else
-          n = n + 1
-          buf[n] = ","
+          buf[n] = json_comma_key_cache[k] or json_comma_key(k)
         end
-        n = n + 1
-        buf[n] = json_key(k)
-        n = json_encode_into(v, buf, n)
+        local tv = type(v)
+        if tv == "number" then
+          local s
+          if json_math_type(v) == "integer" then
+            s = json_num_int[v]
+          elseif v == 0 then
+            s = (1 / v > 0) and json_zero_text or json_neg_zero_text
+          else
+            s = json_num_float[v]
+          end
+          n = n + 1
+          buf[n] = s or json_number_text(v)
+        elseif tv == "string" then
+          n = n + 1
+          if json_find(v, '[%z\1-\31"\\]') then
+            buf[n] = json_encode_string(v)
+          else
+            buf[n] = '"' .. v .. '"'
+          end
+        elseif tv == "boolean" then
+          n = n + 1
+          buf[n] = v and "true" or "false"
+        else
+          n = json_encode_into(v, buf, n)
+        end
       end
       n = n + 1
       buf[n] = "}"
     end
   elseif t == "string" then
     n = n + 1
-    if val:find('[%z\1-\31"\\]') then
+    if json_find(val, '[%z\1-\31"\\]') then
       buf[n] = json_encode_string(val)
     else
       buf[n] = '"' .. val .. '"'
     end
   elseif t == "number" then
-    n = n + 1
-    if val ~= val or val == math.huge or val == -math.huge then
-      buf[n] = "null"
+    local s
+    if json_math_type(val) == "integer" then
+      s = json_num_int[val]
     else
-      buf[n] = tostring(val)
+      s = json_num_float[val]
     end
+    n = n + 1
+    buf[n] = s or json_number_text(val)
   elseif t == "boolean" then
     n = n + 1
     buf[n] = val and "true" or "false"
@@ -321,72 +401,273 @@ end
 
 
 -- Compact Lua value serializer for SampleMapData.cache.lua (loadfile-friendly).
+local str_format, str_match, str_byte, str_sub = string.format, string.match, string.byte, string.sub
+local str_find, str_gsub = string.find, string.gsub
+local m_floor, m_abs, m_type, M_HUGE = math.floor, math.abs, math.type, math.huge
+
 function lua_is_array(t)
   local n = #t
   for k in pairs(t) do
-    if type(k) ~= "number" or k < 1 or k > n or k ~= math.floor(k) then
+    -- Float keys stored in a table are never integral (Lua turns 2.0 into 2),
+    -- so "integer in 1..n" is the same test as "integral number in 1..n".
+    if m_type(k) ~= "integer" or k < 1 or k > n then
       return false
     end
   end
   return true
 end
 
-function serialize_lua_value(val, out)
-  local tv = type(val)
-  if tv == "nil" then
-    out[#out + 1] = "nil"
-  elseif tv == "boolean" then
-    out[#out + 1] = val and "true" or "false"
-  elseif tv == "number" then
-    if val ~= val then
-      out[#out + 1] = "0"
-    elseif val == math.huge then
-      out[#out + 1] = "math.huge"
-    elseif val == -math.huge then
-      out[#out + 1] = "-math.huge"
-    elseif val == math.floor(val) and math.abs(val) < 9007199254740992 then
-      out[#out + 1] = string.format("%d", val)
-    elseif math.abs(val) < 1000000 then
-      out[#out + 1] = string.format("%.6g", val)
-    else
-      out[#out + 1] = string.format("%.17g", val)
+local function lua_number_literal(val)
+  if val ~= val then
+    return "0"
+  elseif val == M_HUGE then
+    return "math.huge"
+  elseif val == -M_HUGE then
+    return "-math.huge"
+  elseif val == m_floor(val) and m_abs(val) < 9007199254740992 then
+    return str_format("%d", val)
+  elseif m_abs(val) < 1000000 then
+    return str_format("%.6g", val)
+  end
+  return str_format("%.17g", val)
+end
+
+-- "key=" for string keys that are plain identifiers, false otherwise. Map keys
+-- repeat on every row (extra fields), so the pattern test is memoized (bounded).
+-- The first 63 such keys also get a small id for batching map entries below.
+local LUA_KEY_PREFIX_CACHE, LUA_KEY_PREFIX_CACHE_N = {}, 0
+local LUA_KEY_ID, LUA_KEY_ID_PREFIX, LUA_KEY_ID_N = {}, {}, 0
+local function lua_key_prefix(k)
+  local c = LUA_KEY_PREFIX_CACHE[k]
+  if c == nil then
+    c = str_match(k, "^[%a_][%w_]*$") and (k .. "=") or false
+    if LUA_KEY_PREFIX_CACHE_N < 4096 then
+      LUA_KEY_PREFIX_CACHE[k] = c
+      LUA_KEY_PREFIX_CACHE_N = LUA_KEY_PREFIX_CACHE_N + 1
+      if c and LUA_KEY_ID_N < 63 then
+        LUA_KEY_ID_N = LUA_KEY_ID_N + 1
+        LUA_KEY_ID[k] = LUA_KEY_ID_N
+        LUA_KEY_ID_PREFIX[LUA_KEY_ID_N] = c
+      end
     end
+  end
+  return c
+end
+
+-- Runs of non-table array elements are written with one string.format call
+-- (formatting numbers dominates save time). Each element gets the same
+-- conversion lua_number_literal / "%q" / literal it would get on its own:
+-- 1 "%d", 2 "%.6g", 3 "%.17g", 4 "%q", 5 NaN, 6 +inf, 7 -inf, 8 true, 9 false, 10 nil/other.
+local LUA_RUN_PIECE = { "%d", "%.6g", "%.17g", "%q", "0", "math.huge", "-math.huge", "true", "false", "nil" }
+local LUA_RUN_MAX = 12 -- elements per run; keeps the base-16 shape key exact
+local LUA_RUN_FMT, LUA_RUN_FMT_N = {}, 0
+local lua_run_args, lua_run_kinds = {}, {}
+local table_unpack = table.unpack
+
+local function lua_run_format(key, kinds, count)
+  local fmt = LUA_RUN_FMT[key]
+  if not fmt then
+    local pieces = {}
+    for k = 1, count do
+      pieces[k] = LUA_RUN_PIECE[kinds[k]]
+    end
+    fmt = table.concat(pieces, ",")
+    if LUA_RUN_FMT_N < 1024 then
+      LUA_RUN_FMT[key] = fmt
+      LUA_RUN_FMT_N = LUA_RUN_FMT_N + 1
+    end
+  end
+  return fmt
+end
+
+-- Same run idea for map entries with identifier keys: "k1=%.6g,k2=%q".
+-- Shape key digits (base 1024) are key_id * 16 + kind; at most 5 entries per run.
+local LUA_MAP_RUN_MAX = 5
+local LUA_MAP_RUN_FMT, LUA_MAP_RUN_FMT_N = {}, 0
+
+local function lua_map_run_format(key, kinds, count)
+  local fmt = LUA_MAP_RUN_FMT[key]
+  if not fmt then
+    local pieces = {}
+    for k = 1, count do
+      local d = kinds[k]
+      pieces[k] = LUA_KEY_ID_PREFIX[d // 16] .. LUA_RUN_PIECE[d % 16]
+    end
+    fmt = table.concat(pieces, ",")
+    if LUA_MAP_RUN_FMT_N < 1024 then
+      LUA_MAP_RUN_FMT[key] = fmt
+      LUA_MAP_RUN_FMT_N = LUA_MAP_RUN_FMT_N + 1
+    end
+  end
+  return fmt
+end
+
+-- Kind code (see LUA_RUN_PIECE) of a non-table value.
+local function lua_scalar_code(v)
+  local t = type(v)
+  if t == "number" then
+    if v ~= v then
+      return 5
+    elseif v == M_HUGE then
+      return 6
+    elseif v == -M_HUGE then
+      return 7
+    elseif v % 1 == 0 and (v < 0 and -v or v) < 9007199254740992 then
+      return 1
+    elseif (v < 0 and -v or v) < 1000000 then
+      return 2
+    end
+    return 3
+  elseif t == "string" then
+    return 4
+  elseif t == "boolean" then
+    return v and 8 or 9
+  end
+  return 10
+end
+
+-- Appends val's literal to out after index n; returns the new last index.
+local function lua_serialize_into(val, out, n)
+  local tv = type(val)
+  if tv == "number" then
+    n = n + 1
+    out[n] = lua_number_literal(val)
   elseif tv == "string" then
-    out[#out + 1] = string.format("%q", val)
+    n = n + 1
+    out[n] = str_format("%q", val)
   elseif tv == "table" then
-    out[#out + 1] = "{"
+    n = n + 1
+    out[n] = "{"
     if lua_is_array(val) then
-      for i = 1, #val do
-        if i > 1 then out[#out + 1] = "," end
-        serialize_lua_value(val[i], out)
+      local len = #val
+      local i = 1
+      while i <= len do
+        if i > 1 then
+          n = n + 1
+          out[n] = ","
+        end
+        local v = val[i]
+        if type(v) == "table" then
+          n = lua_serialize_into(v, out, n)
+          i = i + 1
+        else
+          local args, kinds = lua_run_args, lua_run_kinds
+          local key, count, na = 0, 0, 0
+          repeat
+            local code
+            local t = type(v)
+            if t == "number" then
+              if v ~= v then
+                code = 5
+              elseif v == M_HUGE then
+                code = 6
+              elseif v == -M_HUGE then
+                code = 7
+              elseif v % 1 == 0 and (v < 0 and -v or v) < 9007199254740992 then
+                code = 1
+              elseif (v < 0 and -v or v) < 1000000 then
+                code = 2
+              else
+                code = 3
+              end
+            elseif t == "string" then
+              code = 4
+            elseif t == "boolean" then
+              code = v and 8 or 9
+            else
+              code = 10
+            end
+            if code <= 4 then
+              na = na + 1
+              args[na] = v
+            end
+            count = count + 1
+            kinds[count] = code
+            key = key * 16 + code
+            i = i + 1
+            v = val[i]
+          until i > len or count >= LUA_RUN_MAX or type(v) == "table"
+          n = n + 1
+          out[n] = str_format(lua_run_format(key, kinds, count), table_unpack(args, 1, na))
+        end
       end
     else
       local first = true
+      local args, kinds = lua_run_args, lua_run_kinds
+      local key, count, na = 0, 0, 0
       for k, v in pairs(val) do
-        if not first then out[#out + 1] = "," end
-        first = false
-        if type(k) == "string" and k:match("^[%a_][%w_]*$") then
-          out[#out + 1] = k
-          out[#out + 1] = "="
+        local prefix = type(k) == "string" and lua_key_prefix(k)
+        local id = prefix and type(v) ~= "table" and LUA_KEY_ID[k]
+        if id then
+          if count == 0 and not first then
+            n = n + 1
+            out[n] = ","
+          end
+          first = false
+          local code = lua_scalar_code(v)
+          if code <= 4 then
+            na = na + 1
+            args[na] = v
+          end
+          count = count + 1
+          kinds[count] = id * 16 + code
+          key = key * 1024 + id * 16 + code
+          if count >= LUA_MAP_RUN_MAX then
+            n = n + 1
+            out[n] = str_format(lua_map_run_format(key, kinds, count), table_unpack(args, 1, na))
+            key, count, na = 0, 0, 0
+          end
         else
-          out[#out + 1] = "["
-          serialize_lua_value(k, out)
-          out[#out + 1] = "]="
+          if count > 0 then
+            n = n + 1
+            out[n] = str_format(lua_map_run_format(key, kinds, count), table_unpack(args, 1, na))
+            key, count, na = 0, 0, 0
+          end
+          if first then
+            first = false
+          else
+            n = n + 1
+            out[n] = ","
+          end
+          if prefix then
+            n = n + 1
+            out[n] = prefix
+          else
+            n = n + 1
+            out[n] = "["
+            n = lua_serialize_into(k, out, n)
+            n = n + 1
+            out[n] = "]="
+          end
+          n = lua_serialize_into(v, out, n)
         end
-        serialize_lua_value(v, out)
+      end
+      if count > 0 then
+        n = n + 1
+        out[n] = str_format(lua_map_run_format(key, kinds, count), table_unpack(args, 1, na))
       end
     end
-    out[#out + 1] = "}"
+    n = n + 1
+    out[n] = "}"
+  elseif tv == "boolean" then
+    n = n + 1
+    out[n] = val and "true" or "false"
   else
-    out[#out + 1] = "nil"
+    n = n + 1
+    out[n] = "nil"
   end
+  return n
+end
+
+function serialize_lua_value(val, out)
+  lua_serialize_into(val, out, #out)
 end
 
 function encode_lua_cache(payload)
   local out = {"return "}
-  serialize_lua_value(payload, out)
-  out[#out + 1] = "\n"
-  return table.concat(out)
+  local n = lua_serialize_into(payload, out, 1)
+  out[n + 1] = "\n"
+  return table.concat(out, "", 1, n + 1)
 end
 
 -- Compact on-disk sample cache (v2).
@@ -399,18 +680,32 @@ SampleCacheCodec = {
   PT_NAME = { [0] = "unknown", [1] = "oneshot", [2] = "loop" },
 }
 
+-- 10 ^ places for the precisions the codec uses (same expression, computed once).
+local SCC_POW10 = { [2] = 10 ^ 2, [5] = 10 ^ 5 }
+
 function SampleCacheCodec.round(n, places)
   if type(n) ~= "number" or n ~= n then
     return nil
   end
-  if n == math.huge or n == -math.huge then
+  if n == M_HUGE or n == -M_HUGE then
     return nil
   end
-  local f = 10 ^ (places or 5)
-  return math.floor(n * f + (n >= 0 and 0.5 or -0.5)) / f
+  local p = places or 5
+  local f = SCC_POW10[p] or 10 ^ p
+  return m_floor(n * f + (n >= 0 and 0.5 or -0.5)) / f
 end
 
 function SampleCacheCodec.split_dir_name(path)
+  if type(path) == "string" and path ~= "" and str_byte(path, -1) ~= 47
+      and not str_find(path, "\\", 1, true) then
+    -- Already normalized (no backslash, no trailing slash): split at the last
+    -- slash in one match; same results as the two matches below.
+    local dir, name = str_match(path, "^(.*)/([^/]*)$")
+    if dir then
+      return dir, name
+    end
+    return "", path
+  end
   path = normalize_path(path or "")
   if path == "" then
     return "", ""
@@ -454,58 +749,67 @@ function SampleCacheCodec.compact_sample(sample, intern_dir, intern_tag)
   if type(sample) ~= "table" then
     return nil
   end
-  local path = sample.path or SampleCacheCodec.join_dir_name(sample.folder, sample.name)
-  local dir, name = SampleCacheCodec.split_dir_name(path)
+  local codec = SampleCacheCodec
+  local round = codec.round
+  local path = sample.path or codec.join_dir_name(sample.folder, sample.name)
+  local dir, name = codec.split_dir_name(path)
   if name == "" then
     return nil
   end
   local tag_idxs = {}
-  if type(sample.tags) == "table" then
-    for i = 1, #sample.tags do
-      local tag = sample.tags[i]
+  local tags = sample.tags
+  if type(tags) == "table" then
+    local nt = 0
+    for i = 1, #tags do
+      local tag = tags[i]
       if tag and tag ~= "" then
-        tag_idxs[#tag_idxs + 1] = intern_tag(tag)
+        nt = nt + 1
+        tag_idxs[nt] = intern_tag(tag)
       end
     end
   end
   local pt = false
-  if sample.playback_type ~= nil then
-    pt = SampleCacheCodec.PT[sample.playback_type] or 0
+  local playback_type = sample.playback_type
+  if playback_type ~= nil then
+    pt = codec.PT[playback_type] or 0
   end
   local extra
-  if sample.sample_type ~= nil or sample.snap_offset ~= nil
-      or sample.start_pos ~= nil or sample.gain ~= nil
-      or sample.brightness ~= nil or sample.sub_weight ~= nil
-      or sample.mtime ~= nil or sample.file_id_size ~= nil then
+  local sample_type, snap_offset, start_pos, gain = sample.sample_type, sample.snap_offset, sample.start_pos, sample.gain
+  local brightness, sub_weight, mtime, file_id_size = sample.brightness, sample.sub_weight, sample.mtime, sample.file_id_size
+  if sample_type ~= nil or snap_offset ~= nil
+      or start_pos ~= nil or gain ~= nil
+      or brightness ~= nil or sub_weight ~= nil
+      or mtime ~= nil or file_id_size ~= nil then
     extra = {}
-    if sample.sample_type ~= nil then extra.st = sample.sample_type end
-    if type(sample.snap_offset) == "number" then extra.so = SampleCacheCodec.round(sample.snap_offset, 5) end
-    if type(sample.start_pos) == "number" then extra.sp = SampleCacheCodec.round(sample.start_pos, 5) end
-    if type(sample.gain) == "number" then extra.g = SampleCacheCodec.round(sample.gain, 5) end
-    if type(sample.brightness) == "number" then extra.br = SampleCacheCodec.round(sample.brightness, 2) end
-    if type(sample.sub_weight) == "number" then extra.sw = SampleCacheCodec.round(sample.sub_weight, 5) end
-    if sample.mtime ~= nil and tostring(sample.mtime) ~= "" then
-      extra.mt = tostring(sample.mtime)
+    if sample_type ~= nil then extra.st = sample_type end
+    if type(snap_offset) == "number" then extra.so = round(snap_offset, 5) end
+    if type(start_pos) == "number" then extra.sp = round(start_pos, 5) end
+    if type(gain) == "number" then extra.g = round(gain, 5) end
+    if type(brightness) == "number" then extra.br = round(brightness, 2) end
+    if type(sub_weight) == "number" then extra.sw = round(sub_weight, 5) end
+    if mtime ~= nil and tostring(mtime) ~= "" then
+      extra.mt = tostring(mtime)
     end
-    if type(sample.file_id_size) == "number" then
-      extra.fs = math.floor(sample.file_id_size + 0.5)
+    if type(file_id_size) == "number" then
+      extra.fs = m_floor(file_id_size + 0.5)
     end
   end
+  local bps = sample.bps
   local row = {
     intern_dir(dir),
     name,
     tag_idxs,
-    SampleCacheCodec.round(sample.x or 0.5, 5) or 0.5,
-    SampleCacheCodec.round(sample.y or 0.5, 5) or 0.5,
-    SampleCacheCodec.round(sample.duration, 5) or false,
-    SampleCacheCodec.round(sample.effective_duration, 5) or false,
+    round(sample.x or 0.5, 5) or 0.5,
+    round(sample.y or 0.5, 5) or 0.5,
+    round(sample.duration, 5) or false,
+    round(sample.effective_duration, 5) or false,
     sample.channels or false,
-    SampleCacheCodec.round(sample.rms_energy, 5) or false,
-    SampleCacheCodec.round(sample.dominant_freq, 2) or false,
+    round(sample.rms_energy, 5) or false,
+    round(sample.dominant_freq, 2) or false,
     pt,
-    (type(sample.bps) == "number" and math.floor(sample.bps + 0.5)) or false,
-    SampleCacheCodec.round(sample.onset, 5) or false,
-    SampleCacheCodec.round(sample.transient_end, 5) or false,
+    (type(bps) == "number" and m_floor(bps + 0.5)) or false,
+    round(sample.onset, 5) or false,
+    round(sample.transient_end, 5) or false,
     extra or false,
   }
   while #row > 6 and row[#row] == false do
@@ -718,28 +1022,112 @@ function SampleCacheCodec.extract_json_array(content, key)
   return content:sub(start, i - 1)
 end
 
-function SampleCacheCodec.encode_row_json(row)
-  local parts = {}
-  for i = 1, #row do
-    local v = row[i]
-    local tv = type(v)
-    if tv == "number" then
-      if v == math.floor(v) and math.abs(v) < 1e15 then
-        parts[i] = string.format("%d", v)
-      else
-        parts[i] = string.format("%.5f", v):gsub("(%..-)0+$", "%1"):gsub("%.$", "")
-      end
-    elseif tv == "string" then
-      parts[i] = json_encode_string(v)
-    elseif tv == "boolean" then
-      parts[i] = v and "true" or "false"
-    elseif tv == "table" then
-      parts[i] = json_encode(v)
-    else
-      parts[i] = "false"
+-- Rows are mostly numbers; runs of numbers/booleans are written with one
+-- string.format call, then trailing zeros are trimmed in one pass. Per element
+-- this gives the same text as formatting it alone: integers "%d"; other numbers
+-- "%.5f" minus trailing zeros after the point (and a bare point).
+-- Kinds: 1 "%d", 2 "%.5f", 3 true, 4 false (also nil/other values).
+local JSON_RUN_PIECE = { "%d", "%.5f", "true", "false" }
+local JSON_RUN_MAX = 12 -- elements per run; keeps the base-8 shape key exact
+local JSON_RUN_FMT, JSON_RUN_FMT_N = {}, 0
+local json_run_args, json_run_kinds = {}, {}
+
+local function json_run_format(key, kinds, count, last)
+  local fmt = JSON_RUN_FMT[key]
+  if not fmt then
+    local pieces = {}
+    for k = 1, count do
+      pieces[k] = JSON_RUN_PIECE[kinds[k]]
+    end
+    -- The run also carries what follows it: "," before the next element, or the row's "]".
+    fmt = table.concat(pieces, ",") .. (last and "]" or ",")
+    if JSON_RUN_FMT_N < 1024 then
+      JSON_RUN_FMT[key] = fmt
+      JSON_RUN_FMT_N = JSON_RUN_FMT_N + 1
     end
   end
-  return "[" .. table.concat(parts, ",") .. "]"
+  return fmt
+end
+
+-- Appends row's JSON array to buf after index n; returns the new last index.
+function SampleCacheCodec.encode_row_json_into(row, buf, n)
+  n = n + 1
+  buf[n] = "["
+  local len = #row
+  local closed = false
+  local i = 1
+  while i <= len do
+    local v = row[i]
+    local tv = type(v)
+    if tv == "table" or tv == "string" then
+      n = n + 1
+      if tv == "table" then
+        buf[n] = json_encode(v)
+      elseif str_find(v, '[%z\1-\31"\\]') then
+        buf[n] = json_encode_string(v)
+      else
+        buf[n] = '"'
+        buf[n + 1] = v
+        buf[n + 2] = '"'
+        n = n + 2
+      end
+      if i < len then
+        n = n + 1
+        buf[n] = ","
+      end
+      i = i + 1
+    else
+      local args, kinds = json_run_args, json_run_kinds
+      local key, count, na, trim = 0, 0, 0, false
+      repeat
+        local code
+        if tv == "number" then
+          if v % 1 == 0 and (v < 0 and -v or v) < 1e15 then
+            code = 1
+          else
+            code = 2
+            trim = true
+          end
+          na = na + 1
+          args[na] = v
+        elseif tv == "boolean" then
+          code = v and 3 or 4
+        else
+          code = 4
+        end
+        count = count + 1
+        kinds[count] = code
+        key = key * 8 + code
+        i = i + 1
+        v = row[i]
+        tv = type(v)
+      until i > len or count >= JSON_RUN_MAX or tv == "table" or tv == "string"
+      local last = i > len
+      key = key * 2 + (last and 1 or 0)
+      local s = str_format(json_run_format(key, kinds, count, last), table_unpack(args, 1, na))
+      if trim then
+        local c
+        s, c = str_gsub(s, "(%.%d-)0+([,%]])", "%1%2")
+        if c > 0 then
+          s = str_gsub(s, "%.([,%]])", "%1")
+        end
+      end
+      n = n + 1
+      buf[n] = s
+      closed = last
+    end
+  end
+  if not closed then
+    n = n + 1
+    buf[n] = "]"
+  end
+  return n
+end
+
+function SampleCacheCodec.encode_row_json(row)
+  local buf = {}
+  local n = SampleCacheCodec.encode_row_json_into(row, buf, 0)
+  return table.concat(buf, "", 1, n)
 end
 
 -- Fast path for SampleMapData.json: decode each sample object individually instead of

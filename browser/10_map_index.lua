@@ -105,11 +105,13 @@ end
 
 function build_map_spatial(filtered)
   local spatial = {}
+  local res = MAP_GRID_RES
+  local floor, max, min = math.floor, math.max, math.min
   for i = 1, #filtered do
     local s = filtered[i]
-    local cell_x = math.max(0, math.min(MAP_GRID_RES - 1, math.floor((s.x or 0.5) * MAP_GRID_RES)))
-    local cell_y = math.max(0, math.min(MAP_GRID_RES - 1, math.floor((s.y or 0.5) * MAP_GRID_RES)))
-    local key = map_spatial_cell_key(cell_x, cell_y)
+    local cell_x = max(0, min(res - 1, floor((s.x or 0.5) * res)))
+    local cell_y = max(0, min(res - 1, floor((s.y or 0.5) * res)))
+    local key = cell_y * res + cell_x -- map_spatial_cell_key
     local bucket = spatial[key]
     if not bucket then
       bucket = {}
@@ -122,15 +124,16 @@ end
 
 function map_duration_bounds(filtered)
   local duration_min, duration_max = nil, nil
+  local map_duration, min, max = sample_map_duration, math.min, math.max
   for i = 1, #filtered do
-    local map_dur = sample_map_duration(filtered[i])
+    local map_dur = map_duration(filtered[i])
     if map_dur > 0 then
       if not duration_min then
         duration_min = map_dur
         duration_max = map_dur
       else
-        duration_min = math.min(duration_min, map_dur)
-        duration_max = math.max(duration_max, map_dur)
+        duration_min = min(duration_min, map_dur)
+        duration_max = max(duration_max, map_dur)
       end
     end
   end
@@ -142,16 +145,36 @@ function rebuild_map_base_cache()
   local filtered_set = {}
   local needle = (state.filter ~= "" and string.lower(state.filter)) or ""
   local samples = state.samples or {}
+  -- With no folder filter, sample_passes_filters(s, needle, true) is just the
+  -- text match; with nothing missing, sample_scan_folder_unavailable is false.
+  local no_folder_filter = #folder_filter_list() == 0
+  local missing_volumes, missing_folders = state.missing_volumes, state.missing_scan_folders
+  local none_missing = type(missing_volumes) == "table" and type(missing_folders) == "table"
+    and next(missing_volumes) == nil and next(missing_folders) == nil
+  local n = 0
   for i = 1, #samples do
     local s = samples[i]
     -- skip_tags: base cache ignores active tag filters
-    if type(s) == "table" and s.x and sample_passes_filters(s, needle, true) then
-      if not s._render_color then
-        s._render_color = get_sample_dot_color(s)
+    if type(s) == "table" and s.x then
+      local pass
+      if no_folder_filter then
+        pass = needle == "" or sample_matches_filter_text(s, needle)
+      else
+        pass = sample_passes_filters(s, needle, true)
       end
-      s._folder_unavailable = sample_scan_folder_unavailable(s)
-      filtered[#filtered + 1] = s
-      filtered_set[s] = true
+      if pass then
+        if not s._render_color then
+          s._render_color = get_sample_dot_color(s)
+        end
+        if none_missing then
+          s._folder_unavailable = false
+        else
+          s._folder_unavailable = sample_scan_folder_unavailable(s)
+        end
+        n = n + 1
+        filtered[n] = s
+        filtered_set[s] = true
+      end
     end
   end
 
@@ -288,14 +311,85 @@ function get_viewport_norm_bounds(padded_x0, padded_y0, padded_width, padded_hei
   return x_min, x_max, y_min, y_max
 end
 
-function collect_viewport_samples(spatial, x_min, x_max, y_min, y_max)
-  local seen = {}
-  local out = {}
-  local cx0 = math.max(0, math.floor(x_min * MAP_GRID_RES) - 1)
-  local cx1 = math.min(MAP_GRID_RES - 1, math.floor(x_max * MAP_GRID_RES) + 1)
-  local cy0 = math.max(0, math.floor(y_min * MAP_GRID_RES) - 1)
-  local cy1 = math.min(MAP_GRID_RES - 1, math.floor(y_max * MAP_GRID_RES) + 1)
+-- Spatial indexes in which no path appears twice. Then nothing can be skipped
+-- as already seen, so collect_viewport_samples can drop its seen-set (a
+-- library-sized table per frame while panning). Indexes are never modified
+-- after build_map_spatial and sample paths are fixed once loaded, so the
+-- answer holds for the index's lifetime. Weak keys: forgotten with the index.
+map_spatial_unique_paths = setmetatable({}, { __mode = "k" })
 
+function map_spatial_paths_unique(spatial)
+  local known = map_spatial_unique_paths[spatial]
+  if known ~= nil then
+    return known
+  end
+  local seen = {}
+  local unique = true
+  for _, bucket in pairs(spatial) do
+    for _, s in ipairs(bucket) do
+      local path = s.path
+      if path then
+        if seen[path] then
+          unique = false
+          break
+        end
+        seen[path] = true
+      end
+    end
+    if not unique then
+      break
+    end
+  end
+  map_spatial_unique_paths[spatial] = unique
+  return unique
+end
+
+function collect_viewport_samples(spatial, x_min, x_max, y_min, y_max)
+  local out = {}
+  local res = MAP_GRID_RES
+  local cx0 = math.max(0, math.floor(x_min * res) - 1)
+  local cx1 = math.min(res - 1, math.floor(x_max * res) + 1)
+  local cy0 = math.max(0, math.floor(y_min * res) - 1)
+  local cy1 = math.min(res - 1, math.floor(y_max * res) + 1)
+
+  if map_spatial_paths_unique(spatial) then
+    -- Same output as the scan below. A bucket's samples satisfy
+    -- cell <= x * res < cell + 1, except the outer rows and columns, which
+    -- also hold clamped out-of-range positions; so for an inner cell whose
+    -- whole span is inside the bounds (with a margin for rounding) every
+    -- sample passes the bounds test and only the path test remains.
+    local n = 0
+    local eps = 1e-9
+    for cy = cy0, cy1 do
+      local row_in = cy > 0 and cy < res - 1
+        and y_min <= cy / res - eps and y_max >= (cy + 1) / res + eps
+      for cx = cx0, cx1 do
+        local bucket = spatial[cy * res + cx]
+        if bucket then
+          if row_in and cx > 0 and cx < res - 1
+              and x_min <= cx / res - eps and x_max >= (cx + 1) / res + eps then
+            for _, s in ipairs(bucket) do
+              if s.path then
+                n = n + 1
+                out[n] = s
+              end
+            end
+          else
+            for _, s in ipairs(bucket) do
+              local sx, sy = s.x or 0.5, s.y or 0.5
+              if s.path and sx >= x_min and sx <= x_max and sy >= y_min and sy <= y_max then
+                n = n + 1
+                out[n] = s
+              end
+            end
+          end
+        end
+      end
+    end
+    return out
+  end
+
+  local seen = {}
   for cy = cy0, cy1 do
     for cx = cx0, cx1 do
       local bucket = spatial[map_spatial_cell_key(cx, cy)]
@@ -404,11 +498,21 @@ MAP_UNAVAILABLE_DOT_COLOR = build_color_rrgbbaa(136, 136, 136, 90)
 -- Entries are rebuilt every frame while panning/zooming. Reuse the previous
 -- entry tables (only render_map_samples reads them, within the same frame) so
 -- a pan does not allocate one table per visible dot per frame.
-function map_build_draw_entries(draw_list, padded_width, padded_height, padded_center_x, padded_center_y, zoom, reuse)
+-- With `arrays` (the map cache), the same pass also fills flat copies of the
+-- screen positions and colours (draw_px / draw_py / draw_col) for the dot loop
+-- and hover search: array reads are cheaper than field reads per dot.
+function map_build_draw_entries(draw_list, padded_width, padded_height, padded_center_x, padded_center_y, zoom, reuse, arrays)
   local half_w = padded_width * 0.5
   local half_h = padded_height * 0.5
   local entries = reuse or {}
   local n = #draw_list
+  local pxs, pys, cols
+  if arrays then
+    pxs = arrays.draw_px or {}
+    pys = arrays.draw_py or {}
+    cols = arrays.draw_col or {}
+  end
+  local unavailable_color = MAP_UNAVAILABLE_DOT_COLOR
   for i = 1, n do
     local s = draw_list[i]
     local px = padded_center_x + ((s.x or 0.5) * padded_width - half_w) * zoom
@@ -418,14 +522,33 @@ function map_build_draw_entries(draw_list, padded_width, padded_height, padded_c
       e = {}
       entries[i] = e
     end
+    local unavailable = s._folder_unavailable
+    local color = unavailable and unavailable_color or (s._render_color or get_sample_dot_color(s))
     e.s = s
     e.px = px
     e.py = py
-    e.color = s._folder_unavailable and MAP_UNAVAILABLE_DOT_COLOR or (s._render_color or get_sample_dot_color(s))
-    e.unavailable = s._folder_unavailable and true or false
+    e.color = color
+    e.unavailable = unavailable and true or false
+    if pxs then
+      pxs[i] = px
+      pys[i] = py
+      cols[i] = color
+    end
   end
   for i = #entries, n + 1, -1 do
     entries[i] = nil
+  end
+  if arrays then
+    for i = #pxs, n + 1, -1 do
+      pxs[i] = nil
+      pys[i] = nil
+      cols[i] = nil
+    end
+    arrays.draw_px = pxs
+    arrays.draw_py = pys
+    arrays.draw_col = cols
+    arrays.draw_arrays_for = entries
+    arrays.draw_arrays_n = n
   end
   return entries
 end
@@ -458,13 +581,20 @@ function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_heig
     hover_list, max_dots, playing_path, x_min, x_max, y_min, y_max, prefer_set
   )
 
-  -- One set for every membership check below (was a linear scan of draw_list
-  -- per assigned sample); appended samples are added so order is unchanged.
+  -- One path -> draw index map for every membership check below (was a
+  -- linear scan of draw_list per assigned sample); appended samples are added
+  -- so order is unchanged. It also lets render_map_samples find the playing
+  -- and highlighted dots without testing every dot. dup marks a list in which
+  -- two entries share a path (the map then holds only the last one).
   local path_set = {}
+  local dup = false
   for i = 1, #draw_list do
     local p = draw_list[i].path
     if p then
-      path_set[p] = true
+      if path_set[p] then
+        dup = true
+      end
+      path_set[p] = i
     end
   end
 
@@ -472,7 +602,7 @@ function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_heig
     local playing = samples_by_path[playing_path]
     if playing and playing.x then
       draw_list[#draw_list + 1] = playing
-      path_set[playing_path] = true
+      path_set[playing_path] = #draw_list
     end
   end
 
@@ -484,7 +614,7 @@ function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_heig
           and sample.x >= x_min and sample.x <= x_max
           and sample.y >= y_min and sample.y <= y_max then
         draw_list[#draw_list + 1] = sample
-        path_set[path] = true
+        path_set[path] = #draw_list
       end
     end
   end
@@ -493,9 +623,11 @@ function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_heig
   map_cache.hover_list = hover_list
   map_cache.draw_list = draw_list
   map_cache.draw_path_set = path_set
+  map_cache.draw_index_by_path = path_set
+  map_cache.draw_dup_paths = dup
   map_cache.draw_entries = map_build_draw_entries(
     draw_list, padded_width, padded_height, padded_center_x, padded_center_y, zoom,
-    map_cache.entry_pool
+    map_cache.entry_pool, map_cache
   )
   map_cache.entry_pool = map_cache.draw_entries
   map_cache.entries_gen = (map_cache.entries_gen or 0) + 1
