@@ -21,6 +21,7 @@ slider9:overlap=0<0,1,1{Off,On}>Overlap
 slider10:root=36<0,127,1>Root note
 slider11:loaded=0<0,6,1>Loaded layers
 slider12:proj_key=0<0,999999,1>Project key
+slider13:trig_note=-1<-1,127,1>Trigger note (-1 = root)
 
 filename:0,SampleMapPlayerData/placeholder.txt
 
@@ -36,7 +37,7 @@ ext_noinit = 1;
 
 MAX_LAYERS = 6;
 MAX_VOICES = 8;
-MAX_ENV = 32;
+MAX_ENV = 64;
 MAX_SEC = 8;
 MAX_SR = 192000;
 READ_CHUNK = 32768;
@@ -65,10 +66,11 @@ V_KILL = 130;
 V_END = 140;
 V_WAIT = 150;
 
-// Envelope tables (40 slots each, MAX_ENV <= 40).
-E_T = 200;
-E_AMP = 240;
-E_CURVE = 280;
+// Envelope tables (64 slots each, MAX_ENV <= 64), placed after the
+// pending layer params so they don't overlap them.
+E_T = 400;
+E_AMP = 464;
+E_CURVE = 528;
 
 // Pending layer params from the last parsed config (8 slots each).
 P_START = 320;
@@ -700,7 +702,9 @@ last_srate = srate;
 );
 trigger != last_trigger ? (
   last_trigger = trigger;
-  start_voice(root, vel);
+  // The script sets trig_note to the played MIDI note (so a note range plays
+  // at its pitch) or -1 for UI hits, which play at the root.
+  trig_note >= 0 ? start_voice(trig_note|0, vel) : start_voice(root, vel);
 );
 
 @block

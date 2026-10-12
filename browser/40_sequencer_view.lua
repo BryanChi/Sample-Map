@@ -330,8 +330,10 @@ function render_sequencer_map()
       end
       local _, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after = seq_collect_region_random_entries(reg)
       local chips_x0 = link_fits and (rx0 + SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD + 8) or rx0
-      local random_labels = seq_region_random_label_layout(chips_x0, rx1, y0, region_lane_h, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after)
-      local name_right = rx1 - 6
+      local fill_fits = seq_fill_region_icon_fits(rx0, rx1)
+      local chips_x1 = fill_fits and (select(1, seq_fill_region_icon_rect(rx1, y0, region_lane_h)) - 2) or rx1
+      local random_labels = seq_region_random_label_layout(chips_x0, chips_x1, y0, region_lane_h, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after)
+      local name_right = fill_fits and (chips_x1 - 4) or (rx1 - 6)
       if #random_labels > 0 then
         name_right = random_labels[1].x0 - 4
       end
@@ -351,6 +353,9 @@ function render_sequencer_map()
         r.ImGui_DrawList_AddText(dl, label_x, y0 + 5, selected and 0xFFFFFFFF or 0xFFFFFF96, label)
       end
       seq_draw_region_random_labels(dl, random_labels, mx, my)
+      if fill_fits then
+        seq_fill_draw_region_icon(dl, rx1, y0, region_lane_h, mx, my, reg)
+      end
       if region_clipped then
         r.ImGui_DrawList_PopClipRect(dl)
       end
@@ -421,12 +426,21 @@ function render_sequencer_map()
         local swap = drag.swap_region_id and get_seq_region_by_id(drag.swap_region_id)
         local orig_start = drag.orig_start_qn or (reg.start_qn or 0.0)
         if swap then
-          local swap_start = swap.start_qn or 0.0
-          local swap_len = get_seq_region_length_qn(swap)
-          local drag_len = get_seq_region_length_qn({ start_qn = swap_start, length_bars = reg.length_bars })
-          seq_draw_region_ghost(dl, swap_start, swap_start + drag_len, y0, region_lane_h, timeline_x0, timeline_w, qn_to_x,
+          -- Same layout the swap applies on release (regions in between
+          -- shift when the lengths differ).
+          local starts = seq_region_swap_layout(reg, swap) or {}
+          for _, other in ipairs(state.seq_regions or {}) do
+            local new_start = starts[other.id]
+            if new_start and other.id ~= reg.id and other.id ~= swap.id then
+              seq_draw_region_ghost(dl, new_start, new_start + get_seq_region_length_qn(other), y0, region_lane_h,
+                timeline_x0, timeline_w, qn_to_x, seq_region_pool_color(other.pool_id, 50), seq_region_pool_color(other.pool_id, 160), nil)
+            end
+          end
+          local reg_new = starts[reg.id] or (swap.start_qn or 0.0)
+          local swap_new = starts[swap.id] or orig_start
+          seq_draw_region_ghost(dl, reg_new, reg_new + get_seq_region_length_qn(reg), y0, region_lane_h, timeline_x0, timeline_w, qn_to_x,
             seq_region_pool_color(reg.pool_id, 110), 0xFFE599FF, (reg.name or "Region") .. "  ·  swap")
-          seq_draw_region_ghost(dl, orig_start, orig_start + swap_len, y0, region_lane_h, timeline_x0, timeline_w, qn_to_x,
+          seq_draw_region_ghost(dl, swap_new, swap_new + get_seq_region_length_qn(swap), y0, region_lane_h, timeline_x0, timeline_w, qn_to_x,
             seq_region_pool_color(swap.pool_id, 80), seq_region_pool_color(swap.pool_id, 210), (swap.name or "Region") .. "  ·  swap")
         elseif drag.preview_start_qn then
           local ghost_start = drag.preview_start_qn
@@ -467,7 +481,14 @@ function render_sequencer_map()
 
   if hovered and not state.seq_region_drag and mx >= timeline_x0 and mx <= timeline_x0 + timeline_w and my >= y0 and my <= y0 + region_lane_h then
     local hover_hit = seq_hit_test_region_at(mx, my, y0, region_lane_h, timeline_x0, timeline_w, view_start_qn, qn_span, qn_to_x)
-    if hover_hit and hover_hit.part == "link" then
+    if hover_hit and hover_hit.part == "fill" then
+      if r.ImGui_SetMouseCursor and r.ImGui_MouseCursor_Hand then
+        r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_Hand())
+      end
+      if r.ImGui_SetTooltip then
+        r.ImGui_SetTooltip(ctx, "Click: design drum fills for this region")
+      end
+    elseif hover_hit and hover_hit.part == "link" then
       if r.ImGui_SetMouseCursor and r.ImGui_MouseCursor_Hand then
         r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_Hand())
       end
@@ -528,14 +549,26 @@ function render_sequencer_map()
           r.ImGui_SetTooltip(ctx, "Shift+click to split region")
         end
       end
-    elseif hover_hit and hover_hit.region and seq_region_is_linked(hover_hit.region) then
+    elseif hover_hit and hover_hit.region and (hover_hit.part == "left_edge" or hover_hit.part == "right_edge") then
+      if r.ImGui_SetMouseCursor and r.ImGui_MouseCursor_ResizeEW then
+        r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_ResizeEW())
+      end
       if r.ImGui_SetTooltip then
-        local names = seq_linked_region_names(hover_hit.region)
-        if #names > 0 then
-          r.ImGui_SetTooltip(ctx, "Linked with " .. table.concat(names, ", "))
-        else
-          r.ImGui_SetTooltip(ctx, "Linked region")
+        r.ImGui_SetTooltip(ctx, "Drag to resize region\nShift+click to insert a region here")
+      end
+    elseif hover_hit and hover_hit.region then
+      if r.ImGui_SetTooltip then
+        local tip = "Drag to move · Ctrl+drag for a linked copy · Shift+click to split\n"
+          .. "Double-click to rename · Alt+click or Delete to delete"
+        if seq_region_is_linked(hover_hit.region) then
+          local names = seq_linked_region_names(hover_hit.region)
+          if #names > 0 then
+            tip = "Linked with " .. table.concat(names, ", ") .. "\n" .. tip
+          else
+            tip = "Linked region\n" .. tip
+          end
         end
+        r.ImGui_SetTooltip(ctx, tip)
       end
     elseif not hover_hit then
       local hover_qn = seq_snap_qn_for_region_drag(seq_x_to_qn(mx, timeline_x0, timeline_w, view_start_qn, qn_span), step_qn)
@@ -557,6 +590,9 @@ function render_sequencer_map()
 
   if left_clicked and not hovered then
     state.seq_random_popup_pending = nil
+  end
+  if r.ImGui_IsMouseClicked(ctx, 0) then
+    state.seq_region_key_target = nil
   end
 
   if hovered and left_clicked and mx >= timeline_x0 and mx <= timeline_x0 + timeline_w and not over_random_flyout then
@@ -587,8 +623,14 @@ function render_sequencer_map()
         region = hit.region
       else
         state.seq_random_popup_pending = nil
+        -- Delete removes the region last clicked in this lane (see
+        -- handle_seq_razor_keys); any other click disarms it.
+        state.seq_region_key_target = (hit and hit.region and not is_alt_down()) and hit.region.id or nil
         if hit then
-          if hit.part == "link" then
+          if hit.part == "fill" then
+          seq_fill_open_for_region(hit.region)
+          region = hit.region
+        elseif hit.part == "link" then
           local label = begin_seq_undo("Unlink sequencer region")
           seq_unpool_region(hit.region)
           end_seq_undo(label)
@@ -643,9 +685,12 @@ function render_sequencer_map()
           }
         elseif hit.part == "body" then
           if r.ImGui_IsMouseDoubleClicked(ctx, 0) then
+            -- Double-click renames (the toolbar chip shows the field);
+            -- clicking the toolbar chip zooms to the region.
             state.seq_region_drag = nil
-            state.selected_seq_region_id = hit.region.id
-            seq_zoom_to_region(hit.region)
+            state.seq_region_key_target = nil
+            seq_select_region(hit.region)
+            seq_begin_region_rename(hit.region)
             region = hit.region
           else
             seq_select_region(hit.region)
@@ -756,6 +801,12 @@ function render_sequencer_map()
   end
   body_y1 = body_y0 + map_body_h
 
+  -- "Fill" chip on the razor area (drawn last frame) opens the fill designer.
+  if left_clicked and seq_fill_razor_chip_hit(mx, my) then
+    seq_fill_open_for_razor()
+    left_clicked = false
+  end
+
   local hover_on_razor, razor_hover_track_id, razor_hover_qn = seq_compute_razor_hover(
     mx, my, visual_rows, body_y0, body_y1, timeline_x0, timeline_w, view_start_qn, qn_span
   )
@@ -807,6 +858,8 @@ function render_sequencer_map()
   seq_clear_stutter_badge_hits()
   local row_positions = {}
   local cursor_y = body_y0
+  -- Row drawing only reads notes: memoize next-trigger lookups until it ends.
+  seq_trigger_memo = {}
   for row_idx, row in ipairs(visual_rows) do
     local row_y0 = cursor_y
     local row_y1 = row_y0 + row.h
@@ -1033,6 +1086,7 @@ function render_sequencer_map()
     end
   end
 
+  seq_trigger_memo = nil
   render_seq_vary_filter_input()
 
   local slot_id_to_idx = {}
@@ -1072,6 +1126,7 @@ function render_sequencer_map()
       r.ImGui_DrawList_AddLine(dl, rx1, body_y0, rx1, body_y1, edge, (selected or link_hl) and 2.0 or 1.0)
     end
   end
+  seq_fill_draw_spot_markers(dl, qn_to_x, timeline_x0, timeline_x1, body_y0, body_y1)
 
   if not seq_lod_skip_cell_grid then
     for col = vis_col0, vis_col1 + 1, seq_grid_stride do
@@ -1327,6 +1382,18 @@ function render_sequencer_map()
   if hovered_slot and hovered_qn ~= nil and hovered_row and not state.seq_region_drag
       and not over_lane_random_controls and not over_lane_mix_controls
       and not state.seq_over_lane_resize and not state.seq_track_reorder_drag and not seq_razor_blocks_grid_edit() then
+    -- A click on a note lane inside another region selects that region and
+    -- edits there in the same click.
+    if hovered_row.row.type == "note" and left_clicked and mx >= timeline_x0
+        and not (hovered_qn >= region.start_qn and hovered_qn < region.start_qn + get_seq_region_length_qn(region)) then
+      local hover_reg = seq_region_at_qn(hovered_qn)
+      if hover_reg and hover_reg.id ~= region.id then
+        seq_select_region(hover_reg)
+        region = hover_reg
+        selected_region_id = region.id
+        pattern = get_seq_pattern(region.pattern_id, true)
+      end
+    end
     local step_idx = math.floor(((hovered_qn - region.start_qn) / step_qn) + 1e-9)
     local in_region = hovered_qn >= region.start_qn and hovered_qn < region.start_qn + get_seq_region_length_qn(region)
     local step_key = tostring(step_idx)
@@ -1454,12 +1521,7 @@ function render_sequencer_map()
       r.ImGui_DrawList_AddLine(dl, cell_x0, body_y0, cell_x0, body_y1, line_col, 2.0)
       r.ImGui_DrawList_AddTriangleFilled(dl, cell_x0 - 5, body_y0, cell_x0 + 5, body_y0, cell_x0, body_y0 + 7, line_col)
     elseif hovered_row.row.type == "note" and not in_region and left_clicked and mx >= timeline_x0 then
-      local hover_reg = seq_region_at_qn(hovered_qn)
-      if hover_reg then
-        seq_select_region(hover_reg)
-        region = hover_reg
-        selected_region_id = region.id
-      end
+      -- Gap between regions: nothing to edit.
     elseif hovered_row.row.type == "note" and in_region and left_clicked and mx >= timeline_x0
         and is_alt_down() and not edit_def
         and not (r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0)) then
@@ -1495,7 +1557,9 @@ function render_sequencer_map()
       local src_key = tostring(picked.key)
       local src_note = get_seq_note(src_region, hovered_slot.id, src_key) or picked.note
       local src_abs = seq_note_abs_qn(src_region, src_note, src_key, step_qn)
-      local baked = seq_clone_note_keeping_sample(src_note, src_region, hovered_slot.id, src_key, hovered_slot)
+      -- Plain clone: the note keeps following the track sample unless it
+      -- was already pinned (an existing frozen sample stays in the copy).
+      local baked = clone_table_deep(src_note)
       local label = begin_seq_undo("Copy sequencer note")
       state.selected_seq_note = { region_id = src_region.id, track_id = hovered_slot.id, step_key = src_key }
       state.seq_note_drag = {
@@ -1524,7 +1588,9 @@ function render_sequencer_map()
       local src_key = tostring(picked.key)
       local src_note = get_seq_note(src_region, hovered_slot.id, src_key) or picked.note
       local src_abs = seq_note_abs_qn(src_region, src_note, src_key, step_qn)
-      local baked = seq_clone_note_keeping_sample(src_note, src_region, hovered_slot.id, src_key, hovered_slot)
+      -- Plain clone: the note keeps following the track sample unless it
+      -- was already pinned (an existing frozen sample stays in the copy).
+      local baked = clone_table_deep(src_note)
       local label = begin_seq_undo("Move sequencer note")
       state.selected_seq_note = { region_id = src_region.id, track_id = hovered_slot.id, step_key = src_key }
       state.seq_note_drag = {
@@ -1578,7 +1644,7 @@ function render_sequencer_map()
           state.seq_note_drag.dirty = true
         end
       else
-        log("Sequencer slot has no assigned sample")
+        sm_notify("This track has no sample yet: drop a sample on it first", "warn")
       end
     elseif hovered_row.row.type == "note" and in_region and left_clicked and mx >= timeline_x0
         and not edit_def and not is_alt_down()
@@ -2026,6 +2092,7 @@ function render_sequencer_map()
   end
 
   draw_seq_razors(dl, row_positions, timeline_x0, timeline_x1, view_start_qn, qn_span, step_qn, razor_hover_track_id, razor_hover_qn)
+  seq_fill_draw_razor_chip(dl, row_positions, timeline_x0, timeline_x1, view_start_qn, qn_span, mx, my)
 
   local mouse_released = r.ImGui_IsMouseReleased(ctx, 0) or r.ImGui_IsMouseReleased(ctx, 1)
   if r.ImGui_IsMouseReleased(ctx, 1) and state.seq_razor_drag and state.seq_razor_drag.mode ~= "move" then
@@ -2250,6 +2317,9 @@ function render_sequencer_map()
         if random_edit_region and random_edit_pattern then
           local random_settings = get_seq_track_settings(random_edit_pattern, row.slot.id, true)
           if random_settings then
+            -- Values before this frame's edit, so the undo snapshot taken
+            -- on the first change still holds the old value.
+            local pre_edit = (not seq_undo_is_open()) and clone_table_deep(random_settings) or nil
             local changed, active_key, overlay_text, panel_x1, reseeded = seq_render_lane_random_controls(dl, row_pos, row.slot.id, random_settings, random_focus_effective, timeline_x0, header_y1, body_viewport_y1)
             if active_key then
               random_focus_next = active_key
@@ -2262,7 +2332,18 @@ function render_sequencer_map()
               seq_queue_random_sync(random_edit_region.pattern_id, row.slot.id)
             end
             if changed then
-              begin_seq_undo("Edit sequencer random")
+              if pre_edit and not seq_undo_is_open() then
+                local post_edit = clone_table_deep(random_settings)
+                local function fill(dst, src)
+                  for k in pairs(dst) do dst[k] = nil end
+                  for k, v in pairs(src) do dst[k] = v end
+                end
+                fill(random_settings, pre_edit)
+                begin_seq_undo("Edit sequencer random")
+                fill(random_settings, post_edit)
+              else
+                begin_seq_undo("Edit sequencer random")
+              end
               seq_undo_commit_on_release = true
             end
           end
@@ -2398,6 +2479,7 @@ function render_sequencer_map()
   end
 
   render_seq_pattern_popup(region)
+  render_seq_fill_window()
   r.ImGui_Dummy(ctx, 0, 0)
   r.ImGui_EndChild(ctx)
   seq_stem_import_accept_file_drop()

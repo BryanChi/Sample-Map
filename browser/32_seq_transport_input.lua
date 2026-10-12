@@ -372,24 +372,65 @@ function seq_evict_overlaps_keeping(keep_regions)
   return changed
 end
 
+-- New start positions for swapping regions a and b: the later one moves to
+-- where the earlier one started, the earlier one ends where the later one
+-- ended, and regions in between shift by the length difference. Nothing
+-- outside the two regions moves. Returns { [region_id] = new_start_qn }.
+function seq_region_swap_layout(a, b)
+  if not a or not b or a.id == b.id then
+    return nil
+  end
+  local first, second = a, b
+  if (b.start_qn or 0.0) < (a.start_qn or 0.0) then
+    first, second = b, a
+  end
+  local f_start = first.start_qn or 0.0
+  local f_len = get_seq_region_length_qn(first)
+  local s_start = second.start_qn or 0.0
+  local s_end = s_start + get_seq_region_length_qn(second)
+  local delta = (s_end - s_start) - f_len
+  local starts = {
+    [second.id] = f_start,
+    [first.id] = math.max(0.0, s_end - f_len),
+  }
+  if math.abs(delta) > 0.000001 then
+    for _, reg in ipairs(state.seq_regions or {}) do
+      local rs = reg.start_qn or 0.0
+      if reg.id ~= first.id and reg.id ~= second.id
+          and rs >= f_start + f_len - 0.000001 and rs < s_start - 0.000001 then
+        starts[reg.id] = rs + delta
+      end
+    end
+  end
+  return starts
+end
+
 function seq_swap_region_positions(a, b)
   if not a or not b or a.id == b.id then
     return false
   end
-  local a_start = a.start_qn or 0.0
-  local b_start = b.start_qn or 0.0
-  if math.abs(a_start - b_start) < 0.000001 then
+  if math.abs((a.start_qn or 0.0) - (b.start_qn or 0.0)) < 0.000001 then
     return false
   end
-  remove_seq_rendered_items(a)
-  remove_seq_rendered_items(b)
-  a.start_qn = b_start
-  b.start_qn = a_start
+  local starts = seq_region_swap_layout(a, b)
+  local moved = {}
+  for _, reg in ipairs(state.seq_regions or {}) do
+    local new_start = starts[reg.id]
+    if new_start and math.abs(new_start - (reg.start_qn or 0.0)) > 0.000001 then
+      remove_seq_rendered_items(reg)
+      moved[#moved + 1] = { reg = reg, start_qn = new_start }
+    end
+  end
+  for _, m in ipairs(moved) do
+    m.reg.start_qn = m.start_qn
+  end
   sort_seq_regions()
+  -- Safety net only (e.g. a time-signature change inside the span).
   seq_pack_overlapping_regions()
   save_config()
-  sync_seq_region(a)
-  sync_seq_region(b)
+  for _, m in ipairs(moved) do
+    sync_seq_region(m.reg)
+  end
   return true
 end
 
@@ -684,13 +725,20 @@ function seq_hit_test_region_at(mx, my, y0, region_lane_h, timeline_x0, timeline
           return { region = reg, part = "link" }
         end
       end
+      local vis_x1 = rx1
+      if seq_fill_region_icon_fits(rx0, rx1) then
+        local fx0, fy0, fx1, fy1 = seq_fill_region_icon_rect(rx1, y0, region_lane_h)
+        if mx >= fx0 and mx <= fx1 and my >= fy0 and my <= fy1 then
+          return { region = reg, part = "fill" }
+        end
+        vis_x1 = fx0 - 2
+      end
       local _, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after = seq_collect_region_random_entries(reg)
-      if has_prob or has_human or has_vel or has_vary or has_stut or has_ghost then
+      if has_prob or has_human or has_vel or has_vary or has_stut or has_ghost or has_grace or has_after then
         local vis_x0 = rx0
         if seq_region_is_linked(reg) and (rx1 - rx0) >= (SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD * 2 + 8) then
           vis_x0 = rx0 + SEQ_LINK_ICON_SIZE + SEQ_LINK_HIT_PAD + 8
         end
-        local vis_x1 = rx1
         local labels = seq_region_random_label_layout(vis_x0, vis_x1, y0, region_lane_h, has_prob, has_human, has_vel, has_vary, has_stut, has_ghost, has_grace, has_after)
         for _, lab in ipairs(labels) do
           if mx >= lab.x0 and mx <= lab.x1 and my >= lab.y0 and my <= lab.y1 then
@@ -859,6 +907,18 @@ end
 
 function seq_update_link_hover(mx, my, y0, region_lane_h, timeline_x0, timeline_w, start_qn, qn_span, qn_to_x)
   state.seq_link_hover_region_id = nil
+  -- The hover only matters for a linked region. With none linked (the usual
+  -- case) skip the window/arrange hit tests, which query REAPER every frame.
+  local any_linked = false
+  for _, reg in ipairs(state.seq_regions or {}) do
+    if seq_region_is_linked(reg) then
+      any_linked = true
+      break
+    end
+  end
+  if not any_linked then
+    return nil
+  end
   local hover_reg = nil
   if seq_mouse_over_script_ui() and my >= y0 and my <= y0 + region_lane_h and mx >= timeline_x0 and mx <= timeline_x0 + timeline_w then
     local hit = seq_hit_test_region_at(mx, my, y0, region_lane_h, timeline_x0, timeline_w, start_qn, qn_span, qn_to_x)
@@ -875,6 +935,26 @@ function seq_update_link_hover(mx, my, y0, region_lane_h, timeline_x0, timeline_
 end
 
 function seq_region_at_qn(qn)
+  -- Lock/filter spans ask per column per track while rows draw; regions are
+  -- not edited during the row loop, so memoize there (see seq_trigger_memo).
+  local memo = seq_trigger_memo
+  if memo and qn == qn then
+    local by_qn = memo.region_at
+    if not by_qn then
+      by_qn = {}
+      memo.region_at = by_qn
+    end
+    local hit = by_qn[qn]
+    if hit == nil then
+      hit = seq_region_at_qn_scan(qn) or false
+      by_qn[qn] = hit
+    end
+    return hit or nil
+  end
+  return seq_region_at_qn_scan(qn)
+end
+
+function seq_region_at_qn_scan(qn)
   for _, reg in ipairs(state.seq_regions) do
     local reg_start = reg.start_qn or 0.0
     local reg_end = reg_start + get_seq_region_length_qn(reg)
@@ -892,18 +972,23 @@ function seq_build_visible_active_cells(start_qn, end_qn, step_qn, step_count)
   end
   for _, reg in ipairs(state.seq_regions) do
     local reg_start = reg.start_qn or 0.0
-    local reg_end = reg_start + get_seq_region_length_qn(reg)
+    local reg_len = get_seq_region_length_qn(reg)
+    local reg_end = reg_start + reg_len
     if reg_end >= start_qn and reg_start <= end_qn then
       local pattern = get_seq_pattern(reg.pattern_id, false)
       if pattern then
+        -- Same tests as seq_note_in_region / seq_note_visual_abs_qn, with the
+        -- region length and absolute position computed once per note.
+        local in_lo = reg_start - 1e-9
+        local in_hi = reg_start + reg_len - 1e-9
         for _, slot in ipairs(state.seq_tracks) do
           local notes = get_track_note_table(pattern, slot.id, false)
           if notes then
             for step_key, note in pairs(notes) do
-              if type(note) == "table" and note.enabled ~= false
-                 and seq_note_in_region(reg, note, step_key, step_qn) then
-                local abs_qn = seq_note_abs_qn(reg, note, step_key, step_qn)
-                local vis_qn = seq_note_visual_abs_qn(reg, note, step_key, step_qn)
+              local abs_qn = (type(note) == "table" and note.enabled ~= false)
+                and seq_note_abs_qn(reg, note, step_key, step_qn) or nil
+              if abs_qn and abs_qn >= in_lo and abs_qn < in_hi then
+                local vis_qn = abs_qn + (note.offset_qn or 0.0)
                 -- Hit-testing occupies the start cell (and stutter span). Head
                 -- and sustain that draw into later cells stay empty so those
                 -- grids can be painted.

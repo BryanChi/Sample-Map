@@ -157,6 +157,15 @@ function find_seq_parent_folder_track()
     end
     state.seq_folder_guid = nil
   end
+  -- Projects without the folder hit this scan a couple of times per frame.
+  -- Remember the miss until the project (or anything in it) changes: track
+  -- adds, renames and folder-depth edits all bump the state change count.
+  local proj = r.EnumProjects and r.EnumProjects(-1) or nil
+  local change = r.GetProjectStateChangeCount and r.GetProjectStateChangeCount(0) or nil
+  local miss = seq_parent_folder_miss
+  if miss and change and miss.proj == proj and miss.change == change then
+    return nil
+  end
   local n = r.CountTracks(0)
   for i = 0, n - 1 do
     local tr = r.GetTrack(0, i)
@@ -164,11 +173,13 @@ function find_seq_parent_folder_track()
     if name == SEQ_TRACK_FOLDER_NAME then
       local depth = r.GetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH") or 0
       if depth >= 1 then
+        seq_parent_folder_miss = nil
         state.seq_folder_guid = r.GetTrackGUID(tr)
         return tr
       end
     end
   end
+  seq_parent_folder_miss = change and { proj = proj, change = change } or nil
   return nil
 end
 
@@ -182,6 +193,7 @@ function create_seq_parent_folder_track()
   r.GetSetMediaTrackInfo_String(tr, "P_NAME", SEQ_TRACK_FOLDER_NAME, true)
   r.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH", 0)
   state.seq_folder_guid = r.GetTrackGUID(tr)
+  seq_parent_folder_miss = nil
   return tr
 end
 
@@ -306,6 +318,89 @@ function seq_ensure_slot_reaper_tracks()
   return changed
 end
 
+-- Track names: a sequencer slot and its REAPER track share one name.
+-- Last names seen per REAPER track GUID ({ reaper, slot }); runtime only.
+seq_track_name_seen = {}
+seq_track_name_seen_change = nil
+
+local function seq_reaper_track_name(tr)
+  local ok, name = r.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
+  return ok and name or ""
+end
+
+local function seq_push_slot_name_to_reaper(slot, tr)
+  r.GetSetMediaTrackInfo_String(tr, "P_NAME", slot.name, true)
+  if seq_mark_self_arrange_write then
+    seq_mark_self_arrange_write(false)
+  end
+  seq_track_name_seen[slot.reaper_track_guid] = { reaper = slot.name, slot = slot.name }
+end
+
+-- Rename a sequencer track and its REAPER track (one undo step).
+function seq_rename_track(slot, new_name)
+  if not slot then
+    return false
+  end
+  local name = seq_trim_text(new_name)
+  if name == "" or name == slot.name then
+    return false
+  end
+  local own = seq_undo_own_begin("Rename sequencer track")
+  slot.name = name
+  local tr = slot.reaper_track_guid and get_track_by_guid(slot.reaper_track_guid)
+  if tr then
+    seq_push_slot_name_to_reaper(slot, tr)
+  end
+  if own then
+    end_seq_undo("Rename sequencer track")
+  end
+  save_config()
+  return true
+end
+
+-- Called every frame the sequencer draws. A name changed on the sequencer
+-- side (undo/redo, imports) is pushed to the REAPER track; a REAPER rename is
+-- pulled into the slot. REAPER is only read when the project changed. A track
+-- seen for the first time is just recorded, never renamed.
+function seq_sync_track_names()
+  local tracks = state.seq_tracks
+  if type(tracks) ~= "table" or #tracks == 0 then
+    return
+  end
+  for _, slot in ipairs(tracks) do
+    local guid = slot.reaper_track_guid
+    local seen = guid and seq_track_name_seen[guid]
+    if seen and type(slot.name) == "string" and slot.name ~= "" and slot.name ~= seen.slot then
+      local tr = get_track_by_guid(guid)
+      if tr then
+        seq_push_slot_name_to_reaper(slot, tr)
+      end
+    end
+  end
+  local count = r.GetProjectStateChangeCount and r.GetProjectStateChangeCount(0)
+  if count == seq_track_name_seen_change then
+    return
+  end
+  seq_track_name_seen_change = count
+  local changed = false
+  for _, slot in ipairs(tracks) do
+    local guid = slot.reaper_track_guid
+    local tr = guid and guid ~= "" and get_track_by_guid(guid)
+    if tr then
+      local rname = seq_reaper_track_name(tr)
+      local seen = seq_track_name_seen[guid]
+      if seen and rname ~= seen.reaper and rname ~= "" and rname ~= slot.name then
+        slot.name = rname
+        changed = true
+      end
+      seq_track_name_seen[guid] = { reaper = rname, slot = slot.name }
+    end
+  end
+  if changed then
+    save_config()
+  end
+end
+
 function create_seq_track_from_popup(track_name, tag_name)
   local own = seq_undo_own_begin("Add sequencer track")
   local slot = create_seq_track_with_name(track_name)
@@ -323,7 +418,7 @@ function create_seq_track_from_popup(track_name, tag_name)
     if sample then
       assign_sample_to_seq_track(slot, sample, false)
     else
-      log("No sample found for tag '" .. chosen_tag .. "'")
+      sm_notify("No sample found for tag '" .. chosen_tag .. "'", "warn")
     end
   end
 

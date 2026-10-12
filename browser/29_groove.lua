@@ -69,6 +69,27 @@ SEQ_GROOVE_BOOM_BAP = {
   0.07, 0.18, 0.00, 0.18,
 }
 
+-- Groove MIDI hit detail for one written hit: the played velocity becomes the
+-- note volume (floor keeps ghost notes audible) and the played micro-timing
+-- (in 16ths) replaces the style's swing offset. detail = { velocities =
+-- {role = {["pos16"] = 1..127}}, offsets = {role = {["pos16"] = -0.5..0.5}} }.
+function seq_apply_role_hit_detail(note, role, pos16, detail)
+  if type(note) ~= "table" or type(detail) ~= "table" then
+    return
+  end
+  local key = tostring(pos16)
+  local vel_map = type(detail.velocities) == "table" and detail.velocities[role]
+  local vel = type(vel_map) == "table" and tonumber(vel_map[key]) or nil
+  if vel and vel > 0 then
+    note.volume = math.max(0.2, math.min(1.0, vel / 127.0))
+  end
+  local off_map = type(detail.offsets) == "table" and detail.offsets[role]
+  local frac = type(off_map) == "table" and tonumber(off_map[key]) or nil
+  if frac then
+    note.offset_qn = math.max(-0.5, math.min(0.5, frac)) * 0.25
+  end
+end
+
 SEQ_GROOVE_PRESETS = {
   off              = { steps = nil },
   swing16_54       = { steps = seq_groove_swing16(0.08) },
@@ -116,8 +137,8 @@ SEQ_GROOVE_ORDER = {
   { key = "laid_back",       label = "Laid Back (behind the beat)", desc = "Everything nudged slightly late for a relaxed pocket." },
   { key = "pushed",          label = "Pushed (ahead of the beat)",  desc = "Everything nudged slightly early for urgency." },
   { header = "Exotic" },
-  { key = "quintuplet",      label = "Quintuplet 3:2 (60%)",        desc = "Angular quintuplet-based swing." },
-  { key = "septuplet",       label = "Septuplet 4:3 (57%)",         desc = "Hip, subtle lopsided septuplet feel." },
+  { key = "quintuplet",      label = "Quintuplet-ratio swing 3:2 (60%)", desc = "1/16 swing with the off 1/16 at 3:2 (a quintuplet ratio). Not true 5-tuplets." },
+  { key = "septuplet",       label = "Septuplet-ratio swing 4:3 (57%)",  desc = "1/16 swing with the off 1/16 at 4:3 (a septuplet ratio). Not true 7-tuplets." },
   { key = "shuffle_triplet", label = "Triplet Shuffle (swung 1/8)", desc = "Full triplet shuffle on the 1/8s." },
   { header = "Human" },
   { key = "human_tight",     label = "Humanize (tight)",            desc = "Small random offsets, hand-played but tight." },
@@ -156,7 +177,11 @@ end
 
 function get_seq_region_groove(region)
   if type(region) == "table" then
-    return normalize_seq_groove(region.groove)
+    -- Inlined normalize_seq_groove: called for every note trigger every frame.
+    local groove_key = region.groove
+    if type(groove_key) == "string" and SEQ_GROOVE_PRESETS[groove_key] ~= nil then
+      return groove_key
+    end
   end
   return "off"
 end
@@ -210,7 +235,8 @@ end
 -- 1/16 slot so the groove lines up with project bars regardless of grid size.
 -- groove_key is the region's feel; omitting it applies no groove.
 function seq_groove_offset_qn(abs_qn, groove_key)
-  local preset = SEQ_GROOVE_PRESETS[normalize_seq_groove(groove_key)]
+  -- Inlined normalize_seq_groove (hot: once per note trigger).
+  local preset = (type(groove_key) == "string" and SEQ_GROOVE_PRESETS[groove_key]) or SEQ_GROOVE_PRESETS["off"]
   if not preset or not preset.steps then
     return 0.0
   end
@@ -267,6 +293,40 @@ function seq_note_trigger_qn(region, step_idx, note, grid_qn)
   return qn
 end
 
+-- While the sequencer draws its rows, note lengths ask for "the next trigger
+-- after this note" once per drawn note (and again per parameter lane), which
+-- scanned every note of the track each time. render_sequencer_map sets this to
+-- {} around the row loop (notes are not edited there) and back to nil after,
+-- so the sorted trigger list per (region, track notes, grid) is built once.
+seq_trigger_memo = nil
+
+function seq_memo_sorted_triggers(memo, region, track_notes, grid_qn)
+  local by_region = memo[region]
+  if not by_region then
+    by_region = {}
+    memo[region] = by_region
+  end
+  local by_grid = by_region[track_notes]
+  if not by_grid then
+    by_grid = {}
+    by_region[track_notes] = by_grid
+  end
+  local gkey = grid_qn or false
+  local list = by_grid[gkey]
+  if list then
+    return list
+  end
+  list = {}
+  for sk, nnote in pairs(track_notes) do
+    if type(nnote) == "table" and nnote.enabled ~= false then
+      list[#list + 1] = seq_note_trigger_qn(region, sk, nnote, grid_qn)
+    end
+  end
+  table.sort(list)
+  by_grid[gkey] = list
+  return list
+end
+
 function seq_next_note_trigger_qn(region, pattern, track_id, step_idx, grid_qn, note)
   if not region then
     return 0.0
@@ -277,6 +337,25 @@ function seq_next_note_trigger_qn(region, pattern, track_id, step_idx, grid_qn, 
   end
 
   local start_qn = seq_note_trigger_qn(region, step_idx, note, grid_qn)
+  local memo = seq_trigger_memo
+  if memo then
+    -- Smallest trigger strictly after start_qn (same threshold as the scan).
+    local list = seq_memo_sorted_triggers(memo, region, track_notes, grid_qn)
+    local threshold = start_qn + 1e-9
+    local lo, hi = 1, #list
+    while lo <= hi do
+      local mid = (lo + hi) // 2
+      if list[mid] > threshold then
+        hi = mid - 1
+      else
+        lo = mid + 1
+      end
+    end
+    if list[lo] then
+      return list[lo]
+    end
+    return (region.start_qn or 0.0) + get_seq_region_length_qn(region)
+  end
   local next_qn = nil
   local next_key = nil
   for sk, nnote in pairs(track_notes) do
@@ -415,18 +494,36 @@ end
 
 -- at_qn (optional): project QN where the sample starts; converts through the
 -- tempo map at that position instead of assuming the tempo at QN 0.
+-- Frame-scoped memo of tempo-mapped sample lengths: length_sec -> at_qn -> qn
+-- (false when the tempo-map path gave no answer). Cleared with the region
+-- length cache at the top of every frame.
+seq_sample_qn_at_cache = {}
+
 function seq_sample_length_qn(path, sample, at_qn)
   local length_sec = seq_sample_source_length_sec(path, sample)
   if not length_sec or length_sec <= 0 then
     return nil
   end
-  if type(at_qn) == "number" and r.TimeMap2_timeToQN then
-    local t0 = qn_to_time(at_qn)
-    if t0 then
-      local end_qn = r.TimeMap2_timeToQN(0, t0 + length_sec)
-      if end_qn and end_qn > at_qn then
-        return end_qn - at_qn
+  if type(at_qn) == "number" and at_qn == at_qn and length_sec == length_sec and r.TimeMap2_timeToQN then
+    local by_at = seq_sample_qn_at_cache[length_sec]
+    if not by_at then
+      by_at = {}
+      seq_sample_qn_at_cache[length_sec] = by_at
+    end
+    local cached = by_at[at_qn]
+    if cached then
+      return cached
+    end
+    if cached == nil then
+      local t0 = qn_to_time(at_qn)
+      if t0 then
+        local end_qn = r.TimeMap2_timeToQN(0, t0 + length_sec)
+        if end_qn and end_qn > at_qn then
+          by_at[at_qn] = end_qn - at_qn
+          return end_qn - at_qn
+        end
       end
+      by_at[at_qn] = false
     end
   end
   local sec_per = seq_sec_per_qn

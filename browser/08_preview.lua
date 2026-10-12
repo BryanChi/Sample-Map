@@ -286,6 +286,21 @@ function history_build_items()
   return items
 end
 
+-- False (with a short on-screen note) when the sample cannot be played:
+-- its drive/scan folder is offline, or the file was moved or deleted.
+function sample_preview_file_ok(sample)
+  if sample_scan_folder_unavailable(sample) then
+    sm_notify("Sample's drive or folder is offline", "warn")
+    return false
+  end
+  local path = tostring(sample.path)
+  if not path:find("^layering%-mix:") and not r.file_exists(path) then
+    sm_notify("File not found: " .. (path:match("([^/\\]+)$") or path) .. " (moved or deleted? Rescan to remove it)", "warn")
+    return false
+  end
+  return true
+end
+
 -- --- History navigation --------------------------------------------------------
 function preview_sample_from_history(sample)
   local start_time = get_sample_start_offset(sample)
@@ -294,7 +309,7 @@ function preview_sample_from_history(sample)
     return
   end
 
-  if sample_scan_folder_unavailable(sample) then
+  if not sample_preview_file_ok(sample) then
     return
   end
 
@@ -357,7 +372,7 @@ function preview_sample(sample, start_time)
     return
   end
 
-  if sample_scan_folder_unavailable(sample) then
+  if not sample_preview_file_ok(sample) then
     return
   end
 
@@ -443,10 +458,17 @@ function seek_preview(time)
   preview_sample(preview_sample_obj, time)
 end
 
-function apply_preview_volume(vol)
+-- defer_save: the knob drag calls this every frame; it saves once on release
+-- (shutdown also saves) instead of rewriting the config file per mouse move.
+function apply_preview_volume(vol, defer_save)
   vol = math.max(0.0, math.min(1.0, vol))
   state.preview_volume = vol
-  save_config()
+  if defer_save then
+    state._preview_volume_save_pending = true
+  else
+    state._preview_volume_save_pending = nil
+    save_config()
+  end
 
   if cf_preview_obj and r.CF_Preview_SetValue then
     r.CF_Preview_SetValue(cf_preview_obj, "D_VOLUME", vol * get_sample_gain(preview_sample_obj))
@@ -475,9 +497,12 @@ function draw_preview_volume_knob(knob_size)
     if dy ~= 0.0 then
       local step = (1.0 / 200.0) * (fine and SEQ_FINE_DRAG_SCALE or 1.0)
       vol = vol + (-dy) * step
-      apply_preview_volume(vol)
+      apply_preview_volume(vol, true)
       vol = state.preview_volume or vol
     end
+  elseif state._preview_volume_save_pending then
+    state._preview_volume_save_pending = nil
+    save_config()
   end
 
   if r.ImGui_IsItemClicked(ctx, 0) and r.ImGui_IsMouseDoubleClicked(ctx, 0) then

@@ -215,8 +215,10 @@ function settings_render_scan_folders()
           explorer_invalidate_cache(new_folder)
           save_config()
           log("Added folder: " .. new_folder)
+          enqueue_scan(new_folder)
+          sm_notify("Added folder; scanning " .. (new_folder:match("([^/]+)$") or new_folder) .. "…")
         else
-          log("Folder already in list: " .. new_folder)
+          sm_notify("Folder is already in the list", "warn")
         end
       end
     end
@@ -246,11 +248,28 @@ function settings_render_scan_folders()
         end
         if settings_show(folder, offline and "offline" or nil, "Remove", "Rescan", "Browse") then
           if draw_ui_button("settings_remove_folder_" .. idx, "Remove", nil, nil, { style = "danger", compact = true }) then
-            table.remove(state.folders, idx)
-            filter_samples_by_folders()
-            refresh_scan_folder_availability()
-            explorer_invalidate_cache()
-            save_config()
+            local in_folder = 0
+            for _, s in ipairs(state.samples) do
+              if s.path and sample_under_scan_folder(s.path, norm_folder) then
+                in_folder = in_folder + 1
+              end
+            end
+            local msg = string.format(
+              "Remove this scan folder?\n\n%s\n\n%d analyzed sample%s from it will be removed from the library (files on disk are not touched).",
+              folder, in_folder, in_folder == 1 and "" or "s"
+            )
+            if r.ShowMessageBox(msg, "Remove folder", 4) == 6 then
+              table.remove(state.folders, idx)
+              local removed = filter_samples_by_folders()
+              refresh_scan_folder_availability()
+              explorer_invalidate_cache()
+              if #state.samples > 0 then
+                layout_samples()
+              end
+              save_config()
+              save_samples()
+              sm_notify(string.format("Removed folder (%d sample%s)", removed or 0, removed == 1 and "" or "s"))
+            end
             break
           end
           r.ImGui_SameLine(ctx)

@@ -212,6 +212,86 @@ function draw_map_play_trace(dl, padded_x0, padded_y0, padded_width, padded_heig
   end
 end
 
+-- Closest available dot within snap_r of the mouse; ties go to the lower entry
+-- index (the first strictly-closer entry wins, as a linear scan would).
+-- Memoized while the mouse and the entry list are unchanged. Once the entry
+-- list has been stable for a frame (not panning/zooming), lookups use a
+-- screen-space bucket grid with snap_r cells, so only the 3x3 cells around the
+-- mouse are tested.
+function map_find_hover_entry(cache, entries, mx, my, snap_r)
+  local gen = cache.entries_gen or 0
+  local memo = cache.hover_memo
+  if memo and memo.gen == gen and memo.mx == mx and memo.my == my and memo.snap_r == snap_r then
+    return memo.result
+  end
+  local snap_r_sq = snap_r * snap_r
+  local best_i, best_d = nil, nil
+  local grid = cache.hover_grid
+  local use_grid = grid and grid.gen == gen and grid.cell == snap_r
+  if not use_grid and cache.hover_last_gen == gen then
+    -- Second frame with the same entries: worth building the grid.
+    grid = { gen = gen, cell = snap_r, buckets = {} }
+    local buckets = grid.buckets
+    local floor = math.floor
+    for i = 1, #entries do
+      local e = entries[i]
+      if not e.unavailable then
+        local key = (floor(e.py / snap_r) + 1048576) * 2097152 + (floor(e.px / snap_r) + 1048576)
+        local b = buckets[key]
+        if b then
+          b[#b + 1] = i
+        else
+          buckets[key] = { i }
+        end
+      end
+    end
+    cache.hover_grid = grid
+    use_grid = true
+  end
+  cache.hover_last_gen = gen
+  if use_grid then
+    local buckets = grid.buckets
+    local gx = math.floor(mx / snap_r)
+    local gy = math.floor(my / snap_r)
+    for cy = gy - 1, gy + 1 do
+      for cx = gx - 1, gx + 1 do
+        local b = buckets[(cy + 1048576) * 2097152 + (cx + 1048576)]
+        if b then
+          for k = 1, #b do
+            local i = b[k]
+            local e = entries[i]
+            local dx = mx - e.px
+            local dy = my - e.py
+            local dist_sq = dx * dx + dy * dy
+            if dist_sq <= snap_r_sq and (not best_d or dist_sq < best_d or (dist_sq == best_d and i < best_i)) then
+              best_i, best_d = i, dist_sq
+            end
+          end
+        end
+      end
+    end
+  else
+    for i = 1, #entries do
+      local e = entries[i]
+      if not e.unavailable then
+        local dx = mx - e.px
+        local dy = my - e.py
+        local dist_sq = dx * dx + dy * dy
+        if dist_sq <= snap_r_sq and (not best_d or dist_sq < best_d) then
+          best_i, best_d = i, dist_sq
+        end
+      end
+    end
+  end
+  local result = nil
+  if best_i then
+    local e = entries[best_i]
+    result = { sample = e.s, px = e.px, py = e.py, dist_sq = best_d, color = e.color }
+  end
+  cache.hover_memo = { gen = gen, mx = mx, my = my, snap_r = snap_r, result = result }
+  return result
+end
+
 function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
   local dot_radius = state.dot_radius or 2.0
   local clicked_sample = nil
@@ -227,9 +307,12 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   end
 
   local max_radius = math.max(dot_radius * 5.0 + dot_radius * 5.0 * 0.3, dot_radius + outline_size)
+  -- render_map computed the filter key this frame; reuse it.
+  local frame_filter_key = state._map_frame_filter_key
+  state._map_frame_filter_key = nil
   local _, _, cache = ensure_map_render_cache(
     padded_x0, padded_y0, padded_width, padded_height,
-    padded_center_x, padded_center_y, max_radius + 8.0
+    padded_center_x, padded_center_y, max_radius + 8.0, frame_filter_key
   )
   local entries = cache.draw_entries or {}
   local playing_path = preview_sample_obj and preview_sample_obj.path or nil
@@ -240,17 +323,26 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   local playing_entry = nil
   local assigned_entries = {}
   local highlight_info = seq_map_highlight_sample_info()
-  for i = 1, #entries do
-    local e = entries[i]
-    local s = e.s
-    local is_playing = playing_path and s.path == playing_path and not e.unavailable
-    local highlighted = highlight_info[s.path]
-    if is_playing then
-      playing_entry = e
-    else
-      r.ImGui_DrawList_AddCircleFilled(dl, e.px, e.py, dot_radius, e.color, segments)
-      if highlighted and not e.unavailable then
-        assigned_entries[#assigned_entries + 1] = { e = e, info = highlighted }
+  local add_circle_filled = r.ImGui_DrawList_AddCircleFilled
+  if not playing_path and next(highlight_info) == nil then
+    -- Common case (nothing playing, no hovered track): plain dot loop.
+    for i = 1, #entries do
+      local e = entries[i]
+      add_circle_filled(dl, e.px, e.py, dot_radius, e.color, segments)
+    end
+  else
+    for i = 1, #entries do
+      local e = entries[i]
+      local s = e.s
+      local is_playing = playing_path and s.path == playing_path and not e.unavailable
+      local highlighted = highlight_info[s.path]
+      if is_playing then
+        playing_entry = e
+      else
+        add_circle_filled(dl, e.px, e.py, dot_radius, e.color, segments)
+        if highlighted and not e.unavailable then
+          assigned_entries[#assigned_entries + 1] = { e = e, info = highlighted }
+        end
       end
     end
   end
@@ -297,18 +389,7 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   if hovered then
     local detect = state.dot_detection_multiplier or 16.0
     local snap_r = math.max(MAP_CLICK_SNAP_MIN, dot_radius * detect)
-    local snap_r_sq = snap_r * snap_r
-    for i = 1, #entries do
-      local e = entries[i]
-      if not e.unavailable then
-        local dx = mx - e.px
-        local dy = my - e.py
-        local dist_sq = dx * dx + dy * dy
-        if dist_sq <= snap_r_sq and (not closest or dist_sq < closest.dist_sq) then
-          closest = { sample = e.s, px = e.px, py = e.py, dist_sq = dist_sq, color = e.color }
-        end
-      end
-    end
+    closest = map_find_hover_entry(cache, entries, mx, my, snap_r)
   end
 
   if closest then
@@ -425,18 +506,27 @@ function scan_session_did_work(session)
 end
 
 function play_scan_complete_sound()
-  local sounds = {
-    "/System/Library/Sounds/Glass.aiff",
-    "/System/Library/Sounds/Hero.aiff",
-    "/System/Library/Sounds/Ping.aiff",
+  if SM_IS_WINDOWS then
+    -- ExecProcess with -1 returns at once and opens no console window.
+    local wav = "C:\\Windows\\Media\\chimes.wav"
+    if r.ExecProcess and r.file_exists(wav) then
+      pcall(r.ExecProcess, 'powershell -NoProfile -WindowStyle Hidden -Command "(New-Object Media.SoundPlayer \'' .. wav .. '\').PlaySync()"', -1)
+    end
+    return
+  end
+  local players = {
+    { "afplay", "/System/Library/Sounds/Glass.aiff" },
+    { "afplay", "/System/Library/Sounds/Hero.aiff" },
+    { "paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga" },
+    { "aplay", "/usr/share/sounds/alsa/Front_Center.wav" },
   }
-  for i = 1, #sounds do
-    if r.file_exists(sounds[i]) then
-      os.execute("afplay " .. shell_escape(sounds[i]) .. " >/dev/null 2>&1 &")
+  for i = 1, #players do
+    local cmd, sound = players[i][1], players[i][2]
+    if r.file_exists(sound) and (cmd == "afplay") == (SM_IS_MAC and true or false) then
+      os.execute(cmd .. " " .. shell_escape(sound) .. " >/dev/null 2>&1 &")
       return
     end
   end
-  os.execute('printf "\\a" >/dev/null 2>&1 &')
 end
 
 function finish_scan_session(still_incomplete)
@@ -548,6 +638,14 @@ function finish_scan_session(still_incomplete)
     end
   end
 
+  for _, row in ipairs(debug_samples) do
+    if tostring(row.why or ""):find("no audio decoder", 1, true) then
+      local hint = "No audio decoder found: install ffmpeg to analyze mp3, flac, ogg and m4a files, then rescan."
+      note = note and (note .. "\n" .. hint) or hint
+      break
+    end
+  end
+
   local error_tooltip = nil
   if #debug_lines > 0 then
     error_tooltip = table.concat(debug_lines, "\n")
@@ -607,10 +705,15 @@ function sample_row_is_unreadable(entry)
   if type(entry) ~= "table" then
     return false
   end
+  -- Only failures that point at the file itself. "no audio decoder found"
+  -- (ffmpeg/sox missing) and "empty analyzer output" (worker trouble) are not
+  -- the file's fault, so they are never offered for deletion.
   local why = tostring(entry.why or "")
+  if why:find("no audio decoder", 1, true) then
+    return false
+  end
   return why:find("could not decode", 1, true) ~= nil
     or why:find("file not found", 1, true) ~= nil
-    or why:find("empty analyzer", 1, true) ~= nil
 end
 
 function scan_complete_unreadable_paths(dlg)
@@ -706,13 +809,11 @@ function draw_scan_complete_sample_menu_items(path, name, why)
     r.ImGui_TextColored(ctx, UI_THEME.text_dim, why)
   end
   r.ImGui_Separator(ctx)
-  if r.ImGui_MenuItem(ctx, "Show in Finder") then
+  if r.ImGui_MenuItem(ctx, SM_REVEAL_LABEL) then
     reveal_path_in_finder(path)
   end
   if r.ImGui_MenuItem(ctx, "Open file") then
-    if path and path ~= "" then
-      os.execute("open " .. shell_escape(path) .. " >/dev/null 2>&1 &")
-    end
+    sm_open_path(path)
   end
   if r.ImGui_MenuItem(ctx, "Preview") then
     local sample = lookup_sample_by_path(path)
@@ -731,7 +832,9 @@ function draw_scan_complete_sample_menu_items(path, name, why)
       r.ImGui_SetClipboardText(ctx, path or "")
     end
   end
-  if path and path ~= "" then
+  -- Deletion is only offered for files the analyzer could not read, which is
+  -- what the confirmation text promises.
+  if path and path ~= "" and sample_row_is_unreadable({ why = why }) then
     r.ImGui_Separator(ctx)
     if r.ImGui_MenuItem(ctx, "Delete this file…") then
       local dlg = state.scan_complete_dialog
@@ -1201,9 +1304,11 @@ function render_map()
   local padded_center_x = padded_x0 + padded_width * 0.5 + state.pan_x
   local padded_center_y = padded_y0 + padded_height * 0.5 + state.pan_y
 
-  if map_cache.filter_key ~= compute_map_filter_key() or not map_cache.spatial then
+  local map_filter_key = compute_map_filter_key()
+  if map_cache.filter_key ~= map_filter_key or not map_cache.spatial then
     rebuild_map_filtered_cache()
   end
+  state._map_frame_filter_key = map_filter_key
 
   draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
 
@@ -1308,7 +1413,7 @@ function shutdown_script(reason)
   end
   ctx = nil
   pcall(seq_destroy_arrange_overlay_ctx)
-  pcall(save_config)
+  pcall(save_config_now)
 end
 
 -- After a UI error left the ImGui stack unbalanced, ReaImGui may invalidate

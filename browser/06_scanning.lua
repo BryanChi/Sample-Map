@@ -53,13 +53,6 @@ function analyzer_data_has_fields(data)
     or data.transient_end ~= nil
 end
 
-function sample_effective_range_incomplete(sample)
-  if not sample or not sample.path then
-    return false
-  end
-  return type(sample.effective_duration) ~= "number" or sample.effective_duration <= 0
-end
-
 -- Drum one-shots only (not loops, FX, or melodic instruments).
 -- Global: main chunk is near Lua's 200-local limit (see header comment).
 DRUM_TRANSIENT_TAGS = {
@@ -92,13 +85,6 @@ function sample_is_drum_oneshot(sample)
     return false
   end
   return has_drum
-end
-
-function sample_playback_type_incomplete(sample)
-  if not sample or not sample.path then
-    return false
-  end
-  return sample.playback_type == nil
 end
 
 function sample_transient_incomplete(sample)
@@ -140,7 +126,7 @@ function enqueue_analyzer_paths(predicate, empty_msg, queued_log)
 
   local pending = #state.analyzer_queue + #state.active_processes
   if pending == 0 then
-    log(empty_msg)
+    sm_notify(empty_msg)
     add_scan_log(queued_log .. ": nothing to analyze")
     return 0
   end
@@ -203,7 +189,7 @@ function enqueue_incomplete_analysis()
 
   local pending = #state.analyzer_queue + #state.active_processes
   if pending == 0 then
-    log("No incomplete samples found")
+    sm_notify("No incomplete samples: everything is analyzed")
     add_scan_log("Incomplete scan: nothing to analyze")
     return 0
   end
@@ -223,12 +209,19 @@ function enqueue_incomplete_analysis()
   return added
 end
 
+-- The per-field Re-analyze items all recompute that data for every sample
+-- they apply to (use them after an analyzer change); "Incomplete Samples"
+-- is the one that only fills in what is missing.
+function sample_has_path(sample)
+  return sample and sample.path and true or false
+end
+
 function enqueue_effective_range_analysis()
   state.analyzer_job_label = "Scanning effective range"
   state.analyzer_mode = nil
   return enqueue_analyzer_paths(
-    sample_effective_range_incomplete,
-    "No samples missing effective range (all have effective_duration)",
+    sample_has_path,
+    "No samples to re-analyze",
     "Effective range scan"
   )
 end
@@ -237,8 +230,10 @@ function enqueue_transient_sustain_analysis()
   state.analyzer_job_label = "Scanning transient/sustain"
   state.analyzer_mode = "transient"
   return enqueue_analyzer_paths(
-    sample_transient_incomplete,
-    "No drum one-shots missing transient/sustain (or none tagged as drums)",
+    function(sample)
+      return sample_has_path(sample) and sample_is_drum_oneshot(sample)
+    end,
+    "No drum one-shots to re-analyze (none tagged as drums)",
     "Transient/sustain scan"
   )
 end
@@ -247,8 +242,8 @@ function enqueue_playback_type_analysis()
   state.analyzer_job_label = "Classifying loop / one-shot"
   state.analyzer_mode = nil
   return enqueue_analyzer_paths(
-    sample_playback_type_incomplete,
-    "No samples missing loop/one-shot classification",
+    sample_has_path,
+    "No samples to re-analyze",
     "Loop/one-shot scan"
   )
 end
@@ -257,10 +252,8 @@ function enqueue_weight_analysis()
   state.analyzer_job_label = "Scanning weight"
   state.analyzer_mode = "weight"
   return enqueue_analyzer_paths(
-    function(sample)
-      return sample and sample.path
-    end,
-    "No samples to scan for weight",
+    sample_has_path,
+    "No samples to re-analyze",
     "Weight scan"
   )
 end
@@ -273,6 +266,7 @@ function sm_scan_enum_file(enum, dir, file)
     return
   end
   local normalized_full_path = normalize_path(dir .. "/" .. file)
+  enum.seen[normalized_full_path] = true
   local existing = samples_by_path[normalized_full_path]
   if not existing then
     existing = samples_by_path[path_index_key(normalized_full_path)]
@@ -390,6 +384,53 @@ function sm_scan_enum_step(max_ms)
   return false
 end
 
+-- Drop library entries whose files are gone, but only under scan folders that
+-- were listed in full just now and are reachable (an unmounted drive or an
+-- offline folder never loses its samples). Each candidate is also checked with
+-- file_exists, so a path the listing spelled differently is never dropped.
+function sm_scan_prune_missing(enum)
+  local roots = {}
+  for _, root in ipairs(enum.roots or {}) do
+    if scan_folder_path_exists(root) then
+      roots[#roots + 1] = root
+    end
+  end
+  if #roots == 0 then
+    return 0
+  end
+  local kept, gone = {}, {}
+  for _, sample in ipairs(state.samples) do
+    local p = sample.path and normalize_path(sample.path)
+    local drop = false
+    if p and p ~= "" and not enum.seen[p] then
+      for i = 1, #roots do
+        if sample_under_scan_folder(p, roots[i]) then
+          drop = not r.file_exists(p)
+          break
+        end
+      end
+    end
+    if drop then
+      gone[#gone + 1] = p
+    else
+      kept[#kept + 1] = sample
+    end
+  end
+  if #gone == 0 then
+    return 0
+  end
+  state.samples = kept
+  rebuild_samples_path_index()
+  rebuild_tag_index()
+  state._pending_layout = true
+  for i = 1, math.min(#gone, 20) do
+    add_scan_log("Removed missing file: " .. gone[i])
+  end
+  add_scan_log(string.format("Removed %d missing file(s) from the library", #gone))
+  sm_notify(string.format("Removed %d missing file%s from the library", #gone, #gone == 1 and "" or "s"))
+  return #gone
+end
+
 function sm_scan_enum_finish()
   local enum = state.scan_enum
   if not enum then
@@ -413,6 +454,8 @@ function sm_scan_enum_finish()
   state.last_save_time = r.time_precise()
   if enum.errors and enum.errors > 0 then
     add_scan_log(string.format("Folder enumeration hit %d error(s)", enum.errors))
+  else
+    sm_scan_prune_missing(enum)
   end
 
   local folder_label = enum.folder_label
@@ -481,6 +524,8 @@ function enqueue_scan(folder_only)
       paths = {},
       queued = {},
       already = {},
+      seen = {},
+      roots = {},
       skipped = 0,
       reanalyze = 0,
       incomplete = 0,
@@ -510,6 +555,7 @@ function enqueue_scan(folder_only)
     local folder = normalize_path(folders_to_scan[i])
     if folder and folder ~= "" then
       enum.stack[#enum.stack + 1] = folder
+      enum.roots[#enum.roots + 1] = folder
     end
   end
 
@@ -596,7 +642,7 @@ function stop_scan()
     #state.scan_queue
   )
   add_scan_log(msg)
-  log(msg)
+  sm_notify(string.format("Scan stopped and saved; %d file(s) left for next time", #state.scan_queue))
 end
 
 
@@ -978,7 +1024,7 @@ function process_scan_slice(max_ms)
     end
     if still_incomplete > 0 then
       add_scan_log(string.format(
-        "Scan finished with %d sample(s) still missing analyzer fields — click Scan for incomplete again",
+        "Scan finished with %d sample(s) still missing analyzer fields — try Library > Re-analyze > Incomplete Samples",
         still_incomplete
       ))
       log(string.format("%d samples still incomplete after analysis", still_incomplete))

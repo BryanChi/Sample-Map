@@ -38,6 +38,72 @@ function sm_error_traceback(err)
 end
 
 -- Log every error; show the first one from each site in the REAPER console.
+-- Short on-screen message for actions that would otherwise do nothing
+-- visibly ("no matching samples", "track has no sample"...). Drawn by
+-- sm_draw_toast at the bottom of the main window; also kept in the log.
+-- kind: "info" (default), "warn" or "error".
+SM_TOAST_SECONDS = 3.2
+
+function sm_notify(msg, kind)
+  if msg == nil or msg == "" then
+    return
+  end
+  msg = tostring(msg)
+  log(msg)
+  local now = (r.time_precise and r.time_precise()) or os.clock()
+  local t = state.sm_toast
+  if t and t.text == msg and (now - (t.t or 0)) < SM_TOAST_SECONDS then
+    -- Same message again: keep it up instead of restarting the fade.
+    t.t = now
+    t.count = (t.count or 1) + 1
+    return
+  end
+  state.sm_toast = { text = msg, kind = kind or "info", t = now, count = 1 }
+end
+
+function sm_draw_toast()
+  local t = state.sm_toast
+  if not t or not ctx then
+    return
+  end
+  local now = r.time_precise()
+  local age = now - (t.t or 0)
+  if age >= SM_TOAST_SECONDS then
+    state.sm_toast = nil
+    return
+  end
+  local rect = state.main_window_rect
+  if not rect or not r.ImGui_GetForegroundDrawList then
+    return
+  end
+  local alpha = 1.0
+  if age > SM_TOAST_SECONDS - 0.6 then
+    alpha = math.max(0, (SM_TOAST_SECONDS - age) / 0.6)
+  end
+  local function fade(col)
+    local a = col & 0xFF
+    return (col & 0xFFFFFF00) | math.floor(a * alpha + 0.5)
+  end
+  local text = t.text
+  if (t.count or 1) > 1 then
+    text = text .. string.format("  (x%d)", t.count)
+  end
+  local tw, th = r.ImGui_CalcTextSize(ctx, text)
+  local pad_x, pad_y = 14, 8
+  local w, h = tw + pad_x * 2, th + pad_y * 2
+  local x0 = rect.x + math.max(8, (rect.w - w) * 0.5)
+  local y0 = rect.y + rect.h - h - 18
+  local dl = r.ImGui_GetForegroundDrawList(ctx)
+  local accent = (t.kind == "error" and UI_THEME.danger)
+    or (t.kind == "warn" and 0xFFB870FF)
+    or UI_THEME.accent
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0 + 2, x0 + w, y0 + h + 2, fade(0x00000080), 7)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, fade(UI_THEME.elevated), 7)
+  r.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h, fade(UI_THEME.border_hvr), 7, 0, 1)
+  r.ImGui_DrawList_AddRectFilled(dl, x0 + 5, y0 + 6, x0 + 8, y0 + h - 6, fade(accent), 1.5)
+  r.ImGui_DrawList_AddText(dl, x0 + pad_x, y0 + pad_y, fade(UI_THEME.text), text)
+end
+
 function sm_report_error(site, err)
   site = tostring(site or "?")
   log("[error] " .. site .. ": " .. tostring(err))
@@ -89,6 +155,44 @@ function shell_escape(str)
   end
   -- POSIX sh: single quotes disable $(), backticks and every other expansion.
   return "'" .. str:gsub("'", "'\\''") .. "'"
+end
+
+SM_IS_MAC = (not SM_IS_WINDOWS) and (((r.GetOS and r.GetOS()) or ""):match("OSX") ~= nil
+  or ((r.GetOS and r.GetOS()) or ""):match("mac") ~= nil)
+-- Menu label for revealing a file in the OS file manager.
+SM_REVEAL_LABEL = SM_IS_WINDOWS and "Show in Explorer" or (SM_IS_MAC and "Show in Finder" or "Show in File Manager")
+
+-- Open a file with its default app. SWS's CF_ShellExecute when present.
+function sm_open_path(path)
+  if not path or path == "" then
+    return
+  end
+  if r.CF_ShellExecute then
+    r.CF_ShellExecute(path)
+  elseif SM_IS_WINDOWS then
+    os.execute('start "" ' .. shell_escape(path))
+  elseif SM_IS_MAC then
+    os.execute("open " .. shell_escape(path) .. " >/dev/null 2>&1 &")
+  else
+    os.execute("xdg-open " .. shell_escape(path) .. " >/dev/null 2>&1 &")
+  end
+end
+
+-- Select a file in Finder / Explorer. SWS's CF_LocateInExplorer when present.
+function sm_reveal_path(path)
+  if not path or path == "" then
+    return
+  end
+  if r.CF_LocateInExplorer then
+    r.CF_LocateInExplorer(path)
+  elseif SM_IS_WINDOWS then
+    os.execute('explorer /select,' .. shell_escape((path:gsub("/", "\\"))))
+  elseif SM_IS_MAC then
+    os.execute("open -R " .. shell_escape(path))
+  else
+    local dir = path:match("^(.*)/[^/]*$") or path
+    os.execute("xdg-open " .. shell_escape(dir) .. " >/dev/null 2>&1 &")
+  end
 end
 
 -- Write `content` to `path` atomically: write path.tmp, keep the previous file as
@@ -183,6 +287,21 @@ function volume_root_from_path(path)
   return nil
 end
 
+function volume_is_mounted_scan(vol_name)
+  local i = 0
+  while true do
+    local name = r.EnumerateSubdirectories("/Volumes", i)
+    if not name then
+      break
+    end
+    if name == vol_name then
+      return true
+    end
+    i = i + 1
+  end
+  return false
+end
+
 function volume_is_mounted(vol_root)
   vol_root = normalize_path(vol_root or "")
   if vol_root == "" then
@@ -191,18 +310,18 @@ function volume_is_mounted(vol_root)
 
   local vol_name = vol_root:match("^/Volumes/(.+)$")
   if vol_name then
-    local i = 0
-    while true do
-      local name = r.EnumerateSubdirectories("/Volumes", i)
-      if not name then
-        break
-      end
-      if name == vol_name then
-        return true
-      end
-      i = i + 1
+    -- refresh_scan_folder_availability asks once per scan folder and once per
+    -- volume; reuse one /Volumes listing for the duration of that refresh.
+    local memo = sm_volume_list_memo
+    if not memo or (r.time_precise() - memo.t) > 0.25 then
+      return volume_is_mounted_scan(vol_name)
     end
-    return false
+    local hit = memo.names[vol_name]
+    if hit == nil then
+      hit = volume_is_mounted_scan(vol_name)
+      memo.names[vol_name] = hit
+    end
+    return hit
   end
 
   -- Windows drive root (e.g. "E:/"): present if we can see any entry or rename succeeds.
@@ -253,6 +372,24 @@ function scan_folder_path_exists(path)
   return false
 end
 
+-- Case-insensitive in-place sort of a list of strings. Same order as sorting
+-- with string.lower(a) < string.lower(b), but lowercases each name once
+-- instead of twice per comparison.
+function sm_sort_ci(list)
+  if #list < 2 then
+    return list
+  end
+  local key = {}
+  for i = 1, #list do
+    local s = list[i]
+    if key[s] == nil then
+      key[s] = string.lower(s)
+    end
+  end
+  table.sort(list, function(a, b) return key[a] < key[b] end)
+  return list
+end
+
 function sample_under_scan_folder(sample_path, folder_path)
   local norm_sample = normalize_path(sample_path or "")
   local norm_folder = normalize_path(folder_path or "")
@@ -294,6 +431,7 @@ function refresh_scan_folder_availability()
   local missing_folders = {}
   local missing_volumes = {}
   local volumes = {}
+  sm_volume_list_memo = { t = r.time_precise(), names = {} }
 
   for _, folder in ipairs(state.folders) do
     local norm_folder = normalize_path(folder)
@@ -312,6 +450,7 @@ function refresh_scan_folder_availability()
     end
   end
 
+  sm_volume_list_memo = nil
   local prev_sig = availability_signature(state.missing_scan_folders, state.missing_volumes)
   local new_sig = availability_signature(missing_folders, missing_volumes)
   state.missing_scan_folders = missing_folders
@@ -355,6 +494,11 @@ end
 
 function sample_scan_folder_unavailable(sample)
   if not sample or not sample.path then
+    return false
+  end
+  -- Only a missing volume or scan folder can make a sample unavailable; skip
+  -- the per-folder path normalization when nothing is missing (the usual case).
+  if next(state.missing_volumes) == nil and next(state.missing_scan_folders) == nil then
     return false
   end
   local vol = volume_root_from_path(sample.path)

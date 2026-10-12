@@ -378,7 +378,9 @@ end
 
 function seq_draw_env_sparkline(dl, x, y, w, h, env, active, hovered)
   -- Compact non-interactive preview; click handling lives in the lane controls.
-  env = seq_normalize_track_env(env)
+  if not seq_env_is_normalized(env) then
+    env = seq_normalize_track_env(env)
+  end
   local bg = UI_THEME.bg_panel
   local edge = UI_THEME.border
   local edge_w = 1.0
@@ -414,18 +416,101 @@ function seq_draw_env_sparkline(dl, x, y, w, h, env, active, hovered)
       if a > max_y then max_y = a end
     end
   end
-  local prev_x, prev_y = nil, nil
   local steps = math.max(12, math.floor(w / 2))
+  local xs, ys = seq_env_sparkline_points(env, x, y, w, h, t1, max_y, steps)
+  if r.ImGui_DrawList_AddPolyline and r.new_array then
+    -- One polyline instead of `steps` AddLine calls; the array is reused while
+    -- the envelope and rect are unchanged (the usual case between frames).
+    local cache = seq_env_sparkline_arrays
+    local key = xs
+    local arr = cache[key]
+    if not arr then
+      arr = r.new_array(#xs * 2)
+      if arr then
+        for i = 1, #xs do
+          arr[i * 2 - 1] = xs[i]
+          arr[i * 2] = ys[i]
+        end
+        cache[key] = arr
+      end
+    end
+    if arr then
+      r.ImGui_DrawList_AddPolyline(dl, arr, line, 0, 1.4)
+      return
+    end
+  end
+  for i = 2, #xs do
+    r.ImGui_DrawList_AddLine(dl, xs[i - 1], ys[i - 1], xs[i], ys[i], line, 1.4)
+  end
+end
+
+-- Sparkline geometry cache: last result per (x, y, w, h, steps) rect, reused
+-- while the normalized envelope points match. Weak keys let stale point lists
+-- (and their reaper.array) be collected.
+seq_env_sparkline_geom = {}
+seq_env_sparkline_arrays = setmetatable({}, { __mode = "k" })
+
+function seq_env_points_equal(a, b)
+  if #a ~= #b then
+    return false
+  end
+  for i = 1, #a do
+    local p, q = a[i], b[i]
+    if p.t ~= q.t or p.amp ~= q.amp or p.curve ~= q.curve then
+      return false
+    end
+  end
+  return true
+end
+
+-- Samples the envelope at steps+1 evenly spaced times in [0, t1], walking the
+-- segments once (times only increase) instead of searching per sample. Values
+-- match seq_env_levels_at_norm exactly.
+function seq_env_sparkline_points(env, x, y, w, h, t1, max_y, steps)
+  local pts = env.points
+  local rect_key = string.format("%.2f|%.2f|%.2f|%.2f|%d", x, y, w, h, steps)
+  local hit = seq_env_sparkline_geom[rect_key]
+  if hit and hit.t1 == t1 and hit.max_y == max_y and seq_env_points_equal(hit.pts, pts) then
+    return hit.xs, hit.ys
+  end
+  local xs, ys = {}, {}
+  local n = #pts
+  local seg = 2
   for i = 0, steps do
     local t = (i / steps) * t1
-    local amp = seq_env_levels_at_norm(env, t)
-    local px = x + 2 + (i / steps) * (w - 4)
-    local py = y + h - 2 - (amp / max_y) * (h - 4)
-    if prev_x then
-      r.ImGui_DrawList_AddLine(dl, prev_x, prev_y, px, py, line, 1.4)
+    local amp
+    if n == 0 then
+      amp = 1.0
+    elseif t <= (pts[1].t or 0.0) then
+      amp = pts[1].amp or 1.0
+    elseif t >= (pts[n].t or 0.0) then
+      amp = pts[n].amp or 1.0
+    else
+      while seg < n and t > (pts[seg].t or 0.0) do
+        seg = seg + 1
+      end
+      local a, b = pts[seg - 1], pts[seg]
+      local span = math.max(0.0000001, (b.t or 0.0) - (a.t or 0.0))
+      local u = (t - (a.t or 0.0)) / span
+      amp = seq_env_seg_eval(a.amp or 1.0, b.amp or 1.0, u, a.curve)
     end
-    prev_x, prev_y = px, py
+    xs[i + 1] = x + 2 + (i / steps) * (w - 4)
+    ys[i + 1] = y + h - 2 - (amp / max_y) * (h - 4)
   end
+  -- Bound the cache: one entry per sparkline on screen, reset if rects churn.
+  seq_env_sparkline_geom_count = (seq_env_sparkline_geom_count or 0) + (hit and 0 or 1)
+  if seq_env_sparkline_geom_count > 256 then
+    seq_env_sparkline_geom = {}
+    seq_env_sparkline_geom_count = 1
+  end
+  -- Copy the points: env may be the live slot.env, which is edited in place.
+  local snap = {}
+  for i = 1, n do
+    local p = pts[i]
+    snap[i] = { t = p.t, amp = p.amp, curve = p.curve }
+  end
+  seq_env_sparkline_geom[rect_key] = { pts = snap, t1 = t1, max_y = max_y, xs = xs, ys = ys }
+  return xs, ys
 end
 
 function seq_draw_env_trans_sustain_markers(dl, sample, time_to_x, iy0, iy1)

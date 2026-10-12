@@ -235,7 +235,7 @@ end
 
 function get_seq_note_anim(region_id, track_id, step_key, now)
   local anims = state.seq_note_anims
-  if not anims then
+  if not anims or next(anims) == nil then
     return nil
   end
   local key = seq_note_anim_cell_key(region_id, track_id, step_key)
@@ -491,7 +491,7 @@ function toggle_seq_note(region, slot, step_key, qn_offset, force_mode, opts)
   elseif not existing and force_mode ~= "erase" then
     local note = make_default_seq_note(slot, step_key, qn_offset)
     if not note then
-      log("Sequencer slot has no assigned sample")
+      sm_notify("This track has no sample yet. Drop or pick one first.", "warn")
       return false
     end
     local pattern = get_seq_pattern(region.pattern_id, true)

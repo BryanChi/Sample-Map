@@ -120,6 +120,8 @@ function reset_seq_project_state()
   state.seq_skip_ingest = false
   state.seq_self_write_count = nil
   state.seq_arrange_fp = nil
+  state.seq_arrange_fp_meta = nil
+  state.seq_fp_touched = nil
   state.seq_fp_refresh_at = nil
   state.seq_self_write_at = nil
   state.seq_ingest_rescan = nil
@@ -279,9 +281,16 @@ function save_seq_project_state(proj)
   end
   local ok, serialized = pcall(json_encode, build_seq_project_state_payload())
   if ok and type(serialized) == "string" then
+    -- If the change count is where ingest last left it, whatever this write
+    -- moves it by is ours, not an arrange edit to scan for.
+    local count_before = r.GetProjectStateChangeCount and proj == get_current_project()
+      and r.GetProjectStateChangeCount(0)
     local set_ok = pcall(r.SetProjExtState, proj, PROJ_EXT_SECTION, PROJ_EXT_KEY_SEQUENCER, serialized)
     if set_ok then
       state.seq_last_ext_state = serialized
+      if count_before and state.seq_last_proj_change == count_before then
+        state.seq_last_proj_change = r.GetProjectStateChangeCount(0)
+      end
     end
   end
 end
@@ -337,6 +346,12 @@ function sync_project_state_if_needed()
   end
   local token = tostring(proj) .. "|" .. proj_fn
   if loaded_project_token ~= token then
+    -- A pending save belongs to the old project; the code below decides
+    -- whether that project may still be written. Keep only the config file.
+    if state._config_save_due then
+      state._config_save_due = nil
+      save_config_file()
+    end
     local same_pointer = loaded_project ~= nil and tostring(loaded_project) == tostring(proj)
     if same_pointer and r.GetProjExtState then
       -- Same pointer, new path: either "Save As" of this project, or another
@@ -738,12 +753,40 @@ function sm_save_tag_presets(presets)
   end
   local ok, err = sm_atomic_write(SM_TAG_PRESETS_PATH, "return " .. content)
   if not ok then
-    log("Failed to save tag presets: " .. tostring(err))
+    sm_notify("Could not save tag presets: " .. tostring(err), "error")
   end
   return ok
 end
 
+-- Edits call save_config() often, several times per click, and each call
+-- wrote the config file and re-encoded the whole sequencer state. Requests
+-- are now coalesced and written once, shortly after the last one
+-- (sm_flush_config_save runs every frame). Shutdown writes immediately.
+SM_CONFIG_SAVE_DELAY = 0.35
+
 function save_config()
+  state._config_save_due = (r.time_precise and r.time_precise() or os.clock()) + SM_CONFIG_SAVE_DELAY
+end
+
+function sm_flush_config_save(force)
+  local due = state._config_save_due
+  if not due then
+    return false
+  end
+  if not force and (r.time_precise and r.time_precise() or os.clock()) < due then
+    return false
+  end
+  save_config_now()
+  return true
+end
+
+function save_config_now()
+  state._config_save_due = nil
+  save_config_file()
+  save_seq_project_state(loaded_project or get_current_project())
+end
+
+function save_config_file()
   if snapshot_active_map_tab then
     snapshot_active_map_tab()
   end
@@ -797,9 +840,8 @@ function save_config()
   if saved then
     log("Saved config with " .. #state.folders .. " folder(s)")
   else
-    log("Failed to save config file: " .. tostring(save_err))
+    sm_notify("Could not save settings: " .. tostring(save_err), "error")
   end
-  save_seq_project_state(loaded_project or get_current_project())
 end
 
 
@@ -2299,10 +2341,10 @@ function save_samples()
   if ok_json_enc and type(json_str) == "string" then
     local json_saved, json_err = sm_atomic_write(DATA_PATH, json_str)
     if not json_saved then
-      log("Failed to write JSON cache: " .. tostring(json_err))
+      sm_notify("Could not save the sample library: " .. tostring(json_err), "error")
     end
   else
-    log("Failed to encode JSON cache: " .. tostring(json_str))
+    sm_notify("Could not save the sample library: " .. tostring(json_str), "error")
   end
 
   state.last_save_time = r.time_precise()
@@ -2326,7 +2368,8 @@ function filter_samples_by_folders()
     state.active_tags = {}
     state.tag_list = {}
     state.tag_counts = {}
-    return
+    rebuild_samples_path_index()
+    return 0
   end
 
   local filtered_samples = {}
@@ -2334,13 +2377,12 @@ function filter_samples_by_folders()
 
   for _, sample in ipairs(state.samples) do
     if sample.path then
-      local normalized_sample_path = normalize_path(sample.path)
       local keep_sample = false
 
-      -- Check if sample belongs to any of the current folders
+      -- Check if sample belongs to any of the current folders (whole path
+      -- components, so ".../Drums" does not also keep ".../Drums2").
       for _, folder in ipairs(state.folders) do
-        local normalized_folder = normalize_path(folder)
-        if normalized_sample_path:sub(1, #normalized_folder) == normalized_folder then
+        if sample_under_scan_folder(sample.path, folder) then
           keep_sample = true
           break
         end
@@ -2360,12 +2402,11 @@ function filter_samples_by_folders()
   state.samples = filtered_samples
   rebuild_samples_path_index()
 
-  -- Rebuild tag data since samples changed
-  state.active_tags = {}
-  state.tag_list = {}
-  state.tag_counts = {}
+  -- Rebuild tag data since samples changed; the user's tag filters stay.
+  rebuild_tag_index()
 
   if removed_count > 0 then
     log("Removed " .. removed_count .. " samples from removed folder(s)")
   end
+  return removed_count
 end

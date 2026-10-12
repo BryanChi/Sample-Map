@@ -399,29 +399,41 @@ function apply_map_dot_cap(candidates, max_dots, playing_path, x_min, x_max, y_m
   return draw_list, #candidates, true
 end
 
-function map_build_draw_entries(draw_list, padded_width, padded_height, padded_center_x, padded_center_y, zoom)
+MAP_UNAVAILABLE_DOT_COLOR = build_color_rrgbbaa(136, 136, 136, 90)
+
+-- Entries are rebuilt every frame while panning/zooming. Reuse the previous
+-- entry tables (only render_map_samples reads them, within the same frame) so
+-- a pan does not allocate one table per visible dot per frame.
+function map_build_draw_entries(draw_list, padded_width, padded_height, padded_center_x, padded_center_y, zoom, reuse)
   local half_w = padded_width * 0.5
   local half_h = padded_height * 0.5
-  local entries = {}
-  for i = 1, #draw_list do
+  local entries = reuse or {}
+  local n = #draw_list
+  for i = 1, n do
     local s = draw_list[i]
     local px = padded_center_x + ((s.x or 0.5) * padded_width - half_w) * zoom
     local py = padded_center_y + ((s.y or 0.5) * padded_height - half_h) * zoom
-    entries[i] = {
-      s = s,
-      px = px,
-      py = py,
-      color = s._folder_unavailable and build_color_rrgbbaa(136, 136, 136, 90) or (s._render_color or get_sample_dot_color(s)),
-      unavailable = s._folder_unavailable and true or false,
-    }
+    local e = entries[i]
+    if not e then
+      e = {}
+      entries[i] = e
+    end
+    e.s = s
+    e.px = px
+    e.py = py
+    e.color = s._folder_unavailable and MAP_UNAVAILABLE_DOT_COLOR or (s._render_color or get_sample_dot_color(s))
+    e.unavailable = s._folder_unavailable and true or false
+  end
+  for i = #entries, n + 1, -1 do
+    entries[i] = nil
   end
   return entries
 end
 
-function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y, margin)
+function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y, margin, filter_key)
   margin = margin or 24.0
 
-  local filter_key = compute_map_filter_key()
+  filter_key = filter_key or compute_map_filter_key()
   if map_cache.filter_key ~= filter_key or not map_cache.spatial then
     rebuild_map_filtered_cache()
   end
@@ -446,41 +458,8 @@ function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_heig
     hover_list, max_dots, playing_path, x_min, x_max, y_min, y_max, prefer_set
   )
 
-  if playing_path then
-    local playing_in_draw = false
-    for i = 1, #draw_list do
-      if draw_list[i].path == playing_path then
-        playing_in_draw = true
-        break
-      end
-    end
-    if not playing_in_draw then
-      local playing = samples_by_path[playing_path]
-      if playing and playing.x then
-        draw_list[#draw_list + 1] = playing
-      end
-    end
-  end
-
-  local assigned_info = seq_assigned_sample_info()
-  for path, _ in pairs(assigned_info) do
-    local already = false
-    for i = 1, #draw_list do
-      if draw_list[i].path == path then
-        already = true
-        break
-      end
-    end
-    if not already then
-      local sample = samples_by_path[path]
-      if sample and sample.x
-          and sample.x >= x_min and sample.x <= x_max
-          and sample.y >= y_min and sample.y <= y_max then
-        draw_list[#draw_list + 1] = sample
-      end
-    end
-  end
-
+  -- One set for every membership check below (was a linear scan of draw_list
+  -- per assigned sample); appended samples are added so order is unchanged.
   local path_set = {}
   for i = 1, #draw_list do
     local p = draw_list[i].path
@@ -489,13 +468,37 @@ function ensure_map_render_cache(padded_x0, padded_y0, padded_width, padded_heig
     end
   end
 
+  if playing_path and not path_set[playing_path] then
+    local playing = samples_by_path[playing_path]
+    if playing and playing.x then
+      draw_list[#draw_list + 1] = playing
+      path_set[playing_path] = true
+    end
+  end
+
+  local assigned_info = seq_assigned_sample_info()
+  for path, _ in pairs(assigned_info) do
+    if not path_set[path] then
+      local sample = samples_by_path[path]
+      if sample and sample.x
+          and sample.x >= x_min and sample.x <= x_max
+          and sample.y >= y_min and sample.y <= y_max then
+        draw_list[#draw_list + 1] = sample
+        path_set[path] = true
+      end
+    end
+  end
+
   map_cache.view_key = view_key
   map_cache.hover_list = hover_list
   map_cache.draw_list = draw_list
   map_cache.draw_path_set = path_set
   map_cache.draw_entries = map_build_draw_entries(
-    draw_list, padded_width, padded_height, padded_center_x, padded_center_y, zoom
+    draw_list, padded_width, padded_height, padded_center_x, padded_center_y, zoom,
+    map_cache.entry_pool
   )
+  map_cache.entry_pool = map_cache.draw_entries
+  map_cache.entries_gen = (map_cache.entries_gen or 0) + 1
   map_cache.visible_total = visible_total
   map_cache.draw_count = #draw_list
   map_cache.dots_capped = capped

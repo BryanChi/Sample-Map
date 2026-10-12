@@ -617,7 +617,8 @@ function render_seq_top_toolbar()
   end
   local pat_w = calc_compact_chip_width(pat_btn_label) + 16
   local grv_w = calc_compact_chip_width(groove_label) + 16
-  local pocket_w = pocket_pad + pat_w + inner_gap + grv_w + pocket_pad
+  local fill_w = calc_compact_chip_width("Fill") + 16
+  local pocket_w = pocket_pad + pat_w + inner_gap + grv_w + inner_gap + fill_w + pocket_pad
   local group_w = name_w + pocket_w
   do
     local gx, gy = r.ImGui_GetCursorScreenPos(ctx)
@@ -731,14 +732,25 @@ function render_seq_top_toolbar()
       local cap_dbl = cap_hovered and r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0)
       if cap_hovered then
         r.ImGui_DrawList_AddRectFilled(dl, gx, gy, gx + name_w + rounding, gy + btn_h, tone(0.50, 70), rounding)
-        r.ImGui_SetTooltip(ctx, "Focused region — pattern and groove apply here only.\nClick to zoom. Double-click to rename.")
+        r.ImGui_SetTooltip(ctx, "Focused region — pattern and groove apply here only.\nClick to zoom. Double-click (here or on the region) to rename.")
       end
       local tw, th = r.ImGui_CalcTextSize(ctx, region_chip)
       r.ImGui_DrawList_AddText(dl, gx + (name_w - tw) * 0.5, gy + (btn_h - th) * 0.5, 0xFFFFFFFF, region_chip)
+      local now = r.time_precise()
       if cap_dbl then
+        state.seq_region_chip_zoom = nil
         seq_begin_region_rename(focus_region)
       elseif cap_clicked then
-        seq_zoom_to_region(focus_region)
+        -- Zoom once the double-click window has passed, so double-click
+        -- renames without zooming first.
+        state.seq_region_chip_zoom = { region_id = focus_region.id, at = now + 0.3 }
+      end
+      local pend = state.seq_region_chip_zoom
+      if pend and now >= pend.at then
+        state.seq_region_chip_zoom = nil
+        if pend.region_id == focus_region.id then
+          seq_zoom_to_region(focus_region)
+        end
       end
     end
 
@@ -773,6 +785,23 @@ function render_seq_top_toolbar()
     end
     if r.ImGui_IsItemHovered(ctx) then
       r.ImGui_SetTooltip(ctx, "Groove for " .. region_name .. " — this region only")
+    end
+    r.ImGui_SameLine(ctx, 0, inner_gap)
+    local fill_state = seq_fill_state()
+    if draw_ui_button("seq_fill_window_open", "Fill", nil, inner_h, {
+      compact = true,
+      lead_icon = "fill",
+      style = "primary",
+      selected = fill_state.open,
+    }) then
+      seq_fill_toggle_window(focus_region)
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      if seq_fill_any_razor() then
+        r.ImGui_SetTooltip(ctx, "Fill designer: drum fills for the razor areas")
+      else
+        r.ImGui_SetTooltip(ctx, "Fill designer: drum fills at phrase ends of " .. region_name)
+      end
     end
 
     r.ImGui_SetCursorScreenPos(ctx, gx + group_w, gy)
@@ -1366,7 +1395,7 @@ function apply_seq_stutter_lane_drag(drag, region, step_qn, start_qn, step_count
       local key = seq_alloc_note_key(region, slot.id, qn_offset)
       local note = make_default_seq_note(slot, key, qn_offset)
       if not note then
-        log("Sequencer slot has no assigned sample")
+        sm_notify("This track has no sample yet: drop a sample on it first", "warn")
         return false
       end
       set_seq_note(region, slot.id, key, note)

@@ -7,13 +7,7 @@ function seq_reveal_sample_in_explorer(sample)
   if not path or path == "" then
     return
   end
-  if r.CF_LocateInExplorer then
-    r.CF_LocateInExplorer(path)
-  elseif r.CF_ShellExecute then
-    r.CF_ShellExecute(path)
-  else
-    os.execute("open -R " .. shell_escape(path))
-  end
+  sm_reveal_path(path)
 end
 
 function draw_seq_header_sample_menu(sample)
@@ -50,7 +44,7 @@ function draw_seq_header_sample_menu(sample)
       r.ImGui_SetClipboardText(ctx, menu_sample.path or "")
     end
   end
-  if r.ImGui_MenuItem(ctx, "Show in Finder") then
+  if r.ImGui_MenuItem(ctx, SM_REVEAL_LABEL) then
     seq_reveal_sample_in_explorer(menu_sample)
   end
   r.ImGui_EndPopup(ctx)
@@ -422,7 +416,45 @@ function seq_open_track_context_menu(slot_id)
   return true
 end
 
+-- Ask before deleting a track whose REAPER track holds items or FX.
+function seq_confirm_delete_track(slot)
+  local tr = slot and slot.reaper_track_guid and get_track_by_guid(slot.reaper_track_guid)
+  if not tr or not r.ShowMessageBox then
+    return true
+  end
+  local items = r.CountTrackMediaItems and r.CountTrackMediaItems(tr) or 0
+  local fx = r.TrackFX_GetCount and r.TrackFX_GetCount(tr) or 0
+  if items == 0 and fx == 0 then
+    return true
+  end
+  local parts = {}
+  if items > 0 then
+    parts[#parts + 1] = string.format("%d item%s", items, items == 1 and "" or "s")
+  end
+  if fx > 0 then
+    parts[#parts + 1] = string.format("%d FX", fx)
+  end
+  local msg = string.format('Delete "%s"?\n\nThis also deletes its REAPER track with %s.',
+    tostring(slot.name or "Track"), table.concat(parts, " and "))
+  return r.ShowMessageBox(msg, "Delete sequencer track", 4) == 6
+end
+
+function seq_prompt_rename_track(slot)
+  if not slot or not r.GetUserInputs then
+    return false
+  end
+  local cur = tostring(slot.name or ""):gsub(",", ";")
+  local ok, value = r.GetUserInputs("Rename track", 1, "Name:,extrawidth=180", cur)
+  if not ok then
+    return false
+  end
+  return seq_rename_track(slot, value)
+end
+
 function render_seq_track_context_menu()
+  if seq_sync_track_names then
+    seq_sync_track_names()
+  end
   if state.seq_track_menu_want_open and r.ImGui_OpenPopup then
     state.seq_track_menu_want_open = nil
     r.ImGui_OpenPopup(ctx, "##seq_track_context_menu")
@@ -446,11 +478,23 @@ function render_seq_track_context_menu()
   if slot.name and slot.name ~= "" then
     label = 'Delete "' .. tostring(slot.name) .. '"'
   end
+  local rename = false
+  if r.ImGui_MenuItem(ctx, "Rename...") then
+    r.ImGui_CloseCurrentPopup(ctx)
+    rename = true
+  end
+  local delete = false
   if r.ImGui_MenuItem(ctx, label) then
     r.ImGui_CloseCurrentPopup(ctx)
-    seq_delete_seq_track_at(idx)
+    delete = true
   end
   r.ImGui_EndPopup(ctx)
+  -- Modal dialogs run after the popup is closed.
+  if rename then
+    seq_prompt_rename_track(slot)
+  elseif delete and seq_confirm_delete_track(slot) then
+    seq_delete_seq_track_at(idx)
+  end
   return true
 end
 
