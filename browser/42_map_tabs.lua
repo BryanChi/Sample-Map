@@ -174,77 +174,6 @@ function render_view_tab_switcher()
   end
 end
 
-function render_sample_map_tab_bar()
-  ensure_map_tabs()
-  local btn_h = 22
-  local plus_w = 22
-  local close_w = 14
-  local pad_x = 8
-  local gap = 3
-
-  for i, tab in ipairs(state.map_tabs or {}) do
-    local active = tab.id == state.map_tab_active_id
-    local label = map_tab_display_label(tab)
-    local text_w = select(1, r.ImGui_CalcTextSize(ctx, label)) or 0
-    local can_close = #(state.map_tabs) > 1
-    local tab_w = pad_x + text_w + (can_close and (4 + close_w) or 0) + pad_x
-    if i > 1 then
-      imgui_same_line_if_fits(tab_w, gap)
-    end
-    local clicked = r.ImGui_InvisibleButton(ctx, "##map_tab_" .. tostring(tab.id), tab_w, btn_h)
-    local hovered = r.ImGui_IsItemHovered(ctx)
-    local pressed = r.ImGui_IsItemActive(ctx)
-    local x0, y0 = r.ImGui_GetItemRectMin(ctx)
-    local x1, y1 = r.ImGui_GetItemRectMax(ctx)
-    local dl = r.ImGui_GetWindowDrawList(ctx)
-    -- Segmented tabs: quiet text when idle, a raised surface on hover, and
-    -- the active tab gets a tinted fill and an accent underline.
-    local text_col
-    if active then
-      text_col = UI_THEME.text
-      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, UI_THEME.accent_fill, UI_METRICS.radius_ctrl)
-      r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, 0x1EFF5E40, UI_METRICS.radius_ctrl, 0, 1.0)
-      r.ImGui_DrawList_AddLine(dl, x0 + 6, y1 - 1.0, x1 - 6, y1 - 1.0, UI_THEME.accent, 2.0)
-    elseif hovered then
-      text_col = UI_THEME.text
-      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, UI_THEME.surface_hvr, UI_METRICS.radius_ctrl)
-    else
-      text_col = UI_THEME.text_dim
-      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, UI_THEME.surface, UI_METRICS.radius_ctrl)
-    end
-    local text_y = y0 + (btn_h - select(2, r.ImGui_CalcTextSize(ctx, label))) * 0.5 + (pressed and 1.0 or 0.0)
-    r.ImGui_DrawList_AddText(dl, x0 + pad_x, text_y, text_col, label)
-    if can_close then
-      local cx = x1 - pad_x - close_w * 0.5
-      local cy = y0 + btn_h * 0.5 + (pressed and 1.0 or 0.0)
-      if hovered or active then
-        ui_button_draw_icon(dl, "close", cx, cy, 11, text_col)
-      end
-    end
-    if clicked then
-      local mx = select(1, r.ImGui_GetMousePos(ctx))
-      if can_close and mx and mx >= (x1 - pad_x - close_w - 2) then
-        close_map_tab(tab.id)
-      else
-        switch_map_tab(tab.id)
-      end
-    end
-    if hovered then
-      r.ImGui_SetTooltip(ctx, "Stores this tab's filter, tags, folders, zoom, and pan")
-    end
-  end
-
-  if #(state.map_tabs or {}) < MAP_TAB_MAX then
-    imgui_same_line_if_fits(plus_w, gap)
-    if draw_ui_button("map_tab_add", nil, plus_w, btn_h, { icon = "plus", compact = true }) then
-      add_map_tab()
-    end
-    if r.ImGui_IsItemHovered(ctx) then
-      r.ImGui_SetTooltip(ctx, "New Sample Map tab")
-    end
-  end
-end
-
 -- Sample Map toolbar, two rows:
 --   1. search (with active tags and folder chips) on the left; the view
 --      controls (Y axis, layout edit) pinned to the right edge.
@@ -529,9 +458,11 @@ MAP_UI_EDGE = 7
 MAP_UI_IDS = { "tracks", "tabs", "path", "wave", "map" }
 MAP_UI_SPEC = {
   tracks = { flex_h = true, min_w = 140, min_h = 80, scroll = true },
-  tabs = { flex_h = false, h = 28, min_w = 80, min_h = 24, scroll = false },
-  path = { flex_h = false, h = 30, min_w = 80, min_h = 24, scroll = false },
-  wave = { flex_h = false, h = 80, min_w = 160, min_h = 70, scroll = false },
+  -- auto_h: with no height set, the module is as tall as its content needs
+  -- (state.map_ui_fit_h, measured while drawing), so tabs wrap onto new lines.
+  tabs = { flex_h = false, h = 28, min_w = 48, min_h = 24, scroll = false, auto_h = true },
+  path = { flex_h = false, h = 30, min_w = 56, min_h = 24, scroll = false },
+  wave = { flex_h = false, h = 80, min_w = 100, min_h = 48, scroll = false },
   map = { flex_h = true, min_w = 120, min_h = 80, scroll = false },
 }
 
@@ -888,7 +819,7 @@ function map_ui_pref_h(node)
     if spec.flex_h then
       return spec.min_h
     end
-    return spec.h
+    return map_ui_auto_h(node.id) or spec.h
   end
   if node.type == "col" then
     local h = 0
@@ -905,6 +836,16 @@ function map_ui_pref_h(node)
     h = math.max(h, map_ui_pref_h(child))
   end
   return h
+end
+
+-- Content height of an auto_h module (last frame's measure), or nil.
+function map_ui_auto_h(id)
+  local spec = MAP_UI_SPEC[id]
+  local fit = state.map_ui_fit_h and state.map_ui_fit_h[id]
+  if not (spec and spec.auto_h and type(fit) == "number") then
+    return nil
+  end
+  return math.max(spec.min_h or 24, math.min(400, math.floor(fit + 0.5)))
 end
 
 function map_ui_is_flex_h(node)
@@ -976,6 +917,23 @@ function map_ui_col_heights(children, total)
   end
   local leftover = inner - used
   if #flex == 0 then
+    -- Nothing stretches (say a column of tabs, path and waveform): the
+    -- waveform, or else the last module without a set height, takes the
+    -- spare room instead of leaving a gap at the bottom.
+    if leftover > 0 then
+      local grow, wave = nil, nil
+      for i, child in ipairs(children) do
+        if child.type == "leaf" and child.id == "wave" then
+          wave = i
+        elseif not map_ui_get_h(child) and not (child.type == "leaf" and MAP_UI_SPEC[child.id] and MAP_UI_SPEC[child.id].auto_h) then
+          grow = i
+        end
+      end
+      grow = wave or grow or n
+      if grow then
+        heights[grow] = heights[grow] + leftover
+      end
+    end
     local mins = {}
     for i, child in ipairs(children) do
       mins[i] = map_ui_min_h(child)
@@ -1171,6 +1129,11 @@ local function map_ui_set_axis(node, axis, v)
     end
   else
     node.h = v
+    -- Dropped back on the content height: follow the content again.
+    local auto = node.type == "leaf" and map_ui_auto_h(node.id)
+    if auto and math.abs(v - auto) < 0.5 then
+      node.h = nil
+    end
   end
 end
 
@@ -1193,7 +1156,7 @@ local function map_ui_default_size(node, axis)
   end
   local spec = MAP_UI_SPEC[node.id]
   if spec and not spec.flex_h then
-    return spec.h
+    return map_ui_auto_h(node.id) or spec.h
   end
   return nil
 end

@@ -3783,7 +3783,12 @@ function clamp_effective_duration(sample, seconds)
   return math.max(0.001, seconds)
 end
 
-function render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y)
+-- Tag chips of the previewed sample. By default they sit bottom-right over
+-- the waveform; opts.top_left flows them from the top-left of the rect (the
+-- info area of a tall waveform module). opts.max_rows caps the rows: the
+-- chips that do not fit go under a "+N" chip.
+function render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y, opts)
+  opts = opts or {}
   local consumed = false
   local path = preview_sample_obj and preview_sample_obj.path
   local tags = (preview_sample_obj and type(preview_sample_obj.tags) == "table") and preview_sample_obj.tags or {}
@@ -3828,6 +3833,48 @@ function render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y)
   end
   flush_row()
 
+  -- Too many rows: keep the first max_rows, end the last one with "+N".
+  local max_rows = opts.max_rows
+  if max_rows and #rows > max_rows and max_rows >= 1 then
+    local hidden = {}
+    for ri = max_rows + 1, #rows do
+      for _, chip in ipairs(rows[ri].items) do
+        if chip.kind == "tag" then
+          hidden[#hidden + 1] = chip.tag
+        end
+      end
+      rows[ri] = nil
+    end
+    local last = rows[max_rows]
+    local more = { kind = "more", w = 30, h = plus_h }
+    -- the add button stays last; drop tags from the row until "+N" fits
+    local plus_chip = nil
+    if last.items[#last.items] and last.items[#last.items].kind == "plus" then
+      plus_chip = table.remove(last.items)
+    end
+    local function row_w()
+      local w = 0
+      for i, chip in ipairs(last.items) do
+        w = w + chip.w + (i > 1 and gap or 0)
+      end
+      return w
+    end
+    local extra = more.w + gap + (plus_chip and (plus_chip.w + gap) or 0)
+    while #last.items > 0 and row_w() + extra > max_w do
+      local chip = table.remove(last.items)
+      if chip.kind == "tag" then
+        table.insert(hidden, 1, chip.tag)
+      end
+    end
+    last.items[#last.items + 1] = more
+    if plus_chip then
+      last.items[#last.items + 1] = plus_chip
+    end
+    last.w = row_w()
+    more.label = "+" .. #hidden
+    state.wave_hidden_tags = hidden
+  end
+
   local total_h = 0
   for i, row in ipairs(rows) do
     if i > 1 then
@@ -3836,8 +3883,21 @@ function render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y)
     total_h = total_h + row.h
   end
   local y = math.max(y0 + pad, y0 + (height or 0) - pad - total_h)
+  if opts.top_left then
+    y = y0
+  end
+  -- Where the chips sit, so the time ruler can keep its labels clear of them.
+  local widest = 0
+  for _, row in ipairs(rows) do
+    widest = math.max(widest, row.w)
+  end
+  state.wave_tags_rect = (not opts.top_left and #rows > 0)
+      and { x0 = x0 + (width or 0) - pad - widest, y0 = y, x1 = x0 + (width or 0), y1 = y + total_h } or nil
   for _, row in ipairs(rows) do
     local x = x0 + (width or 0) - pad - row.w
+    if opts.top_left then
+      x = x0
+    end
     for _, chip in ipairs(row.items) do
       r.ImGui_SetCursorScreenPos(ctx, x, y + math.max(0, (row.h - chip.h) * 0.5))
       if chip.kind == "tag" then
@@ -3848,6 +3908,13 @@ function render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y)
           else
             toggle_sample_map_tag_filter(chip.tag)
           end
+        end
+      elseif chip.kind == "more" then
+        if draw_ui_button("wave_more_tags", chip.label, chip.w, chip.h, { compact = true, pill = true }) then
+          r.ImGui_OpenPopup(ctx, "##wave_more_tags")
+        end
+        if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
+          r.ImGui_SetTooltip(ctx, "More tags on this sample")
         end
       else
         if draw_ui_button("wave_add_tag", "+", plus_w, plus_h, { compact = true, pill = true }) then
@@ -3866,218 +3933,24 @@ function render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y)
     y = y + row.h + 2
   end
 
+  if r.ImGui_BeginPopup(ctx, "##wave_more_tags") then
+    for _, tag in ipairs(state.wave_hidden_tags or {}) do
+      local active = state.active_tags[tag] or false
+      if draw_tag_button(ctx, tag, active, tag, "waveform_more_") then
+        if active then
+          state.active_tags[tag] = nil
+        else
+          toggle_sample_map_tag_filter(tag)
+        end
+      end
+    end
+    r.ImGui_EndPopup(ctx)
+  end
   r.ImGui_PopStyleVar(ctx, 2)
   render_tag_add_popup()
   r.ImGui_SetCursorPos(ctx, layout_x, layout_y)
   r.ImGui_Dummy(ctx, 0, 0)
   return consumed
-end
-
-function path_explorer_button_width()
-  local tw = select(1, r.ImGui_CalcTextSize(ctx, "Explorer"))
-  return tw + 18
-end
-
-function render_path_explorer_button(x, y)
-  local label = "Explorer"
-  local btn_w = path_explorer_button_width()
-  local btn_h = 22
-  if x and y then
-    r.ImGui_SetCursorScreenPos(ctx, x, y)
-  end
-  if draw_ui_button("path_open_explorer", label, btn_w, btn_h, {
-    style = state.explorer_open and "primary" or "default",
-    compact = true,
-    selected = state.explorer_open,
-  }) then
-    state.explorer_open = not state.explorer_open
-    save_config()
-  end
-  if r.ImGui_IsItemHovered(ctx) then
-    r.ImGui_SetTooltip(ctx, "Browse scan folders and set custom tags.\nDock the window on the right of the sample map, or leave it floating.")
-  end
-end
-
-function render_sample_path_line()
-  local wx, wy = r.ImGui_GetWindowPos(ctx)
-  local ww, wh = r.ImGui_GetWindowSize(ctx)
-  local pad = 4
-  local ox, oy = wx + pad, wy + pad
-  local avail_w = math.max(1, (ww or 1) - pad * 2)
-  local avail_h = math.max(1, (wh or 1) - pad * 2)
-  local explorer_w = path_explorer_button_width()
-  local explorer_gap = 8
-  local inner_w = math.max(40, avail_w - explorer_w - explorer_gap)
-  local wrap = avail_h >= 46
-
-  render_path_explorer_button(ox + avail_w - explorer_w, oy)
-
-  local crumb_flags = 0
-  local extra_pop = 0
-  if not wrap then
-    crumb_flags = r.ImGui_WindowFlags_HorizontalScrollbar() | r.ImGui_WindowFlags_NoScrollWithMouse()
-    if r.ImGui_StyleVar_ScrollbarSize then
-      r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ScrollbarSize(), 0.01)
-      extra_pop = 1
-    end
-  end
-  r.ImGui_SetCursorScreenPos(ctx, ox, oy)
-  r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_WindowPadding(), 0, 0)
-  r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 2, 2)
-  local crumbs_open = r.ImGui_BeginChild(ctx, "path_crumbs", inner_w, wrap and avail_h or math.max(avail_h, 22), 0, crumb_flags)
-  if crumbs_open then
-    local function path_advance(needed_w, first)
-      if first then
-        return
-      end
-      if wrap then
-        imgui_same_line_if_fits(needed_w, 2)
-      else
-        r.ImGui_SameLine(ctx, 0, 2)
-      end
-    end
-
-    if not preview_sample_obj then
-      r.ImGui_AlignTextToFramePadding(ctx)
-      r.ImGui_TextColored(ctx, UI_THEME.text_mute, "No sample selected. Click a dot on the map to audition it.")
-    else
-      local full_path = preview_sample_obj.path or ""
-      local path_segments = {}
-      local filename = preview_sample_obj.name or "Unknown"
-      if full_path ~= "" then
-        local normalized_path = normalize_path(full_path)
-        local scanned_root = nil
-        for _, scanned_folder in ipairs(state.folders) do
-          local norm_scanned = normalize_path(scanned_folder)
-          if normalized_path:sub(1, #norm_scanned) == norm_scanned then
-            if not scanned_root or #norm_scanned > #scanned_root then
-              scanned_root = norm_scanned
-            end
-          end
-        end
-        local dir_path = normalized_path:match("(.+)/[^/]+$") or ""
-        if scanned_root and dir_path ~= "" then
-          local root_name = scanned_root:match("([^/]+)/?$") or scanned_root
-          table.insert(path_segments, { name = root_name, path = scanned_root })
-          local relative_path = dir_path
-          if dir_path:sub(1, #scanned_root) == scanned_root then
-            relative_path = dir_path:sub(#scanned_root + 1)
-            if relative_path:sub(1, 1) == "/" then
-              relative_path = relative_path:sub(2)
-            end
-          end
-          if relative_path ~= "" then
-            local current_path = scanned_root
-            for segment in relative_path:gmatch("([^/]+)") do
-              current_path = current_path .. "/" .. segment
-              table.insert(path_segments, { name = segment, path = current_path })
-            end
-          end
-        elseif dir_path ~= "" then
-          local is_absolute = dir_path:sub(1, 1) == "/"
-          local current_path = is_absolute and "/" or ""
-          for segment in dir_path:gmatch("([^/]+)") do
-            if is_absolute then
-              current_path = current_path .. segment
-            else
-              current_path = current_path .. (current_path == "" and "" or "/") .. segment
-            end
-            table.insert(path_segments, { name = segment, path = current_path })
-            if is_absolute then
-              current_path = current_path .. "/"
-            end
-          end
-        end
-      end
-
-      for i, seg in ipairs(path_segments) do
-        local text_size = { r.ImGui_CalcTextSize(ctx, seg.name) }
-        local frame_padding = 6.0
-        local button_width = text_size[1] + frame_padding * 2
-        local button_height = text_size[2] + 6.0
-        local chevron_w = 10
-        if i > 1 then
-          path_advance(chevron_w + 2 + button_width, false)
-          local cx, cy = r.ImGui_GetCursorScreenPos(ctx)
-          local sep_h = 18
-          r.ImGui_Dummy(ctx, chevron_w, sep_h)
-          ui_button_draw_icon(r.ImGui_GetWindowDrawList(ctx), "chev_right", cx + 5, cy + sep_h * 0.5, 12, UI_THEME.text_mute)
-          path_advance(button_width, false)
-        end
-
-        local is_filtered = folder_filter_has(seg.path)
-        local clicked = r.ImGui_InvisibleButton(ctx, "##path_btn_" .. i .. "_" .. seg.name, button_width, button_height)
-        local hovered = r.ImGui_IsItemHovered(ctx)
-        local pressed = r.ImGui_IsItemActive(ctx)
-        local x0, y0 = r.ImGui_GetItemRectMin(ctx)
-        local x1, y1 = r.ImGui_GetItemRectMax(ctx)
-        local bg, border, text_col
-        if is_filtered then
-          bg = hovered and UI_THEME.accent_fill_h or UI_THEME.accent_fill
-          border = UI_THEME.accent
-          text_col = 0xFFFFFFFF
-        elseif hovered then
-          bg = UI_THEME.surface_hvr
-          border = UI_THEME.border_hvr
-          text_col = UI_THEME.text
-        else
-          bg = UI_THEME.surface
-          border = UI_THEME.border
-          text_col = UI_THEME.text_dim
-        end
-        local dl = r.ImGui_GetWindowDrawList(ctx)
-        ui_draw_panel(dl, x0, y0, x1, y1, button_height * 0.5, bg, border, hovered, pressed)
-        local text_x = x0 + frame_padding
-        local text_y = y0 + (button_height - text_size[2]) * 0.5 + (pressed and 1.0 or 0.0)
-        r.ImGui_DrawList_AddText(dl, text_x, text_y, text_col, seg.name)
-        if clicked then
-          folder_filter_toggle(seg.path)
-        end
-      end
-
-      -- Filename: chevron, then a tinted pill with a waveform glyph so the
-      -- file reads as the end of the trail rather than another folder.
-      local fn_w, fn_h = r.ImGui_CalcTextSize(ctx, filename)
-      local fn_pill_w = fn_w + 26
-      local fn_pill_h = fn_h + 6
-      local chevron_w = 10
-      path_advance(chevron_w + 2 + fn_pill_w, #path_segments == 0)
-      if #path_segments > 0 then
-        local cx, cy = r.ImGui_GetCursorScreenPos(ctx)
-        r.ImGui_Dummy(ctx, chevron_w, 18)
-        ui_button_draw_icon(r.ImGui_GetWindowDrawList(ctx), "chev_right", cx + 5, cy + 9, 12, UI_THEME.text_mute)
-        path_advance(fn_pill_w, false)
-      end
-      local fx, fy = r.ImGui_GetCursorScreenPos(ctx)
-      r.ImGui_Dummy(ctx, fn_pill_w, fn_pill_h)
-      local fdl = r.ImGui_GetWindowDrawList(ctx)
-      r.ImGui_DrawList_AddRectFilled(fdl, fx, fy, fx + fn_pill_w, fy + fn_pill_h, UI_THEME.elevated, fn_pill_h * 0.5)
-      r.ImGui_DrawList_AddRect(fdl, fx + 0.5, fy + 0.5, fx + fn_pill_w - 0.5, fy + fn_pill_h - 0.5, UI_THEME.border_hvr, fn_pill_h * 0.5, 0, 1.0)
-      local gx, gy = fx + 10, fy + fn_pill_h * 0.5
-      local bars = { 0.35, 0.8, 0.55, 1.0, 0.45 }
-      for bi = 1, #bars do
-        local bh = bars[bi] * (fn_pill_h * 0.28)
-        local bx = gx - 4 + (bi - 1) * 2
-        r.ImGui_DrawList_AddLine(fdl, bx, gy - bh, bx, gy + bh, UI_THEME.accent, 1.0)
-      end
-      r.ImGui_DrawList_AddText(fdl, fx + 18, fy + 3, UI_THEME.text, filename)
-    end
-
-    if not wrap and r.ImGui_SetScrollX and r.ImGui_IsWindowHovered and r.ImGui_IsWindowHovered(ctx) then
-      local wheel, wheel_h = 0, 0
-      if r.ImGui_GetMouseWheel then
-        wheel, wheel_h = r.ImGui_GetMouseWheel(ctx)
-      end
-      local dx = (wheel_h or 0) - (wheel or 0)
-      if dx ~= 0 then
-        r.ImGui_SetScrollX(ctx, (r.ImGui_GetScrollX(ctx) or 0) - dx * 48)
-      end
-    end
-    r.ImGui_Dummy(ctx, 0, 0)
-  end
-  imgui_end_child(crumbs_open)
-  r.ImGui_PopStyleVar(ctx, 2 + extra_pop)
-  r.ImGui_Dummy(ctx, 0, 0)
 end
 
 function map_waveform_handle_preview_click(sample, hovered, clicked, left_down, mx, x0, width, view0, view1, blocked)
@@ -4117,16 +3990,169 @@ function map_waveform_handle_preview_click(sample, hovered, clicked, left_down, 
   end
 end
 
+-- Waveform module extras -------------------------------------------------
+
+function wave_ruler_step(span, width)
+  local steps = { 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600 }
+  for _, st in ipairs(steps) do
+    if width * st / math.max(1e-6, span) >= 64 then
+      return st
+    end
+  end
+  return steps[#steps]
+end
+
+function wave_time_label(t, step)
+  if step >= 1 then
+    if t >= 60 then
+      return string.format("%d:%02d", math.floor(t / 60), math.floor(t % 60 + 0.5))
+    end
+    return string.format("%ds", math.floor(t + 0.5))
+  elseif step >= 0.1 then
+    return string.format("%.1fs", t)
+  elseif step >= 0.01 then
+    return string.format("%.2fs", t)
+  end
+  return string.format("%.0fms", t * 1000)
+end
+
+-- Time ruler along the bottom, the zoomed-in window's position, and a hover
+-- line with the time under the mouse.
+function draw_waveform_extras(dl, x0, y0, width, height, view0, view1, file_dur, hovered, mx)
+  local span = math.max(1e-6, view1 - view0)
+  if width >= 80 and height >= 40 then
+    local step = wave_ruler_step(span, width)
+    local t = math.ceil(view0 / step - 1e-9) * step
+    local labels = height >= 90
+    local n = 0
+    while t <= view1 + 1e-9 and n < 400 do
+      local x = x0 + (t - view0) / span * width
+      r.ImGui_DrawList_AddLine(dl, x, y0 + height - 5, x, y0 + height, 0xFFFFFF38, 1.0)
+      if labels and t > view0 + span * 0.01 and x < x0 + width - 36 then
+        local label = wave_time_label(t, step)
+        local lw = select(1, r.ImGui_CalcTextSize(ctx, label)) or 30
+        local tr = state.wave_tags_rect
+        local ly = y0 + height - 17
+        if not (tr and x + 3 + lw >= tr.x0 and x + 3 <= tr.x1 and ly + 14 >= tr.y0 and ly <= tr.y1) then
+          r.ImGui_DrawList_AddText(dl, x + 3, ly, 0xFFFFFF50, label)
+        end
+      end
+      t = t + step
+      n = n + 1
+    end
+  end
+  if file_dur > 0 and span < file_dur - 1e-4 then
+    local by = y0 + height - 3
+    r.ImGui_DrawList_AddRectFilled(dl, x0, by, x0 + width, y0 + height, 0x00000080)
+    local a = x0 + (view0 / file_dur) * width
+    local b = x0 + (view1 / file_dur) * width
+    r.ImGui_DrawList_AddRectFilled(dl, a, by, math.max(a + 6, b), y0 + height, UI_THEME.accent, 1.5)
+  end
+  if hovered and mx and mx >= x0 and mx <= x0 + width
+      and not (state.waveform_eff_drag or state.wave_view_pan or state.seq_header_vol_drag or state.seq_header_start_drag) then
+    r.ImGui_DrawList_AddLine(dl, mx, y0, mx, y0 + height, 0xFFFFFF55, 1.0)
+    if height >= 40 and mx < x0 + width - 56 then
+      local t = view0 + (mx - x0) / width * span
+      local label = string.format("%.3fs", math.max(0, t))
+      local lw, lh = r.ImGui_CalcTextSize(ctx, label)
+      local lx = mx + 5
+      if lx + lw + 6 > x0 + width - 50 then
+        lx = mx - lw - 11
+      end
+      local ly = y0 + height * 0.5 - lh * 0.5
+      r.ImGui_DrawList_AddRectFilled(dl, lx - 3, ly - 1, lx + lw + 3, ly + lh + 1, 0x000000B0, 3)
+      r.ImGui_DrawList_AddText(dl, lx, ly, 0xFFFFFFE0, label)
+    end
+  end
+end
+
+function waveform_sample_details(sample)
+  local a, b = {}, {}
+  local dur = tonumber(sample.duration) or (waveform_data and tonumber(waveform_data.duration))
+  if dur and dur > 0 then
+    a[#a + 1] = dur >= 60 and string.format("%d:%02d", math.floor(dur / 60), math.floor(dur % 60)) or string.format("%.2f s", dur)
+  end
+  local ch = tonumber(sample.channels) or (waveform_data and tonumber(waveform_data.channels))
+  if ch then
+    a[#a + 1] = ch == 1 and "Mono" or (ch == 2 and "Stereo" or (ch .. " ch"))
+  end
+  local sr = tonumber(sample.samplerate)
+  if sr and sr > 0 then
+    a[#a + 1] = string.format("%g kHz", math.floor(sr / 100 + 0.5) / 10)
+  end
+  local bpm = tonumber(sample.bpm)
+  if bpm and bpm > 0 then
+    b[#b + 1] = string.format("%g BPM", math.floor(bpm * 10 + 0.5) / 10)
+  end
+  if type(sample.key) == "string" and sample.key ~= "" then
+    b[#b + 1] = sample.key
+  end
+  return table.concat(a, "  \xC2\xB7  "), table.concat(b, "  \xC2\xB7  ")
+end
+
+-- Tags for the waveform module: over the waveform's bottom-right corner
+-- normally; in a tall module the name, details and tags sit underneath.
+function render_waveform_tags_for_layout(x0, y0, width, height, layout_x, layout_y, full_h, tall)
+  if not tall then
+    local max_rows = math.max(1, math.floor((height * 0.5 + 2) / 24))
+    return render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y, { max_rows = max_rows })
+  end
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local y = y0 + height + 8
+  local bottom = y0 + full_h
+  local sample = preview_sample_obj
+  local row_h = 24
+  if sample then
+    local _, th = r.ImGui_CalcTextSize(ctx, "Ay")
+    local name = sample.name or (sample.path or ""):match("([^/\\]+)$") or ""
+    local lines = { { name, UI_THEME.text } }
+    local d1, d2 = waveform_sample_details(sample)
+    if d1 ~= "" then
+      lines[#lines + 1] = { d1, UI_THEME.text_dim }
+    end
+    if d2 ~= "" then
+      lines[#lines + 1] = { d2, UI_THEME.text_dim }
+    end
+    -- Keep at least one row of tags: drop detail lines from the end first.
+    local function text_h(n)
+      return n > 0 and (n * (th + 3) + 6) or 0
+    end
+    while #lines > 1 and y + text_h(#lines) + row_h > bottom do
+      table.remove(lines)
+    end
+    if y + text_h(#lines) + row_h > bottom then
+      lines = {}
+    end
+    for _, line in ipairs(lines) do
+      r.ImGui_DrawList_AddText(dl, x0 + 2, y, line[2], map_module_text_fit(line[1], width - 4))
+      y = y + th + 3
+    end
+    y = y + (#lines > 0 and 6 or 0)
+  end
+  local rows = math.floor((bottom - y + 2) / row_h)
+  if rows < 1 then
+    return render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y, { max_rows = 1 })
+  end
+  return render_waveform_overlay_tags(x0, y - 4, width, bottom - y, layout_x, layout_y, { top_left = true, max_rows = rows })
+end
+
 function render_waveform()
-  local wh = select(2, r.ImGui_GetWindowSize(ctx))
-  local height = math.max(48, (wh or 80) - 8)
   if preview_sample_obj then
     if not waveform_data or waveform_data.sample_path ~= preview_sample_obj.path then
       ensure_waveform_for_sample(preview_sample_obj)
     end
   end
 
-  local width = r.ImGui_GetContentRegionAvail(ctx)
+  local width, avail_h = r.ImGui_GetContentRegionAvail(ctx)
+  width = math.max(1, width or 1)
+  local full_h = math.max(40, avail_h or 72)
+  -- A tall module (narrow column or a big box) keeps the waveform at a
+  -- readable shape and puts the name, details and tags underneath.
+  local tall = full_h >= 140 and full_h > width * 0.75
+  local height = full_h
+  if tall then
+    height = math.floor(math.max(56, math.min(full_h * 0.6, width * 0.6)))
+  end
   local pos_x, pos_y = r.ImGui_GetCursorScreenPos(ctx)
   local x0, y0 = pos_x, pos_y
 
@@ -4149,7 +4175,7 @@ function render_waveform()
     local msg = preview_sample_obj and "Loading waveform…" or "No sample selected"
     local tw = select(1, r.ImGui_CalcTextSize(ctx, msg)) or 0
     r.ImGui_DrawList_AddText(dl, x0 + (width - tw) * 0.5, y0 + height * 0.5 - 7, UI_THEME.text_mute, msg)
-    render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y)
+    render_waveform_tags_for_layout(x0, y0, width, height, layout_x, layout_y, full_h, tall)
     return
   end
 
@@ -4168,7 +4194,7 @@ function render_waveform()
       dl, preview_sample_obj, x0, y0, width, height, file_dur, view0, view1,
       mx, my, r.ImGui_IsMouseDown(ctx, 0), clicked, "map", { show_name = false }
     )
-    local tags_hit = render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y)
+    local tags_hit = render_waveform_tags_for_layout(x0, y0, width, height, layout_x, layout_y, full_h, tall)
     local blocked = tags_hit or (ctl and ctl.consumed) or state.wave_view_pan or state.pending_waveform_drop
     if preview_sample_obj and preview_sample_obj.path
         and not blocked
@@ -4482,6 +4508,7 @@ function render_waveform()
       local indicator_radius = 5.0
       r.ImGui_DrawList_AddCircleFilled(dl, playhead_x, y0, indicator_radius, playhead_color, 16)
     end
+    draw_waveform_extras(dl, x0, y0, width, height, view0, view1, file_dur, hovered, select(1, r.ImGui_GetMousePos(ctx)))
     if r.ImGui_DrawList_PopClipRect then
       r.ImGui_DrawList_PopClipRect(dl)
     end
@@ -4493,7 +4520,7 @@ function render_waveform()
     dl, preview_sample_obj, x0, y0, width, height, file_dur, view0, view1,
     mx, my, left_down, clicked, "map", { show_name = false }
   )
-  local tags_hit = render_waveform_overlay_tags(x0, y0, width, height, layout_x, layout_y)
+  local tags_hit = render_waveform_tags_for_layout(x0, y0, width, height, layout_x, layout_y, full_h, tall)
 
   local alt = false
   if r.ImGui_IsKeyDown and r.ImGui_Key_LeftAlt then
