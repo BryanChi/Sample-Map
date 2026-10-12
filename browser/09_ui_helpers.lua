@@ -196,6 +196,10 @@ function get_sample_dot_color(sample)
     if best_tag and state.tag_colors[best_tag] then
       base = state.tag_colors[best_tag]
     end
+    local guess = not best_tag and sample_shown_guess_tag and sample_shown_guess_tag(sample)
+    if guess and state.tag_colors[guess] then
+      base = state.tag_colors[guess]
+    end
   end
 
   local color = dot_color_for(base, sample.channels == 1)

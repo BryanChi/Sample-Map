@@ -707,9 +707,19 @@ function render_header()
           #state.scan_queue
         ))
       else
-        menu_item_tooltip("Scan folders for new files.\nAlready indexed samples are skipped.")
+        menu_item_tooltip("Scan folders for new, changed and removed files.\nAlready indexed samples are skipped.")
+      end
+      if #state.scan_queue == 0 then
+        if r.ImGui_MenuItem(ctx, "Quick Rescan") then
+          start_scan(nil, true)
+        end
+        menu_item_tooltip("Only look for new and removed files (faster on big libraries).\nA file edited in place keeps its old analysis until a full Rescan.")
       end
     end
+    if r.ImGui_MenuItem(ctx, "Re-tag Library…", nil, false, not retag_running() and not state.scan_running) then
+      sm_start_retag()
+    end
+    menu_item_tooltip("Work out every sample's tags again from its name, folders and saved analysis\n(no rescan). Shows what would change before anything is applied.")
     if r.ImGui_MenuItem(ctx, "Manage Scan Folders…") then
       state.settings_open = true
       state.settings_section_open = state.settings_section_open or {}
@@ -790,6 +800,10 @@ function render_header()
       set_tag_groups_on_search_row(not tag_groups_on_search_row())
     end
     menu_item_tooltip("Drum, Melodic, Library and Loop / One shot sit on the search row.\nClick a group to show its tags.\nTurn off to list every tag in rows under the search field.")
+    if r.ImGui_MenuItem(ctx, "Show Guessed Drum Tags", nil, show_guessed_tags()) then
+      set_show_guessed_tags(not show_guessed_tags())
+    end
+    menu_item_tooltip("One-shots whose names don't say what they are get a drum type guessed from the sound\n(kick, snare, clap, hat, crash, tom, perc). Guesses count in tag filters and dot colours.")
     if r.ImGui_MenuItem(ctx, "Hide Tags Until Search Is Clicked", nil, state.tags_hide_until_search == true) then
       set_tags_hide_until_search(not state.tags_hide_until_search)
     end

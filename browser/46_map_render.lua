@@ -715,6 +715,10 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
       end
       r.ImGui_PopStyleVar(ctx, 2)
     end
+    local guess = sample_shown_guess_tag(s)
+    if guess then
+      r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Sounds like a " .. guess .. " (guessed from the audio)")
+    end
     r.ImGui_EndTooltip(ctx)
 
     if not click_handled_this_frame and r.ImGui_IsMouseClicked(ctx, 0) then

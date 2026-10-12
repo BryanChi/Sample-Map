@@ -85,6 +85,9 @@ function sm_loop_frame()
     sm_pcall("seq_gmd_bg_tick", seq_gmd_bg_tick)
     sm_pcall("process_scan_slice", process_scan_slice)
     sm_pcall("process_waveform_slice", process_waveform_slice, 6.0)
+    sm_pcall("process_retag_slice", process_retag_slice, 10.0)
+    sm_pcall("process_guess_refresh_slice", process_guess_refresh_slice, 4.0)
+    sm_pcall("sm_maybe_hint_retag", sm_maybe_hint_retag)
 
     -- Poll removable-drive mount state so dots gray/restore without restarting.
     local now = r.time_precise()
@@ -210,6 +213,7 @@ function sm_loop_frame()
     ui_call("render_sequencer_float_window", render_sequencer_float_window)
     ui_call("render_settings", render_settings)
     ui_call("render_scan_complete_dialog", render_scan_complete_dialog)
+    ui_call("render_retag_window", render_retag_window)
     ui_call("seq_stem_import_render_dialog", seq_stem_import_render_dialog)
     ui_call("render_explorer_window", render_explorer_window)
   elseif not ui_ok then

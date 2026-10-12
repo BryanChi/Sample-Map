@@ -80,7 +80,7 @@ function sample_is_drum_oneshot(sample)
   if has_loop then
     return false
   end
-  local loopish = detect_loop_or_oneshot(sample.path or "", sample.folder or "", sample.playback_type)
+  local loopish = detect_loop_or_oneshot(sample.path or "", sample.folder or "", sample.playback_type, sample.duration)
   if loopish == "loop" then
     return false
   end
@@ -289,8 +289,12 @@ function sm_scan_enum_file(enum, dir, file)
     state.analyzer_path_mode[path] = mode
     return true
   end
-  local size, mtime = file_identity(normalized_full_path)
-  if sample_file_changed(existing, size, mtime) then
+  -- Quick rescan: only new and removed files; skip the per-file stat of known ones.
+  local size, mtime = nil, nil
+  if not enum.quick then
+    size, mtime = file_identity(normalized_full_path)
+  end
+  if not enum.quick and sample_file_changed(existing, size, mtime) then
     stamp_sample_file_id(existing, size, mtime)
     clear_sample_analysis_fields(existing)
     refresh_sample_file_meta(existing, normalized_full_path)
@@ -467,7 +471,8 @@ function sm_scan_enum_finish()
     log(string.format("Rescanning folder (%d new file(s)): %s", #paths, folder_label))
   else
     add_scan_log(string.format(
-      "Scan started: %d new, %d changed, %d incomplete, %d unchanged",
+      "%s started: %d new, %d changed, %d incomplete, %d unchanged",
+      enum.quick and "Quick rescan" or "Scan",
       #paths, reanalyze_count, incomplete_count, skipped_count
     ))
     log(string.format("Scan started: %d new file(s), %d already indexed", #paths, skipped_count))
@@ -483,7 +488,7 @@ function sm_scan_enum_finish()
       session.started_at = r.time_precise()
     end
   else
-    begin_scan_session(folder_label and "Folder rescan" or "Library scan", {
+    begin_scan_session(folder_label and "Folder rescan" or (enum.quick and "Quick rescan" or "Library scan"), {
       detail = folder_label,
       new_files = #paths,
       changed_files = reanalyze_count,
@@ -496,7 +501,7 @@ end
 
 -- folder_only: nil (all folders), one folder path, or a list of folder paths.
 -- New files are appended (deduplicated) to any pending scan_queue.
-function enqueue_scan(folder_only)
+function enqueue_scan(folder_only, quick)
   local folders_to_scan = state.folders
   local folder_label = nil
   if type(folder_only) == "table" then
@@ -531,15 +536,16 @@ function enqueue_scan(folder_only)
       incomplete = 0,
       errors = 0,
       folder_label = folder_label,
+      quick = quick and true or false,
       appending = #state.scan_queue > 0
         or (state.scan_running and (#state.analyzer_queue > 0 or #state.active_processes > 0)),
     }
     for _, path in ipairs(state.analyzer_queue) do
       enum.already[path] = true
     end
-    for _, w in ipairs(state.analyzer_workers or {}) do
-      if w.path then
-        enum.already[w.path] = true
+    for _, job in ipairs(state.active_processes or {}) do
+      if job.path then
+        enum.already[job.path] = true
       end
     end
     for _, path in ipairs(state.scan_queue) do
@@ -549,6 +555,9 @@ function enqueue_scan(folder_only)
     add_scan_log(folder_label and ("Listing files in " .. folder_label .. "…") or "Listing files in library folders…")
   elseif enum.folder_label ~= folder_label then
     enum.folder_label = (enum.folder_label and folder_label) and "several folders" or nil
+  end
+  if not quick then
+    enum.quick = false
   end
 
   for i = #folders_to_scan, 1, -1 do
@@ -578,7 +587,10 @@ function scan_is_active()
   return false
 end
 
-function start_scan(folder_only)
+function start_scan(folder_only, quick)
+  if sm_recheck_numpy_after_install then
+    sm_recheck_numpy_after_install()
+  end
   if state.scan_enum and (not folder_only or folder_only == "") then
     return -- already listing library folders
   end
@@ -604,7 +616,7 @@ function start_scan(folder_only)
     end
     return
   end
-  enqueue_scan(folder_only)
+  enqueue_scan(folder_only, quick)
 end
 
 function stop_scan()
@@ -646,63 +658,41 @@ function stop_scan()
 end
 
 
-function analyze_file(path)
-  local file_start_time = r.time_precise()
-  local timings = {}
-  
-  -- PCM_Source creation
-  local t0 = r.time_precise()
-  local src = r.PCM_Source_CreateFromFile(path)
-  if not src then
-    return nil
-  end
-  timings.pcm_create = (r.time_precise() - t0) * 1000  -- Convert to ms
-  
-  -- Get metadata from PCM_Source
-  local t1 = r.time_precise()
-  local length_ret = {r.GetMediaSourceLength(src)}
-  local duration = pick_number(length_ret, 0.0)
-  
-  local sr_ret = {r.GetMediaSourceSampleRate(src)}
-  local sr = pick_number(sr_ret, 44100.0)
-  
-  local ch_ret = {r.GetMediaSourceNumChannels(src)}
-  local ch = math.floor(pick_number(ch_ret, 2))
-  timings.pcm_metadata = (r.time_precise() - t1) * 1000
+-- Formats the analyzer reads itself; their length, rate and channels come back
+-- with its result, so indexing doesn't open each new file in REAPER.
+SM_ANALYZER_HEADER_EXTS = { wav = true, wave = true, aif = true, aiff = true, aifc = true }
 
-  local t2 = r.time_precise()
+function analyze_file(path)
+  local ext = (path:match("%.([^%./]+)$") or ""):lower()
+  local duration, sr, ch = 0.0, 44100.0, 2
+  if state.external_disabled or not SM_ANALYZER_HEADER_EXTS[ext] then
+    local src = r.PCM_Source_CreateFromFile(path)
+    if not src then
+      return nil
+    end
+    duration = pick_number({r.GetMediaSourceLength(src)}, 0.0)
+    sr = pick_number({r.GetMediaSourceSampleRate(src)}, 44100.0)
+    ch = math.floor(pick_number({r.GetMediaSourceNumChannels(src)}, 2))
+    r.PCM_Source_Destroy(src)
+  end
+
   local size, mtime = file_identity(path)
   if type(size) ~= "number" then
     size = 0
   end
-  timings.file_size = (r.time_precise() - t2) * 1000
-  
+
   -- Queue analyzer request instead of blocking (analyzer data will be merged later)
-  -- Normalize path before queuing
   local normalized_path = normalize_path(path)
   if not state.external_disabled then
-    -- Add to analyzer queue for parallel processing
     table.insert(state.analyzer_queue, normalized_path)
-    add_scan_log(string.format("Queued analyzer for: %s", path:match("([^/]+)$") or path))
-  else
-    add_scan_log(string.format("Analyzer disabled, skipping: %s", path:match("([^/]+)$") or path))
   end
-  
-  local t4 = r.time_precise()
-  r.PCM_Source_Destroy(src)
-  timings.pcm_destroy = (r.time_precise() - t4) * 1000
-  
+
   local avg_bps = size / math.max(duration, 0.01)
   -- Normalize path to use forward slashes
   path = normalize_path(path)
   
-  -- Get tags from path first
-  local t5 = r.time_precise()
   local tags = infer_tags_from_path(path, path:match("(.+)/[^/]+$") or "")
-  timings.tags = (r.time_precise() - t5) * 1000
-  
-  -- File timing logs removed - happens during scanning
-  
+
   -- Note: Analyzer tags (Drum/Swell) will be added later when analyzer data is merged
   
   -- Detect Loop or One shot from filename/path (audio classification merged later)
@@ -714,6 +704,13 @@ function analyze_file(path)
   -- Detect genre words from path/folder names in the user's library
   tags = append_unique_tags(tags, infer_genre_tags_from_path(path, sample_folder))
 
+  -- Tempo and key named in the file name ("120 bpm", "Am": Tempo / Key groups)
+  local bpm, key = sm_sample_bpm_key(normalized_path)
+  local bpm_key_tags = {}
+  if bpm then bpm_key_tags[#bpm_key_tags + 1] = sm_tempo_tag(bpm) end
+  if key then bpm_key_tags[#bpm_key_tags + 1] = key end
+  tags = append_unique_tags(tags, bpm_key_tags)
+
   -- Keep user-assigned explorer tags across rescans
   tags = append_unique_tags(tags, (state.custom_tags and state.custom_tags[normalized_path]) or {})
   
@@ -723,6 +720,8 @@ function analyze_file(path)
     name = normalized_path:match("([^/]+)$"),  -- macOS uses forward slashes only
     folder = normalized_path:match("(.+)/[^/]+$") or "",
     duration = duration,
+    bpm = bpm,
+    key = key,
     samplerate = sr,
     channels = ch,
     bps = avg_bps,
@@ -909,6 +908,18 @@ function process_scan_slice(max_ms)
       -- Only write fields the analyzer actually produced (don't clobber with nil)
       local data = result.data
       local wrote = false
+      if type(data.file_duration) == "number" and data.file_duration > 0 then
+        sample.duration = data.file_duration
+        if type(sample.file_size) == "number" then
+          sample.bps = sample.file_size / math.max(data.file_duration, 0.01)
+        end
+      end
+      if type(data.samplerate) == "number" and data.samplerate > 0 then
+        sample.samplerate = data.samplerate
+      end
+      if type(data.channels) == "number" and data.channels > 0 then
+        sample.channels = math.floor(data.channels)
+      end
       if data.dominant_freq ~= nil then
         sample.dominant_freq = data.dominant_freq
         wrote = true
@@ -947,7 +958,7 @@ function process_scan_slice(max_ms)
       end
       if data.playback_type ~= nil then
         sample.playback_type = data.playback_type
-        apply_loop_oneshot_tag(sample, detect_loop_or_oneshot(sample.path, sample.folder or "", data.playback_type))
+        apply_loop_oneshot_tag(sample, detect_loop_or_oneshot(sample.path, sample.folder or "", data.playback_type, sample.duration))
         wrote = true
       end
       -- Full analysis just landed: if this is a drum one-shot, queue transient/sustain next.
@@ -992,6 +1003,9 @@ function process_scan_slice(max_ms)
       if wrote then
         merged_count = merged_count + 1
       end
+      if not (type(sample.duration) == "number" and sample.duration > 0) then
+        refresh_sample_file_meta(sample, sample.path)
+      end
       sm_quiet_analysis_landed(path)
       if sample_analysis_incomplete(sample) then
         local missing = sample_analysis_missing_fields(sample)
@@ -1001,6 +1015,10 @@ function process_scan_slice(max_ms)
       end
     elseif sample then
       sample._analyze_fail = (result and result.err and tostring(result.err)) or "analyzer returned no fields"
+      if not (type(sample.duration) == "number" and sample.duration > 0) then
+        -- Indexed without opening the file; let REAPER read its length instead.
+        refresh_sample_file_meta(sample, sample.path)
+      end
     elseif state.scan_session then
       state.scan_session.merge_misses = (state.scan_session.merge_misses or 0) + 1
     end
@@ -1067,6 +1085,7 @@ function process_scan_slice(max_ms)
       add_scan_log("Scan finished: all samples have analyzer fields")
     end
     finish_scan_session(still_incomplete)
+    sm_start_guess_refresh()
     return true
   end
 
