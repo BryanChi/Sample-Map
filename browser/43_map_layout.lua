@@ -350,23 +350,21 @@ function render_filter_input()
       end
     end
 
-    table.sort(ordered, function(a, b)
-      return string.lower(a) < string.lower(b)
-    end)
+    sm_sort_ci(ordered)
 
     return ordered
   end
 
   local function calc_tag_button_width(label)
     local text_w = r.ImGui_CalcTextSize(ctx, label)
-    local frame_padding = {r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())}
-    return text_w + (frame_padding[1] or 4) * 2
+    local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
+    return text_w + (pad_x or 4) * 2
   end
 
   local function calc_compact_button_width(label)
     local text_w = r.ImGui_CalcTextSize(ctx, label)
-    local frame_padding = {r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())}
-    return text_w + ((frame_padding[1] or 4) * 0.65) * 2
+    local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
+    return text_w + ((pad_x or 4) * 0.65) * 2
   end
 
   local avail_x = r.ImGui_GetContentRegionAvail(ctx)

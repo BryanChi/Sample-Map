@@ -860,7 +860,9 @@ function seq_draw_param_lane_packed_notes(dl, ctx, slot, active, def, selected_r
           draw_seq_param_value_bar(dl, item_x0, item_x1, lane_top, lane_bot, def, value, step_qn, accent, cell_selected)
         end
       end
-      local note_fx = get_seq_note_anim(entry.region_id, slot.id, entry.key, r.time_precise())
+      local anims = state.seq_note_anims
+      local note_fx = (anims and next(anims) ~= nil)
+        and get_seq_note_anim(entry.region_id, slot.id, entry.key, r.time_precise()) or nil
       if note_fx and note_fx.kind == "sync" then
         draw_seq_note_sync_flash(dl, item_x0, lane_top, item_x1, lane_bot, note_fx.t)
       end
@@ -875,14 +877,11 @@ function seq_visible_cell_is_locked(slot, col, start_qn, step_qn, active_cells)
   end
   local active = active_cells and active_cells[slot.id] and active_cells[slot.id][col]
   if active then
-    local locked = false
-    seq_for_each_active_note(active, function(entry)
-      if seq_note_is_locked(entry.note) then
-        locked = true
+    local pack = seq_active_cell_notes(active)
+    for i = 1, #pack do
+      if seq_note_is_locked(pack[i].note) then
+        return true
       end
-    end)
-    if locked then
-      return true
     end
   end
   local cell_qn = start_qn + col * step_qn

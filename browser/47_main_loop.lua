@@ -13,6 +13,9 @@ function loop()
     sm_report_error("main loop", err)
     state.sm_imgui_recover_pending = true
   end
+  sm_pcall("sm_flush_config_save", sm_flush_config_save)
+  -- After all of this frame's writes, before REAPER handles more user input.
+  sm_pcall("seq_sync_frame_end", seq_sync_frame_end)
   if SampleMapInstance.shutdown_done then
     return
   end
@@ -24,6 +27,8 @@ function loop()
 end
 
 function sm_loop_frame()
+  -- Frame-scoped memo caches (tempo map can change between frames).
+  seq_region_len_cache_reset()
   local stop_requested = (not running)
     or (r.GetExtState(SampleMapInstance.section, SampleMapInstance.key) ~= SampleMapInstance.token)
   if ctx and r.ImGui_ValidatePtr and not r.ImGui_ValidatePtr(ctx, "ImGui_Context*") then
@@ -50,6 +55,8 @@ function sm_loop_frame()
   
   sm_pcall("stop_preview_if_transport_started", stop_preview_if_transport_started)
   sm_pcall("sync_project_state_if_needed", sync_project_state_if_needed)
+  -- A project tab switch above swaps the tempo map.
+  seq_region_len_cache_reset()
   sm_pcall("ingest_seq_from_arrange", ingest_seq_from_arrange)
   sm_pcall("seq_stem_import_poll_external_request", seq_stem_import_poll_external_request)
   sm_pcall("seq_stem_import_tick", seq_stem_import_tick)

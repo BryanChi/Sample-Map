@@ -170,6 +170,69 @@ function seq_normalize_track_env(env)
   return { points = merged }
 end
 
+-- True when env is exactly what seq_normalize_track_env would return for it
+-- (only `points`; each point only numeric t/amp/curve, clamped, strictly
+-- ascending past the merge gap, curves clamped, last curve 0). Lets per-frame
+-- callers skip re-normalizing (and reallocating) an envelope every frame.
+function seq_env_is_normalized(env)
+  if type(env) ~= "table" then
+    return false
+  end
+  local pts = env.points
+  if type(pts) ~= "table" then
+    return false
+  end
+  for k in pairs(env) do
+    if k ~= "points" then
+      return false
+    end
+  end
+  local n = #pts
+  if n < 1 or n > SEQ_ENV_POINT_LIMIT then
+    return false
+  end
+  local count = 0
+  for _ in pairs(pts) do
+    count = count + 1
+  end
+  if count ~= n then
+    return false
+  end
+  local prev_t = nil
+  for i = 1, n do
+    local p = pts[i]
+    if type(p) ~= "table" then
+      return false
+    end
+    local t, amp, curve = p.t, p.amp, p.curve
+    if type(t) ~= "number" or type(amp) ~= "number" or type(curve) ~= "number" then
+      return false
+    end
+    for k in pairs(p) do
+      if k ~= "t" and k ~= "amp" and k ~= "curve" then
+        return false
+      end
+    end
+    if not (t >= 0.0) or not (amp >= 0.0 and amp <= 4.0) then
+      return false
+    end
+    if prev_t and not (t - prev_t >= 0.00005) then
+      return false
+    end
+    if i < n then
+      local nxt = pts[i + 1]
+      if type(nxt) ~= "table"
+          or curve ~= seq_env_seg_clamp_curve(amp, nxt.amp, seq_env_clamp_curve(curve)) then
+        return false
+      end
+    elseif curve ~= 0.0 then
+      return false
+    end
+    prev_t = t
+  end
+  return true
+end
+
 function seq_env_insert_point(points, t, amp)
   points = points or {}
   t = math.max(0.0, tonumber(t) or 0.0)
@@ -339,7 +402,9 @@ function seq_normalize_slot_mix(slot)
   slot.mute = slot.mute == true
   slot.solo = slot.solo == true
   slot.overlap = slot.overlap == true
-  slot.env = seq_normalize_track_env(slot.env)
+  if not seq_env_is_normalized(slot.env) then
+    slot.env = seq_normalize_track_env(slot.env)
+  end
   seq_normalize_slot_layers(slot)
   seq_normalize_slot_midi(slot)
   seq_normalize_slot_candidates(slot)
@@ -1168,6 +1233,9 @@ end
 
 
 function seq_env_shape_active(env)
+  if seq_env_is_normalized(env) then
+    return seq_env_shape_active_norm(env)
+  end
   return seq_env_shape_active_norm(seq_normalize_track_env(env))
 end
 
@@ -1201,10 +1269,24 @@ function seq_apply_slot_mix_to_reaper_track(slot)
   if not slot.reaper_track_guid then return end
   local tr = get_track_by_guid(slot.reaper_track_guid)
   if not tr then return end
-  r.SetMediaTrackInfo_Value(tr, "D_VOL", slot.volume or 1.0)
-  r.SetMediaTrackInfo_Value(tr, "D_PAN", slot.pan or 0.0)
-  r.SetMediaTrackInfo_Value(tr, "B_MUTE", slot.mute and 1 or 0)
-  r.SetMediaTrackInfo_Value(tr, "I_SOLO", slot.solo and 1 or 0)
+  -- Write only what differs: rewriting equal values still dirties the
+  -- project, and forcing I_SOLO to 1 would turn solo-in-place into plain solo.
+  local function differs(key, value)
+    local cur = r.GetMediaTrackInfo_Value(tr, key)
+    return type(cur) ~= "number" or math.abs(cur - value) > 0.0000001
+  end
+  if differs("D_VOL", slot.volume or 1.0) then
+    r.SetMediaTrackInfo_Value(tr, "D_VOL", slot.volume or 1.0)
+  end
+  if differs("D_PAN", slot.pan or 0.0) then
+    r.SetMediaTrackInfo_Value(tr, "D_PAN", slot.pan or 0.0)
+  end
+  if ((tonumber(r.GetMediaTrackInfo_Value(tr, "B_MUTE")) or 0) ~= 0) ~= (slot.mute == true) then
+    r.SetMediaTrackInfo_Value(tr, "B_MUTE", slot.mute and 1 or 0)
+  end
+  if ((tonumber(r.GetMediaTrackInfo_Value(tr, "I_SOLO")) or 0) ~= 0) ~= (slot.solo == true) then
+    r.SetMediaTrackInfo_Value(tr, "I_SOLO", slot.solo and 1 or 0)
+  end
 end
 
 function seq_apply_all_slot_mix_to_reaper()

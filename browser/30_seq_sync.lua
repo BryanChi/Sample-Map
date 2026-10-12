@@ -238,7 +238,7 @@ function insert_seq_note_hit(tr, region, track_id, step_key, note, resolved_path
   if not seq_defer_item_updates and r.UpdateItemInProject then
     r.UpdateItemInProject(item)
   end
-  seq_mark_self_arrange_write()
+  seq_mark_self_arrange_write(tr, region and region.id)
 
   -- Apply drum envelope last so earlier item/chunk writes can't wipe it.
   if take then
@@ -503,20 +503,20 @@ function remove_seq_rendered_items_for_track(region, slot, track_id)
          and tostring(get_item_ext(item, SEQ_EXT_TRACK) or "") == track_key then
         if r.DeleteTrackMediaItem(tr, item) then
           removed = removed + 1
+          seq_mark_self_arrange_write(tr, region_id)
         end
       end
     end
   end
-  local tr = slot and get_seq_slot_target_track(slot)
+  -- An unlinked slot renders on whichever track was selected at the time,
+  -- so find its items by tag on every track.
+  local tr = slot and seq_ingest_slot_track(slot)
   if tr then
     scan_track(tr)
   else
     for tr_idx = 0, r.CountTracks(0) - 1 do
       scan_track(r.GetTrack(0, tr_idx))
     end
-  end
-  if removed > 0 then
-    seq_mark_self_arrange_write()
   end
   return removed
 end
@@ -535,25 +535,26 @@ function remove_seq_rendered_items_for_step(region, slot, track_id, step_key)
     end
     for item_idx = r.CountTrackMediaItems(tr) - 1, 0, -1 do
       local item = r.GetTrackMediaItem(tr, item_idx)
-      if item and seq_item_is_owned(item, region_id)
+      -- Step first: it rules out almost every item with one read.
+      if item and tostring(get_item_ext(item, SEQ_EXT_STEP) or "") == step
          and tostring(get_item_ext(item, SEQ_EXT_TRACK) or "") == track_key
-         and tostring(get_item_ext(item, SEQ_EXT_STEP) or "") == step then
+         and seq_item_is_owned(item, region_id) then
         if r.DeleteTrackMediaItem(tr, item) then
           removed = removed + 1
+          seq_mark_self_arrange_write(tr, region_id)
         end
       end
     end
   end
-  local tr = slot and get_seq_slot_target_track(slot)
+  -- An unlinked slot renders on whichever track was selected at the time,
+  -- so find its items by tag on every track.
+  local tr = slot and seq_ingest_slot_track(slot)
   if tr then
     scan_track(tr)
   else
     for tr_idx = 0, r.CountTracks(0) - 1 do
       scan_track(r.GetTrack(0, tr_idx))
     end
-  end
-  if removed > 0 then
-    seq_mark_self_arrange_write()
   end
   return removed
 end
@@ -675,6 +676,10 @@ function seq_retarget_region_track_sources(region, slot)
   end
 
   seq_pcm_take_src_begin()
+  local own_memo = seq_trigger_memo == nil
+  if own_memo then
+    seq_trigger_memo = {}
+  end
   local ok = true
   for step, info in pairs(expected) do
     if not ok then
@@ -731,11 +736,14 @@ function seq_retarget_region_track_sources(region, slot)
       end
     end
   end
+  if own_memo then
+    seq_trigger_memo = nil
+  end
   seq_pcm_take_src_end()
   if not ok then
     return false
   end
-  seq_mark_self_arrange_write()
+  seq_mark_self_arrange_write(tr, region_id)
   return true
 end
 
@@ -757,11 +765,18 @@ function sync_seq_region_track(region, slot, opts)
       seq_pcm_take_src_begin()
       local prev_defer = seq_defer_item_updates
       seq_defer_item_updates = true
+      local own_memo = seq_trigger_memo == nil
+      if own_memo then
+        seq_trigger_memo = {}
+      end
       for step_key, note in pairs(track_notes) do
         if type(note) == "table" and note.enabled ~= false
            and seq_note_in_region(region, note, step_key) then
           insert_seq_note_item(region, slot, slot.id, step_key, note)
         end
+      end
+      if own_memo then
+        seq_trigger_memo = nil
       end
       seq_defer_item_updates = prev_defer
       seq_pcm_take_src_end()
@@ -905,6 +920,12 @@ function sync_seq_region(region, opts)
   local prev_defer = seq_defer_item_updates
   seq_defer_item_updates = true
   seq_pcm_take_src_begin()
+  -- Notes are only read below, so each note's next hit can come from one
+  -- sorted list per track instead of a scan of every note.
+  local own_memo = seq_trigger_memo == nil
+  if own_memo then
+    seq_trigger_memo = {}
+  end
   for _, slot in ipairs(state.seq_tracks) do
     seq_normalize_slot_mix(slot)
     if not opts.skip_mix then
@@ -919,6 +940,9 @@ function sync_seq_region(region, opts)
         end
       end
     end
+  end
+  if own_memo then
+    seq_trigger_memo = nil
   end
   seq_pcm_take_src_end()
   seq_defer_item_updates = prev_defer
@@ -938,7 +962,7 @@ function sync_seq_pattern_regions(pattern_id)
   end
 end
 
-function seq_sync_linked_arrange_from(region)
+function seq_sync_linked_arrange_from(region, changed_slots)
   if not region or not region.pattern_id then
     return
   end
@@ -958,30 +982,44 @@ function seq_sync_linked_arrange_from(region)
   if r.PreventUIRefresh then
     r.PreventUIRefresh(1)
   end
-  local rebuild = {}
-  local pruned = false
-  for i = 1, #others do
-    if seq_prune_stale_region_items(others[i]) > 0 then
-      pruned = true
+  local touched = false
+  if type(changed_slots) == "table" then
+    -- Rebuild the tracks whose notes changed. Counting items missed edits
+    -- that keep the count (volume, pitch, a nudge inside the cell).
+    for _, slot in ipairs(state.seq_tracks or {}) do
+      if changed_slots[slot.id] then
+        for i = 1, #others do
+          sync_seq_region_track(others[i], slot, { skip_arrange = true, force_rebuild = true })
+        end
+        touched = true
+      end
     end
-  end
-  -- Pruning only touches each region's own items, so count all regions in
-  -- one scan afterwards instead of rescanning every track per region.
-  local owned_counts = seq_count_owned_primary_items_by_region()
-  for i = 1, #others do
-    local item_n = owned_counts[others[i].id] or 0
-    local note_n = seq_region_expected_primary_notes(others[i])
-    if item_n ~= note_n then
-      rebuild[#rebuild + 1] = others[i]
+  else
+    local rebuild = {}
+    for i = 1, #others do
+      if seq_prune_stale_region_items(others[i]) > 0 then
+        touched = true
+      end
     end
-  end
-  for i = 1, #rebuild do
-    sync_seq_region(rebuild[i], { skip_cache_clear = true, skip_arrange = true })
+    -- Pruning only touches each region's own items, so count all regions in
+    -- one scan afterwards instead of rescanning every track per region.
+    local owned_counts = seq_count_owned_primary_items_by_region()
+    for i = 1, #others do
+      local item_n = owned_counts[others[i].id] or 0
+      local note_n = seq_region_expected_primary_notes(others[i])
+      if item_n ~= note_n then
+        rebuild[#rebuild + 1] = others[i]
+      end
+    end
+    for i = 1, #rebuild do
+      sync_seq_region(rebuild[i], { skip_cache_clear = true, skip_arrange = true })
+      touched = true
+    end
   end
   if r.PreventUIRefresh then
     r.PreventUIRefresh(-1)
   end
-  if pruned or #rebuild > 0 then
+  if touched then
     r.UpdateArrange()
   end
 end

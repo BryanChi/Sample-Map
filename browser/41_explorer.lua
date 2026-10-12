@@ -94,8 +94,8 @@ function explorer_ensure_sorted(entry)
   if not entry or entry.sorted then
     return
   end
-  table.sort(entry.dirs, function(a, b) return string.lower(a) < string.lower(b) end)
-  table.sort(entry.files, function(a, b) return string.lower(a) < string.lower(b) end)
+  sm_sort_ci(entry.dirs)
+  sm_sort_ci(entry.files)
   entry.sorted = true
 end
 
@@ -356,8 +356,8 @@ function explorer_list_dir_from_disk(path)
     return nil, nil
   end
 
-  table.sort(dirs, function(a, b) return string.lower(a) < string.lower(b) end)
-  table.sort(files, function(a, b) return string.lower(a) < string.lower(b) end)
+  sm_sort_ci(dirs)
+  sm_sort_ci(files)
   local dir_set, file_set = {}, {}
   for _, name in ipairs(dirs) do
     dir_set[name] = true
@@ -760,7 +760,7 @@ function explorer_known_tags()
       out[#out + 1] = child
     end
   end
-  table.sort(out, function(a, b) return string.lower(a) < string.lower(b) end)
+  sm_sort_ci(out)
   return out
 end
 

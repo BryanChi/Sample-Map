@@ -157,6 +157,15 @@ function find_seq_parent_folder_track()
     end
     state.seq_folder_guid = nil
   end
+  -- Projects without the folder hit this scan a couple of times per frame.
+  -- Remember the miss until the project (or anything in it) changes: track
+  -- adds, renames and folder-depth edits all bump the state change count.
+  local proj = r.EnumProjects and r.EnumProjects(-1) or nil
+  local change = r.GetProjectStateChangeCount and r.GetProjectStateChangeCount(0) or nil
+  local miss = seq_parent_folder_miss
+  if miss and change and miss.proj == proj and miss.change == change then
+    return nil
+  end
   local n = r.CountTracks(0)
   for i = 0, n - 1 do
     local tr = r.GetTrack(0, i)
@@ -164,11 +173,13 @@ function find_seq_parent_folder_track()
     if name == SEQ_TRACK_FOLDER_NAME then
       local depth = r.GetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH") or 0
       if depth >= 1 then
+        seq_parent_folder_miss = nil
         state.seq_folder_guid = r.GetTrackGUID(tr)
         return tr
       end
     end
   end
+  seq_parent_folder_miss = change and { proj = proj, change = change } or nil
   return nil
 end
 
@@ -182,6 +193,7 @@ function create_seq_parent_folder_track()
   r.GetSetMediaTrackInfo_String(tr, "P_NAME", SEQ_TRACK_FOLDER_NAME, true)
   r.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH", 0)
   state.seq_folder_guid = r.GetTrackGUID(tr)
+  seq_parent_folder_miss = nil
   return tr
 end
 

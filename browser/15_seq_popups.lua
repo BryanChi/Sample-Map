@@ -723,9 +723,9 @@ end
 function seq_sample_controls_item_spacing()
   local item_spacing = 8.0
   if r.ImGui_GetStyleVar and r.ImGui_StyleVar_ItemSpacing then
-    local spacing = { r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing()) }
-    if spacing[1] and spacing[1] > 0 then
-      item_spacing = spacing[1]
+    local spacing_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing())
+    if spacing_x and spacing_x > 0 then
+      item_spacing = spacing_x
     end
   end
   return item_spacing

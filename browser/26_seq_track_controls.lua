@@ -927,6 +927,13 @@ function seq_lane_mix_controls_hit(row_pos, mx, my, x0, timeline_x0, map_nav_w)
   end
   local layout = row_pos.ctrl
   if not layout and x0 and timeline_x0 then
+    -- Offscreen rows have no cached layout. Control boxes sit inside their
+    -- row, so a pointer more than a row height away cannot hit them; skip
+    -- building a throwaway layout for every offscreen row every frame.
+    local row_h = (row_pos.y1 or 0) - (row_pos.y0 or 0)
+    if my and (my < row_pos.y0 - row_h or my > row_pos.y1 + row_h) then
+      return false
+    end
     local nav_w = map_nav_w or seq_track_nav_width(row_pos.y1 - row_pos.y0)
     layout = seq_get_track_control_layout(
       x0, row_pos.y0, timeline_x0 - nav_w - 6.0, row_pos.y1,
