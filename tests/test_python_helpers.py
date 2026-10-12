@@ -70,3 +70,18 @@ def test_parse_and_extract_one_bar():
     assert tpb == 1920
     assert pattern["kick"] == [0, 4, 8, 12]
     assert velocities["kick"]["0"] == 100
+
+
+def test_pick_preview_bar_skips_count_in_and_sparse_bars():
+    tpq = 480
+    tpb = tpq * 4
+    s16 = tpb // 16
+    notes = [(0, 42, 90)]  # bar 0: a lone count-in hat
+    notes += [(tpb + 4 * s16, 38, 100)]  # bar 1: one snare, too sparse
+    for step in (0, 4, 8, 12):  # bar 2: a real groove
+        notes.append((2 * tpb + step * s16, 36, 110))
+        notes.append((2 * tpb + step * s16 + 2 * s16, 42, 80))
+    bar, pattern = groove.pick_preview_bar(notes, tpq, [], 3)
+    assert bar == 2
+    assert pattern["kick"] == [0, 4, 8, 12]
+    assert pattern["hat"] == [2, 6, 10, 14]

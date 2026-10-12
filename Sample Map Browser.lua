@@ -54,6 +54,7 @@ SAMPLE_MAP_BROWSER_MODULES = {
   "17_seq_arrange_overlay.lua",
   "18_seq_regions.lua",
   "19_seq_random.lua",
+  "19b_seq_pattern_library.lua",
   "20_seq_random_ui.lua",
   "21_seq_notes.lua",
   "22_seq_parent_items.lua",
