@@ -399,6 +399,14 @@ function settings_render_dot_appearance()
 end
 
 function settings_render_tag_layout()
+  if settings_show("Tag groups on search row", "Search", "Tags", "Drum", "Melodic", "Library") then
+    local changed, v = draw_ui_checkbox("settings_tag_groups_row", "Tag groups on search row", tag_groups_on_search_row())
+    if changed then
+      set_tag_groups_on_search_row(v)
+    end
+    r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Drum, Melodic, Library and Loop / One shot sit next to the search field. Click a group to show its tags. Collapse children tags below only applies when this is off.")
+    r.ImGui_Spacing(ctx)
+  end
   if settings_show("Hide tags until search is clicked", "Search", "Tags") then
     local changed, v = draw_ui_checkbox("settings_tags_hide_until_search", "Hide tags until search is clicked", state.tags_hide_until_search == true)
     if changed then

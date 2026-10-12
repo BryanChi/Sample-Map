@@ -564,6 +564,9 @@ function load_config()
             or cfg.collapse_children_tags == "dynamic" then
           state.collapse_children_tags = cfg.collapse_children_tags
         end
+        if type(cfg.tag_groups_on_search_row) == "boolean" then
+          state.tag_groups_on_search_row = cfg.tag_groups_on_search_row
+        end
         if type(cfg.tags_hide_until_search) == "boolean" then
           state.tags_hide_until_search = cfg.tags_hide_until_search
         end
@@ -827,6 +830,7 @@ function save_config_file()
     collapse_children_tags = state.collapse_children_tags,
     collapse_children_tags_width = state.collapse_children_tags_width,
     tags_hide_until_search = state.tags_hide_until_search == true,
+    tag_groups_on_search_row = state.tag_groups_on_search_row ~= false,
     custom_tags = state.custom_tags,
     deleted_tags = state.deleted_tags,
     explorer_open = state.explorer_open and true or false,

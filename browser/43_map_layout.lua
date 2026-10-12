@@ -781,11 +781,15 @@ function render_header()
       if seq_floating then dock_floating_view("sequencer") else pop_out_view("sequencer") end
     end
     r.ImGui_Separator(ctx)
+    if r.ImGui_MenuItem(ctx, "Tag Groups on Search Row", nil, tag_groups_on_search_row()) then
+      set_tag_groups_on_search_row(not tag_groups_on_search_row())
+    end
+    menu_item_tooltip("Drum, Melodic, Library and Loop / One shot sit on the search row.\nClick a group to show its tags.\nTurn off to list every tag in rows under the search field.")
     if r.ImGui_MenuItem(ctx, "Hide Tags Until Search Is Clicked", nil, state.tags_hide_until_search == true) then
       set_tags_hide_until_search(not state.tags_hide_until_search)
     end
     menu_item_tooltip("Keep the Sample Map tag rows hidden.\nClick the search field to show them.")
-    if r.ImGui_BeginMenu(ctx, "Collapse Children Tags") then
+    if r.ImGui_BeginMenu(ctx, "Collapse Children Tags", not tag_groups_on_search_row()) then
       local mode = state.collapse_children_tags or "off"
       if r.ImGui_MenuItem(ctx, "Off", nil, mode == "off") then
         set_collapse_children_tags_mode("off")

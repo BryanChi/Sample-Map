@@ -375,17 +375,44 @@ function render_map_layout_toggle()
 end
 
 function render_sample_map_toolbar()
+  state.hovered_tag = nil
   local cluster_w = map_toolbar_right_cluster_width()
   local row_x0 = r.ImGui_GetCursorScreenPos(ctx)
   local row_y0 = select(2, r.ImGui_GetCursorScreenPos(ctx))
-  render_filter_input(cluster_w + UI_METRICS.toolbar_gap)
+  -- Uses last frame's search focus; a click on the field opens the band a
+  -- frame later, which is not visible.
+  local show_tags = sample_map_tag_band_visible()
+  local row_items = (show_tags and tag_groups_on_search_row()) and search_row_tag_items() or {}
+  -- Keep room for the group chips: the active-tag pills in the search field
+  -- fold into "+N" before Loop / One shot get pushed off the row.
+  local items_w = 0
+  for i, item in ipairs(row_items) do
+    items_w = items_w + search_row_item_gap(item, i) + item.w
+  end
+  render_filter_input(cluster_w + UI_METRICS.toolbar_gap + items_w)
   render_folder_filter_chips()
 
   -- Right cluster: pinned to the window's right edge on the search row when
   -- it fits there, otherwise it wraps onto its own line.
   local right_x = imgui_window_right_x()
-  local last_x1 = select(1, r.ImGui_GetItemRectMax(ctx))
   local cluster_x = right_x - cluster_w
+
+  -- Group chips and Loop / One shot fill the search row up to the cluster;
+  -- whatever does not fit wraps under it.
+  local next_item = 1
+  while next_item <= #row_items do
+    local item = row_items[next_item]
+    local gap = search_row_item_gap(item, next_item)
+    local last_x2 = select(1, r.ImGui_GetItemRectMax(ctx))
+    if last_x2 + gap + item.w > cluster_x - UI_METRICS.toolbar_gap then
+      break
+    end
+    r.ImGui_SameLine(ctx, 0, gap)
+    draw_search_row_tag_item(item, row_y0, UI_METRICS.toolbar_h)
+    next_item = next_item + 1
+  end
+
+  local last_x1 = select(1, r.ImGui_GetItemRectMax(ctx))
   if cluster_x >= last_x1 + UI_METRICS.toolbar_gap then
     r.ImGui_SameLine(ctx)
     r.ImGui_SetCursorScreenPos(ctx, cluster_x, row_y0)
@@ -394,9 +421,11 @@ function render_sample_map_toolbar()
   r.ImGui_SameLine(ctx, 0, UI_METRICS.toolbar_gap)
   render_map_layout_toggle()
 
+  local overflow = next_item <= #row_items
+  local band = show_tags and tag_band_has_content()
+
   -- Tag filters get their own band under a hairline.
-  local show_tags = sample_map_tag_band_visible()
-  if show_tags and state.tag_list and #state.tag_list > 0 then
+  if band or overflow then
     r.ImGui_Dummy(ctx, 1, 1)
     local lx, ly = r.ImGui_GetCursorScreenPos(ctx)
     local dl = r.ImGui_GetWindowDrawList(ctx)
@@ -404,8 +433,26 @@ function render_sample_map_toolbar()
     r.ImGui_Dummy(ctx, 1, 3)
   end
   r.ImGui_Dummy(ctx, 0, 0)
+  -- Search-row chips that did not fit start the band, and the open groups
+  -- continue on the same line, so Loop / One shot never get a line alone.
+  if overflow then
+    for i = next_item, #row_items do
+      local item = row_items[i]
+      if i > next_item then
+        tag_chips_compact_push()
+        imgui_same_line_if_fits(item.w, search_row_item_gap(item, 2))
+        tag_chips_compact_pop()
+      end
+      draw_search_row_tag_item(item)
+    end
+    state.tag_band_continue_line = true
+  end
   if show_tags then
-    render_tag_filters()
+    if band then
+      render_tag_filters()
+    else
+      render_tag_color_picker()
+    end
     -- Search row + band, so moving from the search field to a tag (and the
     -- click on it, which takes focus from the field) keeps the band open.
     local by1 = select(2, r.ImGui_GetCursorScreenPos(ctx))
@@ -414,6 +461,7 @@ function render_sample_map_toolbar()
     state.hovered_tag = nil
     state.tag_band_rect = nil
   end
+  state.tag_band_continue_line = nil
   render_tag_delete_popup()
   render_library_tag_path_menu()
 end

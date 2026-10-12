@@ -2466,43 +2466,206 @@ function render_parent_with_children(label, key, entries)
   tag_group_draw(g)
 end
 
-function render_tag_filters()
-  if not state.tag_list or #state.tag_list == 0 then
-    return
-  end
-
-  -- Reset hovered tag at start of frame
-  state.hovered_tag = nil
-  tag_chips_compact_push()
-  r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 3, 5)
-
-  -- Categorize tags
-  local drum_tags = {}
-  local melodic_tags = {}
-  local genre_tags = {}
-  local loop_tags = {}
+-- Tags of state.tag_list split by group: drum, melodic, genre (Library),
+-- loop (Loop / One shot) and custom parents ({ [id] = { parent, entries } }).
+function sm_collect_tag_groups()
+  local drum_tags, melodic_tags, genre_tags, loop_tags = {}, {}, {}, {}
   local extra_groups = {}
   for _, parent in ipairs(state.custom_tag_parents or {}) do
     if parent and parent.id then
       extra_groups[parent.id] = { parent = parent, entries = {} }
     end
   end
-
-  for _, entry in ipairs(state.tag_list) do
-    local tag = entry.tag
-    local category = categorize_tags(tag)
+  for _, entry in ipairs(state.tag_list or {}) do
+    local category = categorize_tags(entry.tag)
     if category == "drum" then
-      table.insert(drum_tags, entry)
+      drum_tags[#drum_tags + 1] = entry
     elseif category == "melodic" then
-      table.insert(melodic_tags, entry)
+      melodic_tags[#melodic_tags + 1] = entry
     elseif category == "genre" then
-      table.insert(genre_tags, entry)
+      genre_tags[#genre_tags + 1] = entry
     elseif category == "loop" then
-      table.insert(loop_tags, entry)
+      loop_tags[#loop_tags + 1] = entry
     elseif category and extra_groups[category] then
-      table.insert(extra_groups[category].entries, entry)
+      local g = extra_groups[category].entries
+      g[#g + 1] = entry
     end
   end
+  return drum_tags, melodic_tags, genre_tags, loop_tags, extra_groups
+end
+
+-- --- Group tags on the search row ---------------------------------------------
+-- (Settings > Tag Layout, View menu; on by default.) The search row carries
+-- one header chip per group (Drum, Melodic, Library, custom parents) plus
+-- Loop / One shot. Clicking a group opens its child tags in the band below;
+-- several groups can be open at once.
+function tag_groups_on_search_row()
+  return state.tag_groups_on_search_row ~= false
+end
+
+function set_tag_groups_on_search_row(on)
+  on = on == true
+  if tag_groups_on_search_row() ~= on then
+    state.tag_groups_on_search_row = on
+    save_config()
+  end
+end
+
+-- Ordered groups that have tags: { key, label, entries, toggles_all }.
+-- Library never applies a group filter (it would match nearly everything).
+function sm_tag_group_list()
+  local drum, melodic, genre, loop, extra = sm_collect_tag_groups()
+  local out = {}
+  local function add(key, label, entries, toggles_all)
+    if entries and #entries > 0 then
+      out[#out + 1] = { key = key, label = label, entries = entries, toggles_all = toggles_all }
+    end
+  end
+  add("drum", "Drum", drum, true)
+  add("melodic", "Melodic", melodic, true)
+  add("genre", "Library", genre, false)
+  for _, parent in ipairs(state.custom_tag_parents or {}) do
+    local g = extra[parent.id]
+    if g then
+      add(parent.id, parent.label, g.entries, true)
+    end
+  end
+  return out, loop
+end
+
+-- Items for the search row, measured under the compact chip padding.
+function search_row_tag_items()
+  if not state.tag_list or #state.tag_list == 0 then
+    return {}
+  end
+  local groups, loop = sm_tag_group_list()
+  local items = {}
+  tag_chips_compact_push()
+  for _, g in ipairs(groups) do
+    items[#items + 1] = { kind = "group", group = g, w = calc_category_chip_width(g.label, true) }
+  end
+  for i, entry in ipairs(loop) do
+    items[#items + 1] = { kind = "tag", tag = entry.tag, w = tag_chip_width(entry.tag), first_tag = i == 1 }
+  end
+  tag_chips_compact_pop()
+  return items
+end
+
+function search_row_item_gap(item, idx)
+  if idx == 1 then
+    return UI_METRICS.toolbar_gap
+  end
+  return item.first_tag and 10 or 3
+end
+
+-- Draws one item at the cursor. row_h: height to centre the chip on, or nil.
+function draw_search_row_tag_item(item, row_y0, row_h)
+  tag_chips_compact_push()
+  if row_y0 and row_h then
+    local _, th = r.ImGui_CalcTextSize(ctx, "Ag")
+    local chip_h = th + TAG_CHIP_COMPACT_PAD_Y * 2
+    local x = r.ImGui_GetCursorScreenPos(ctx)
+    r.ImGui_SetCursorScreenPos(ctx, x, row_y0 + math.floor((row_h - chip_h) * 0.5))
+  end
+  if item.kind == "group" then
+    local g = item.group
+    local open = is_tag_parent_selected(g.key)
+    if draw_category_tag(ctx, g.label, "row_grp_", tag_group_has_active(g.entries), {
+      chevron = open and "down" or "right",
+    }) then
+      toggle_tag_parent_selected(g.key)
+    end
+    if r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
+      r.ImGui_SetTooltip(ctx, open and ("Hide " .. g.label .. " tags") or ("Show " .. g.label .. " tags"))
+    end
+  else
+    if draw_tag_button(ctx, item.tag, state.active_tags[item.tag], item.tag, "row_") then
+      toggle_sample_map_tag_filter(item.tag)
+    end
+  end
+  tag_chips_compact_pop()
+end
+
+-- Band under the search row: one tray per open group, side by side when they
+-- fit. The group header in the tray toggles all of its tags (not Library).
+function render_open_tag_groups()
+  local groups = sm_tag_group_list()
+  local open_keys = {}
+  for _, g in ipairs(groups) do
+    if is_tag_parent_selected(g.key) then
+      open_keys[g.key] = true
+    end
+  end
+  -- Drop cached trays of closed groups before painting the cache.
+  if state.tag_group_bg then
+    for key in pairs(state.tag_group_bg) do
+      if not open_keys[key] then
+        state.tag_group_bg[key] = nil
+      end
+    end
+  end
+  tag_group_paint_cached()
+  local first = not state.tag_band_continue_line
+  for _, g in ipairs(groups) do
+    if open_keys[g.key] then
+      if not first then
+        local last_x2 = r.ImGui_GetItemRectMax(ctx)
+        if last_x2 + 12 + measure_tag_group_width(g.label, g.entries) <= imgui_window_right_x() then
+          r.ImGui_SameLine(ctx, 0, 12)
+        end
+      end
+      first = false
+      local tg = tag_group_begin(g.key)
+      if draw_category_tag(ctx, g.label, "open_grp_", tag_group_has_active(g.entries)) and g.toggles_all then
+        toggle_tag_group(g.entries)
+      end
+      if g.toggles_all and r.ImGui_IsItemHovered(ctx) and r.ImGui_SetTooltip then
+        r.ImGui_SetTooltip(ctx, "Turn all " .. g.label .. " tags on or off")
+      end
+      tag_group_mark_parent(tg)
+      r.ImGui_SameLine(ctx)
+      tag_group_divider()
+      render_wrapping_tag_entries(g.entries, tg)
+      tag_group_draw(tg)
+    end
+  end
+end
+
+-- True when the band under the search row has anything to show.
+function tag_band_has_content()
+  if not state.tag_list or #state.tag_list == 0 then
+    return false
+  end
+  if not tag_groups_on_search_row() then
+    return true
+  end
+  for _, g in ipairs(sm_tag_group_list()) do
+    if is_tag_parent_selected(g.key) then
+      return true
+    end
+  end
+  return false
+end
+
+function render_tag_filters()
+  if not state.tag_list or #state.tag_list == 0 then
+    return
+  end
+
+  -- state.hovered_tag is reset by render_sample_map_toolbar(), before the
+  -- search-row chips draw.
+  tag_chips_compact_push()
+  r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 3, 5)
+
+  if tag_groups_on_search_row() then
+    render_open_tag_groups()
+    r.ImGui_PopStyleVar(ctx)
+    tag_chips_compact_pop()
+    render_tag_color_picker()
+    return
+  end
+
+  local drum_tags, melodic_tags, genre_tags, loop_tags, extra_groups = sm_collect_tag_groups()
 
   -- Loop / one-shot sit on the search row when there is room.
   if #loop_tags > 0 then
@@ -2560,6 +2723,10 @@ function render_tag_filters()
   r.ImGui_PopStyleVar(ctx)
   tag_chips_compact_pop()
 
+  render_tag_color_picker()
+end
+
+function render_tag_color_picker()
   -- Check for shortcut when hovering over a tag
   if state.hovered_tag and shortcut_pressed("tag_color") then
     state.tag_color_picker_tag = state.hovered_tag
