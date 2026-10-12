@@ -399,6 +399,14 @@ function settings_render_dot_appearance()
 end
 
 function settings_render_tag_layout()
+  if settings_show("Hide tags until search is clicked", "Search", "Tags") then
+    local changed, v = draw_ui_checkbox("settings_tags_hide_until_search", "Hide tags until search is clicked", state.tags_hide_until_search == true)
+    if changed then
+      set_tags_hide_until_search(v)
+    end
+    r.ImGui_TextColored(ctx, UI_THEME.text_dim, "Sample Map tag rows stay hidden until you click the search field.")
+    r.ImGui_Spacing(ctx)
+  end
   if settings_show("Collapse children tags", "Drum", "Melodic", "Genre", "Library", "Off", "On", "Dynamic") then
     r.ImGui_Text(ctx, "Collapse children tags")
     r.ImGui_TextColored(ctx, UI_THEME.text_dim, "When on, Drum / Melodic / Library sit on the search row. Select a parent to reveal its child tags on the right; they wrap to the next line if needed.")

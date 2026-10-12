@@ -305,6 +305,8 @@ state = {
   -- "on" | "off" | "dynamic" (dynamic uses collapse_children_tags_width).
   collapse_children_tags = "off",
   collapse_children_tags_width = 1100,
+  -- Sample Map tag band stays hidden until the search field is clicked.
+  tags_hide_until_search = false,
   selected_tag_parents = {}, -- Collapsed mode: which parent chips are expanded (drum/melodic/genre)
   played_history = {},  -- Array of played samples (history)
   history_index = 0,  -- Current position in history (0 = most recent, higher = older)
