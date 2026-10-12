@@ -64,6 +64,7 @@ SAMPLE_MAP_BROWSER_MODULES = {
   "26_seq_track_controls.lua",
   "27_seq_midi_env_popups.lua",
   "28_drum_layering.lua",
+  "28b_drum_layering_ui.lua",
   "29_groove.lua",
   "30_seq_sync.lua",
   "31_seq_ingest.lua",
