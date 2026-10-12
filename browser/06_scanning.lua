@@ -289,8 +289,12 @@ function sm_scan_enum_file(enum, dir, file)
     state.analyzer_path_mode[path] = mode
     return true
   end
-  local size, mtime = file_identity(normalized_full_path)
-  if sample_file_changed(existing, size, mtime) then
+  -- Quick rescan: only new and removed files; skip the per-file stat of known ones.
+  local size, mtime = nil, nil
+  if not enum.quick then
+    size, mtime = file_identity(normalized_full_path)
+  end
+  if not enum.quick and sample_file_changed(existing, size, mtime) then
     stamp_sample_file_id(existing, size, mtime)
     clear_sample_analysis_fields(existing)
     refresh_sample_file_meta(existing, normalized_full_path)
@@ -467,7 +471,8 @@ function sm_scan_enum_finish()
     log(string.format("Rescanning folder (%d new file(s)): %s", #paths, folder_label))
   else
     add_scan_log(string.format(
-      "Scan started: %d new, %d changed, %d incomplete, %d unchanged",
+      "%s started: %d new, %d changed, %d incomplete, %d unchanged",
+      enum.quick and "Quick rescan" or "Scan",
       #paths, reanalyze_count, incomplete_count, skipped_count
     ))
     log(string.format("Scan started: %d new file(s), %d already indexed", #paths, skipped_count))
@@ -483,7 +488,7 @@ function sm_scan_enum_finish()
       session.started_at = r.time_precise()
     end
   else
-    begin_scan_session(folder_label and "Folder rescan" or "Library scan", {
+    begin_scan_session(folder_label and "Folder rescan" or (enum.quick and "Quick rescan" or "Library scan"), {
       detail = folder_label,
       new_files = #paths,
       changed_files = reanalyze_count,
@@ -496,7 +501,7 @@ end
 
 -- folder_only: nil (all folders), one folder path, or a list of folder paths.
 -- New files are appended (deduplicated) to any pending scan_queue.
-function enqueue_scan(folder_only)
+function enqueue_scan(folder_only, quick)
   local folders_to_scan = state.folders
   local folder_label = nil
   if type(folder_only) == "table" then
@@ -531,6 +536,7 @@ function enqueue_scan(folder_only)
       incomplete = 0,
       errors = 0,
       folder_label = folder_label,
+      quick = quick and true or false,
       appending = #state.scan_queue > 0
         or (state.scan_running and (#state.analyzer_queue > 0 or #state.active_processes > 0)),
     }
@@ -549,6 +555,9 @@ function enqueue_scan(folder_only)
     add_scan_log(folder_label and ("Listing files in " .. folder_label .. "…") or "Listing files in library folders…")
   elseif enum.folder_label ~= folder_label then
     enum.folder_label = (enum.folder_label and folder_label) and "several folders" or nil
+  end
+  if not quick then
+    enum.quick = false
   end
 
   for i = #folders_to_scan, 1, -1 do
@@ -578,7 +587,7 @@ function scan_is_active()
   return false
 end
 
-function start_scan(folder_only)
+function start_scan(folder_only, quick)
   if sm_recheck_numpy_after_install then
     sm_recheck_numpy_after_install()
   end
@@ -607,7 +616,7 @@ function start_scan(folder_only)
     end
     return
   end
-  enqueue_scan(folder_only)
+  enqueue_scan(folder_only, quick)
 end
 
 function stop_scan()

@@ -707,7 +707,13 @@ function render_header()
           #state.scan_queue
         ))
       else
-        menu_item_tooltip("Scan folders for new files.\nAlready indexed samples are skipped.")
+        menu_item_tooltip("Scan folders for new, changed and removed files.\nAlready indexed samples are skipped.")
+      end
+      if #state.scan_queue == 0 then
+        if r.ImGui_MenuItem(ctx, "Quick Rescan") then
+          start_scan(nil, true)
+        end
+        menu_item_tooltip("Only look for new and removed files (faster on big libraries).\nA file edited in place keeps its old analysis until a full Rescan.")
       end
     end
     if r.ImGui_MenuItem(ctx, "Manage Scan Folders…") then

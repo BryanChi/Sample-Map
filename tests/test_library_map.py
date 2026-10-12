@@ -132,3 +132,53 @@ def test_rescan_prunes_missing_files_only_in_reachable_folders():
       return table.concat(names, ",")
     ''')
     assert out == "/lib/A/kick.wav,/lib/Offline/pad.wav"
+
+
+def test_quick_rescan_skips_stat_of_known_files_but_finds_new_and_removed():
+    L = _runtime()
+    out = L.execute(r'''
+      local files = {
+        ["/lib/A"] = { "kick.wav", "snare.wav", "new.wav" },
+        ["/lib/A/kick.wav"] = true, ["/lib/A/snare.wav"] = true, ["/lib/A/new.wav"] = true,
+      }
+      reaper.EnumerateFiles = function(dir, i)
+        local list = files[dir]
+        if type(list) ~= "table" or i < 0 then return nil end
+        return list[i + 1]
+      end
+      reaper.EnumerateSubdirectories = function() return nil end
+      reaper.file_exists = function(p) return files[p] ~= nil end
+      local stats = 0
+      reaper.JS_File_Stat = function(p) stats = stats + 1; return 1, 1000, "", "2026" end
+      local function run(quick)
+        state.folders = { "/lib/A" }
+        state.samples = {
+          { path = "/lib/A/kick.wav", file_id_size = 999, mtime = "2025", dominant_freq = 1, rms_energy = 1,
+            brightness = 1, sub_weight = 1, effective_duration = 1, playback_type = "oneshot" },
+          { path = "/lib/A/snare.wav" },
+          { path = "/lib/A/gone.wav" },
+        }
+        state.scan_queue, state.analyzer_queue = {}, {}
+        rebuild_samples_path_index()
+        stats = 0
+        enqueue_scan(nil, quick)
+        for _ = 1, 50 do
+          if sm_scan_enum_step(50) then break end
+        end
+        local names = {}
+        for _, s in ipairs(state.samples) do names[#names + 1] = s.path end
+        local changed = state.samples[1].file_id_size
+        return stats, table.concat(state.scan_queue, ","), table.concat(names, ","), changed
+      end
+      local fs, fq, fn, fc = run(false)
+      local qs, qq, qn, qc = run(true)
+      return fs, fq, fn, fc, qs, qq, qn, qc
+    ''')
+    fs, fq, fn, fc, qs, qq, qn, qc = out
+    # Full rescan stats both known files and notices kick.wav changed size.
+    assert fs == 2 and fc == 1000
+    # Quick rescan stats nothing and leaves kick.wav alone.
+    assert qs == 0 and qc == 999
+    # Both find the new file and drop the deleted one.
+    assert fq == qq == "/lib/A/new.wav"
+    assert fn == qn == "/lib/A/kick.wav,/lib/A/snare.wav"
