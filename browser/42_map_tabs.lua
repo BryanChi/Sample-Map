@@ -264,7 +264,25 @@ function map_toolbar_right_cluster_width()
     w = w + (select(1, r.ImGui_CalcTextSize(ctx, MAP_Y_AXIS_SHORT[id] or id)) or 30) + seg_pad * 2 + 2
   end
   w = w + 3
+  if state.map_ui_edit then
+    w = w + UI_METRICS.toolbar_gap + map_layout_reset_button_width()
+  end
   return w + UI_METRICS.toolbar_gap + UI_METRICS.toolbar_h
+end
+
+function map_layout_reset_button_width()
+  return (select(1, r.ImGui_CalcTextSize(ctx, "Reset layout")) or 70) + 20
+end
+
+function reset_map_ui_layout()
+  -- No undo for layouts, so ask first.
+  if r.ShowMessageBox("Reset the map layout to the default arrangement?", "Reset layout", 4) == 6 then
+    state.map_ui_layout = default_map_ui_layout()
+    state.map_ui_drag = nil
+    state.map_ui_drop = nil
+    state.map_ui_split_drag = nil
+    save_config()
+  end
 end
 
 -- Y-axis picker as a segmented control: one click per axis instead of a
@@ -327,6 +345,15 @@ end
 
 function render_map_layout_toggle()
   local h = UI_METRICS.toolbar_h
+  if state.map_ui_edit then
+    if draw_ui_button("map_layout_reset", "Reset layout", map_layout_reset_button_width(), h, { compact = true }) then
+      reset_map_ui_layout()
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      r.ImGui_SetTooltip(ctx, "Put every module back in the default arrangement (asks first).")
+    end
+    r.ImGui_SameLine(ctx, 0, UI_METRICS.toolbar_gap)
+  end
   if draw_ui_button("map_layout_edit", nil, h, h, {
     icon = "layout",
     compact = true,
@@ -340,7 +367,7 @@ function render_map_layout_toggle()
   end
   if r.ImGui_IsItemHovered(ctx) then
     if state.map_ui_edit then
-      r.ImGui_SetTooltip(ctx, "Layout edit mode is on.\nDrag a module to move it, drag its edges to resize.\nDouble-click a module to reset the layout (asks first).\nClick to finish.")
+      r.ImGui_SetTooltip(ctx, "Editing the layout.\nDrag a module by its name to move it; drag the grips between modules to resize.\nClick here or press Esc to finish.")
     else
       r.ImGui_SetTooltip(ctx, "Edit Sample Map layout.\nMove modules and resize their edges.")
     end
@@ -474,11 +501,7 @@ function map_ui_consider_drag(id)
   if r.ImGui_IsItemHovered(ctx) and r.ImGui_IsMouseDoubleClicked and r.ImGui_IsMouseDoubleClicked(ctx, 0) then
     state.map_ui_drag = nil
     state.map_ui_drop = nil
-    -- No undo for layouts, so a stray double-click must not wipe one.
-    if r.ShowMessageBox("Reset the map layout to the default arrangement?", "Reset layout", 4) == 6 then
-      state.map_ui_layout = default_map_ui_layout()
-      save_config()
-    end
+    reset_map_ui_layout()
     return
   end
   if state.map_ui_drag then
@@ -1044,6 +1067,32 @@ function map_ui_handle_edge(id, edge)
   end
 end
 
+-- True when this edge is shared with a neighbouring module, so dragging it
+-- trades space between the two. Outer edges get no handle: dragging them
+-- did nothing visible, which made the whole tool feel broken.
+function map_ui_edge_has_neighbor(id, edge)
+  local info = state.map_ui_leaf_info and state.map_ui_leaf_info[id]
+  if not info then
+    return false
+  end
+  local ctx_ = (edge == "left" or edge == "right") and info.row or info.col
+  if not ctx_ or type(ctx_.node) ~= "table" then
+    return false
+  end
+  if edge == "left" or edge == "top" then
+    return ctx_.index > 1
+  end
+  return ctx_.index < #(ctx_.node.children or {})
+end
+
+-- Grip handles and labels are queued here and painted by
+-- map_ui_draw_edit_chrome() on the body's draw list, so they can sit in
+-- the gap between modules instead of being clipped to one module.
+function map_ui_queue_chrome(item)
+  state.map_ui_chrome = state.map_ui_chrome or {}
+  state.map_ui_chrome[#state.map_ui_chrome + 1] = item
+end
+
 function map_ui_edit_overlay(id, w, h)
   if not state.map_ui_edit then
     return
@@ -1056,32 +1105,171 @@ function map_ui_edit_overlay(id, w, h)
   local open = r.ImGui_BeginChild(ctx, "map_ui_edit_" .. id, ww, wh, 0, flags)
   if open then
     local dl = r.ImGui_GetWindowDrawList(ctx)
-    r.ImGui_DrawList_AddRectFilled(dl, wx, wy, wx + ww, wy + wh, 0x1EFF5E22, 4)
-    r.ImGui_DrawList_AddRect(dl, wx + 0.5, wy + 0.5, wx + ww - 0.5, wy + wh - 0.5, UI_THEME.accent, 4, 0, 1.6)
-    local label = MAP_UI_LABELS[id] or id
-    r.ImGui_DrawList_AddText(dl, wx + 8, wy + 6, 0xF2F6FAFF, label)
+    local moving = state.map_ui_drag and state.map_ui_drag.id == id
+    -- Scrim keeps the module's content faintly visible but out of the way.
+    r.ImGui_DrawList_AddRectFilled(dl, wx, wy, wx + ww, wy + wh, moving and 0x0B0E0CE6 or 0x0B0E0CB4, 5)
 
     local t = MAP_UI_EDGE
-    r.ImGui_SetCursorScreenPos(ctx, wx, wy)
-    r.ImGui_InvisibleButton(ctx, "##map_ui_e_l_" .. id, t, wh)
-    map_ui_handle_edge(id, "left")
-    r.ImGui_SetCursorScreenPos(ctx, wx + ww - t, wy)
-    r.ImGui_InvisibleButton(ctx, "##map_ui_e_r_" .. id, t, wh)
-    map_ui_handle_edge(id, "right")
-    r.ImGui_SetCursorScreenPos(ctx, wx, wy)
-    r.ImGui_InvisibleButton(ctx, "##map_ui_e_t_" .. id, ww, t)
-    map_ui_handle_edge(id, "top")
-    r.ImGui_SetCursorScreenPos(ctx, wx, wy + wh - t)
-    r.ImGui_InvisibleButton(ctx, "##map_ui_e_b_" .. id, ww, t)
-    map_ui_handle_edge(id, "bottom")
+    local edge_hot = false
+    local edges = {
+      { "left", wx, wy, t, wh },
+      { "right", wx + ww - t, wy, t, wh },
+      { "top", wx, wy, ww, t },
+      { "bottom", wx, wy + wh - t, ww, t },
+    }
+    for _, e in ipairs(edges) do
+      local edge = e[1]
+      if map_ui_edge_has_neighbor(id, edge) then
+        r.ImGui_SetCursorScreenPos(ctx, e[2], e[3])
+        r.ImGui_InvisibleButton(ctx, "##map_ui_e_" .. edge .. "_" .. id, e[4], e[5])
+        local hot = r.ImGui_IsItemHovered(ctx) or r.ImGui_IsItemActive(ctx)
+        map_ui_handle_edge(id, edge)
+        local drag = state.map_ui_split_drag
+        if drag and drag.key == tostring(id) .. "_" .. edge then
+          hot = true
+        end
+        edge_hot = edge_hot or hot
+        -- One grip per shared edge: the right / bottom owner draws it.
+        if edge == "right" or edge == "bottom" or hot then
+          map_ui_queue_chrome({ kind = "edge", id = id, edge = edge, hot = hot,
+            x0 = wx, y0 = wy, x1 = wx + ww, y1 = wy + wh })
+        end
+      end
+    end
 
     r.ImGui_SetCursorScreenPos(ctx, wx + t, wy + t)
     r.ImGui_InvisibleButton(ctx, "##map_ui_move_" .. id, math.max(1, ww - t * 2), math.max(1, wh - t * 2))
     map_ui_consider_drag(id)
-    if r.ImGui_IsItemHovered(ctx) and not state.map_ui_split_drag and r.ImGui_SetTooltip then
-      r.ImGui_SetTooltip(ctx, "Drag to move. Drag edges to resize.\nDouble-click to reset layout (asks first).")
+    local body_hot = r.ImGui_IsItemHovered(ctx) and not state.map_ui_split_drag and not state.map_ui_drag
+    if body_hot and r.ImGui_SetMouseCursor then
+      local cursor = r.ImGui_MouseCursor_ResizeAll and r.ImGui_MouseCursor_ResizeAll() or nil
+      if cursor then
+        r.ImGui_SetMouseCursor(ctx, cursor)
+      end
     end
+    if body_hot and r.ImGui_SetTooltip then
+      r.ImGui_SetTooltip(ctx, "Drag to move this module next to another.\nDrag the grips between modules to resize.")
+    end
+    local border = UI_THEME.border_hvr
+    local thick = 1.0
+    if moving then
+      border = UI_THEME.text_mute
+    elseif body_hot then
+      border, thick = UI_THEME.accent, 1.5
+    end
+    r.ImGui_DrawList_AddRect(dl, wx + 0.5, wy + 0.5, wx + ww - 0.5, wy + wh - 0.5, border, 5, 0, thick)
+    map_ui_draw_module_label(dl, { id = id, hot = body_hot, moving = moving,
+      x0 = wx, y0 = wy, x1 = wx + ww, y1 = wy + wh })
     r.ImGui_Dummy(ctx, 0, 0)
   end
   imgui_end_child(open)
+end
+
+-- Six-dot grip, horizontal or vertical.
+function map_ui_draw_grip(dl, cx, cy, vertical, color)
+  for i = -1, 1 do
+    for j = 0, 1 do
+      local dx, dy
+      if vertical then
+        dx, dy = (j - 0.5) * 3.5, i * 4.0
+      else
+        dx, dy = i * 4.0, (j - 0.5) * 3.5
+      end
+      r.ImGui_DrawList_AddCircleFilled(dl, cx + dx, cy + dy, 1.1, color, 6)
+    end
+  end
+end
+
+-- Small rounded badge with centred text.
+function map_ui_draw_badge(dl, cx, cy, text, fg, bg, border)
+  local tw, th = r.ImGui_CalcTextSize(ctx, text)
+  local px, py = 8, 3
+  local x0, y0 = cx - tw * 0.5 - px, cy - th * 0.5 - py
+  local x1, y1 = cx + tw * 0.5 + px, cy + th * 0.5 + py
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, bg, (y1 - y0) * 0.5)
+  if border then
+    r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, border, (y1 - y0) * 0.5, 0, 1.0)
+  end
+  r.ImGui_DrawList_AddText(dl, x0 + px, y0 + py, fg, text)
+  return x0, y0, x1, y1
+end
+
+function map_ui_draw_module_label(dl, it)
+  local T = UI_THEME
+  local w, h = it.x1 - it.x0, it.y1 - it.y0
+  local label = MAP_UI_LABELS[it.id] or it.id
+  local cx, cy = (it.x0 + it.x1) * 0.5, (it.y0 + it.y1) * 0.5
+  local _, th = r.ImGui_CalcTextSize(ctx, label)
+  local show_size = h >= th * 2 + 22
+  if show_size then
+    cy = cy - th * 0.5 - 1
+  end
+  local fg = it.moving and T.text_mute or (it.hot and T.text or T.text_dim)
+  local bg = it.hot and T.accent_fill or T.elevated
+  local border = it.hot and T.accent or T.border_hvr
+  local text = it.moving and (label .. " (moving)") or label
+  -- Badge: move grip, then the module name.
+  local tw = r.ImGui_CalcTextSize(ctx, text)
+  local grip_w, pad_x, pad_y = 14, 9, 3
+  local bw = pad_x + grip_w + tw + pad_x
+  local x0, y0 = cx - bw * 0.5, cy - th * 0.5 - pad_y
+  local x1, y1 = cx + bw * 0.5, cy + th * 0.5 + pad_y
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, bg, (y1 - y0) * 0.5)
+  r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, border, (y1 - y0) * 0.5, 0, 1.0)
+  map_ui_draw_grip(dl, x0 + pad_x + 3, cy, true, fg)
+  r.ImGui_DrawList_AddText(dl, x0 + pad_x + grip_w, y0 + pad_y, fg, text)
+  if show_size then
+    local size = string.format("%d \u{00D7} %d", math.floor(w + 0.5), math.floor(h + 0.5))
+    local sw = r.ImGui_CalcTextSize(ctx, size)
+    r.ImGui_DrawList_AddText(dl, cx - sw * 0.5, cy + th * 0.5 + 6, T.text_mute, size)
+  end
+end
+
+function map_ui_draw_edit_chrome()
+  local items = state.map_ui_chrome
+  state.map_ui_chrome = nil
+  if not state.map_ui_edit or not items then
+    return
+  end
+  -- Foreground: the module overlays are child windows and would cover
+  -- anything drawn on the body itself.
+  local dl = r.ImGui_GetForegroundDrawList and r.ImGui_GetForegroundDrawList(ctx) or r.ImGui_GetWindowDrawList(ctx)
+  local T = UI_THEME
+  local half_gap = MAP_UI_GAP * 0.5
+  for _, it in ipairs(items) do
+    if it.kind == "edge" then
+      local vertical = it.edge == "left" or it.edge == "right"
+      local col = it.hot and T.accent or T.text_dim
+      if vertical then
+        local x = it.edge == "right" and (it.x1 + half_gap) or (it.x0 - half_gap)
+        local cy = (it.y0 + it.y1) * 0.5
+        if it.hot then
+          r.ImGui_DrawList_AddLine(dl, x, it.y0 + 4, x, it.y1 - 4, T.accent, 2.0)
+        end
+        r.ImGui_DrawList_AddRectFilled(dl, x - 4, cy - 11, x + 4, cy + 11, it.hot and T.accent_fill_h or T.elevated, 4)
+        r.ImGui_DrawList_AddRect(dl, x - 4, cy - 11, x + 4, cy + 11, it.hot and T.accent or T.border_hvr, 4, 0, 1.0)
+        map_ui_draw_grip(dl, x, cy, true, col)
+      else
+        local y = it.edge == "bottom" and (it.y1 + half_gap) or (it.y0 - half_gap)
+        local cx = (it.x0 + it.x1) * 0.5
+        if it.hot then
+          r.ImGui_DrawList_AddLine(dl, it.x0 + 4, y, it.x1 - 4, y, T.accent, 2.0)
+        end
+        r.ImGui_DrawList_AddRectFilled(dl, cx - 11, y - 4, cx + 11, y + 4, it.hot and T.accent_fill_h or T.elevated, 4)
+        r.ImGui_DrawList_AddRect(dl, cx - 11, y - 4, cx + 11, y + 4, it.hot and T.accent or T.border_hvr, 4, 0, 1.0)
+        map_ui_draw_grip(dl, cx, y, false, col)
+      end
+    end
+  end
+  -- Live size while resizing.
+  local drag = state.map_ui_split_drag
+  if drag and drag.node and drag.node.children then
+    local child = drag.node.children[drag.index]
+    local v = child and (drag.axis == "w" and child.w or child.h)
+    if v then
+      local mx, my = r.ImGui_GetMousePos(ctx)
+      map_ui_draw_badge(dl, mx + 18, my + 18, string.format("%d px", math.floor(v + 0.5)),
+        T.text, T.popup_bg, T.accent)
+    end
+  end
 end
