@@ -261,6 +261,11 @@ end
 -- Folder enumeration for scans is time-sliced (see sm_scan_enum_step) so large
 -- libraries don't freeze the UI. process_scan_slice waits until it has finished.
 function sm_scan_enum_file(enum, dir, file)
+  -- Hidden files: macOS "._name.wav" resource forks on external drives and
+  -- placeholder files literally named ".wav" are never real samples.
+  if file:sub(1, 1) == "." then
+    return
+  end
   local ext = file:match("%.([^%.]+)$")
   if not ext or not AUDIO_EXTS["." .. ext:lower()] then
     return

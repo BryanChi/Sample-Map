@@ -31,7 +31,7 @@ local function sm_feedback_header(path)
   elseif head:sub(1, 4) == "FORM" then
     out = head:sub(9, 12) == "AIFC" and "AIFF-C" or "AIFF"
   else
-    out = "starts with '" .. head:sub(1, 4):gsub("[^%w ]", "?") .. "'"
+    out = "starts with bytes " .. head:sub(1, 12):gsub(".", function(c) return string.format("%02X", c:byte()) end)
   end
   return string.format("%s, %d bytes", out, size or 0)
 end
