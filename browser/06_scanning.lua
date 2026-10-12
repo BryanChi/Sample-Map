@@ -80,7 +80,7 @@ function sample_is_drum_oneshot(sample)
   if has_loop then
     return false
   end
-  local loopish = detect_loop_or_oneshot(sample.path or "", sample.folder or "", sample.playback_type)
+  local loopish = detect_loop_or_oneshot(sample.path or "", sample.folder or "", sample.playback_type, sample.duration)
   if loopish == "loop" then
     return false
   end
@@ -704,6 +704,13 @@ function analyze_file(path)
   -- Detect genre words from path/folder names in the user's library
   tags = append_unique_tags(tags, infer_genre_tags_from_path(path, sample_folder))
 
+  -- Tempo and key named in the file name ("120 bpm", "Am": Tempo / Key groups)
+  local bpm, key = sm_sample_bpm_key(normalized_path)
+  local bpm_key_tags = {}
+  if bpm then bpm_key_tags[#bpm_key_tags + 1] = sm_tempo_tag(bpm) end
+  if key then bpm_key_tags[#bpm_key_tags + 1] = key end
+  tags = append_unique_tags(tags, bpm_key_tags)
+
   -- Keep user-assigned explorer tags across rescans
   tags = append_unique_tags(tags, (state.custom_tags and state.custom_tags[normalized_path]) or {})
   
@@ -713,6 +720,8 @@ function analyze_file(path)
     name = normalized_path:match("([^/]+)$"),  -- macOS uses forward slashes only
     folder = normalized_path:match("(.+)/[^/]+$") or "",
     duration = duration,
+    bpm = bpm,
+    key = key,
     samplerate = sr,
     channels = ch,
     bps = avg_bps,
@@ -949,7 +958,7 @@ function process_scan_slice(max_ms)
       end
       if data.playback_type ~= nil then
         sample.playback_type = data.playback_type
-        apply_loop_oneshot_tag(sample, detect_loop_or_oneshot(sample.path, sample.folder or "", data.playback_type))
+        apply_loop_oneshot_tag(sample, detect_loop_or_oneshot(sample.path, sample.folder or "", data.playback_type, sample.duration))
         wrote = true
       end
       -- Full analysis just landed: if this is a drum one-shot, queue transient/sustain next.
@@ -1076,6 +1085,7 @@ function process_scan_slice(max_ms)
       add_scan_log("Scan finished: all samples have analyzer fields")
     end
     finish_scan_session(still_incomplete)
+    sm_start_guess_refresh()
     return true
   end
 

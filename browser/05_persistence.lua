@@ -570,6 +570,15 @@ function load_config()
         if type(cfg.tags_hide_until_search) == "boolean" then
           state.tags_hide_until_search = cfg.tags_hide_until_search
         end
+        if type(cfg.show_guessed_tags) == "boolean" then
+          state.show_guessed_tags = cfg.show_guessed_tags
+        end
+        if type(cfg.retag_done_version) == "number" then
+          state.retag_done_version = cfg.retag_done_version
+        end
+        if type(cfg.retag_hint_shown) == "boolean" then
+          state.retag_hint_shown = cfg.retag_hint_shown
+        end
         if type(cfg.collapse_children_tags_width) == "number" then
           state.collapse_children_tags_width = math.max(400, math.min(4000, cfg.collapse_children_tags_width))
         end
@@ -831,6 +840,9 @@ function save_config_file()
     collapse_children_tags_width = state.collapse_children_tags_width,
     tags_hide_until_search = state.tags_hide_until_search == true,
     tag_groups_on_search_row = state.tag_groups_on_search_row ~= false,
+    show_guessed_tags = state.show_guessed_tags ~= false,
+    retag_done_version = state.retag_done_version,
+    retag_hint_shown = state.retag_hint_shown == true,
     custom_tags = state.custom_tags,
     deleted_tags = state.deleted_tags,
     explorer_open = state.explorer_open and true or false,
@@ -1981,7 +1993,7 @@ function prepare_cached_sample(s, full_tag_backfill, dirs, tag_dict)
   end
 
   if full_tag_backfill then
-    apply_loop_oneshot_tag(s, detect_loop_or_oneshot(s.path, s.folder or "", s.playback_type))
+    apply_loop_oneshot_tag(s, detect_loop_or_oneshot(s.path, s.folder or "", s.playback_type, s.duration))
     s.tags = append_unique_tags(s.tags, infer_genre_tags_from_path(s.path, s.folder or ""))
   end
 

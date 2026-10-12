@@ -40,6 +40,7 @@ SAMPLE_MAP_BROWSER_MODULES = {
   "04_preview_track.lua",
   "05_persistence.lua",
   "06_scanning.lua",
+  "06b_retag.lua",
   "07_waveform.lua",
   "08_preview.lua",
   "09_ui_helpers.lua",

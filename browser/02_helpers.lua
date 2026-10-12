@@ -628,7 +628,10 @@ end
 -- Detect loop vs one-shot. Strong filename keywords beat audio; audio beats
 -- folder names. playback_type is analyzer output: "oneshot"|"loop"|"unknown"|nil.
 -- nil = not analyzed yet (folder hints allowed); "unknown" = analyzed, leave untagged.
-function detect_loop_or_oneshot(path, folder, playback_type)
+-- duration: file length in seconds (optional). When the audio check couldn't
+-- tell ("unknown"), a length that is a whole, even number of beats at the
+-- tempo in the name ("Groove 120bpm", 4.0 s = 8 beats) makes it a loop.
+function detect_loop_or_oneshot(path, folder, playback_type, duration)
   local path_lower = (path or ""):lower()
   local folder_lower = (folder or ""):lower()
   local filename = path_lower:match("([^/\\]+)$") or path_lower
@@ -668,6 +671,9 @@ function detect_loop_or_oneshot(path, folder, playback_type)
   elseif playback_type == "loop" then
     return "loop"
   elseif playback_type == "unknown" then
+    if sm_length_fits_bpm(duration, sm_bpm_for_path(path)) then
+      return "loop"
+    end
     return nil
   end
 
@@ -727,53 +733,366 @@ function apply_loop_oneshot_tag(sample, kind)
 end
 
 
--- Extract meaningful tags from filename and folder tokens
-function infer_tags_from_path(path, folder)
-  local tokens = {}
-  local function collect(str)
-    if not str or str == "" then return end
-    for token in tostring(str):lower():gmatch("%w+") do
-      tokens[token] = true
+-- Words of a file or folder name, lowercased: each alphanumeric run, plus its
+-- camelCase / digit parts when it has several ("KickHard01" -> kickhard01,
+-- kick, hard, 01; "HHOpen" -> hhopen, hh, open; "808Bass" -> 808bass, 808, bass).
+function sm_name_words(s, out)
+  out = out or {}
+  for raw in tostring(s or ""):gmatch("%w+") do
+    out[#out + 1] = raw:lower()
+    -- One part only ("Kick", "kick", "KICK", "808"): nothing to split.
+    if raw:find("^%u?%l*$") or raw:find("^%u+$") or raw:find("^%d+$") then
+      goto continue
+    end
+    local parts, i, n = {}, 1, #raw
+    while i <= n do
+      local c = raw:sub(i, i)
+      local j = i
+      if c:match("%d") then
+        while j <= n and raw:sub(j, j):match("%d") do j = j + 1 end
+        parts[#parts + 1] = raw:sub(i, j - 1)
+        i = j
+      elseif c:match("%u") then
+        while j <= n and raw:sub(j, j):match("%u") do j = j + 1 end
+        if j <= n and raw:sub(j, j):match("%l") then
+          -- "HHOpen": the last capital starts the next word.
+          if j - 1 > i then
+            parts[#parts + 1] = raw:sub(i, j - 2)
+          end
+          local k = j
+          while k <= n and raw:sub(k, k):match("%l") do k = k + 1 end
+          parts[#parts + 1] = raw:sub(j - 1, k - 1)
+          i = k
+        else
+          parts[#parts + 1] = raw:sub(i, j - 1)
+          i = j
+        end
+      elseif c:match("%l") then
+        while j <= n and raw:sub(j, j):match("%l") do j = j + 1 end
+        parts[#parts + 1] = raw:sub(i, j - 1)
+        i = j
+      else
+        i = i + 1
+      end
+    end
+    if #parts > 1 then
+      for _, part in ipairs(parts) do
+        out[#out + 1] = part:lower()
+      end
+    end
+    ::continue::
+  end
+  return out
+end
+
+-- "kicks" -> "kick", "crashes" -> "crash" when the singular is a keyword.
+function sm_tag_word_singular(w)
+  if TAG_WORD_TO_TAG[w] then
+    return w
+  end
+  if #w > 3 and not TAG_NOT_PLURAL[w] then
+    if w:sub(-2) == "es" and TAG_WORD_TO_TAG[w:sub(1, -3)] then
+      return w:sub(1, -3)
+    end
+    if w:sub(-1) == "s" and TAG_WORD_TO_TAG[w:sub(1, -2)] then
+      return w:sub(1, -2)
     end
   end
-  collect(path or "")
-  collect(folder or "")
+  return w
+end
 
-  local scored = {}
-  for _, entry in ipairs(TAG_KEYWORDS) do
-    for _, key in ipairs(entry.keys) do
-      if tokens[key] then
-        local current = scored[entry.tag] or 0
-        if entry.weight > current then
-          scored[entry.tag] = entry.weight
+-- Instrument tags named by one file or folder name, in the order found
+-- (a new list each call). Folder names repeat for every file in them, so
+-- results are memoized per name.
+local instrument_tag_memo, instrument_tag_memo_n = {}, 0
+
+function sm_instrument_tags(name)
+  name = tostring(name or "")
+  local found = instrument_tag_memo[name]
+  if not found then
+    found = sm_instrument_tags_uncached(name)
+    if instrument_tag_memo_n >= 50000 then
+      instrument_tag_memo, instrument_tag_memo_n = {}, 0
+    end
+    instrument_tag_memo[name] = found
+    instrument_tag_memo_n = instrument_tag_memo_n + 1
+  end
+  local copy = {}
+  for i = 1, #found do
+    copy[i] = found[i]
+  end
+  return copy
+end
+
+function sm_instrument_tags_uncached(name)
+  local words = sm_name_words(name)
+  for i = 1, #words do
+    words[i] = sm_tag_word_singular(words[i])
+  end
+  local found, seen = {}, {}
+  local bass_drum = false
+  for i = 1, #words - 1 do
+    local pair = words[i] .. " " .. words[i + 1]
+    local tag = TAG_PHRASES[pair]
+    if tag and not seen[tag] then
+      seen[tag] = true
+      found[#found + 1] = tag
+    end
+    if pair == "bass drum" then
+      bass_drum = true
+    end
+  end
+  for _, w in ipairs(words) do
+    local tag = TAG_WORD_TO_TAG[w]
+    if tag and not seen[tag] and not (bass_drum and (w == "bass" or w == "drum")) then
+      seen[tag] = true
+      found[#found + 1] = tag
+    end
+  end
+  return found
+end
+
+SM_MELODIC_INSTRUMENT = { bass = true, pad = true, lead = true, pluck = true, keys = true, guitar = true, vocal = true }
+
+-- Instrument tags for a path below its scan folder ("Pack/Kicks/Kick 01.wav").
+-- The file name wins; otherwise the nearest folder that names an instrument.
+-- "drum" also comes from any folder when nothing melodic was found.
+function sm_instrument_tags_for_rel_path(rel)
+  local parts = {}
+  for part in tostring(rel or ""):gmatch("[^/]+") do
+    parts[#parts + 1] = part
+  end
+  if #parts == 0 then
+    return {}
+  end
+  local name = parts[#parts]:gsub("%.%w+$", "")
+  local out = sm_instrument_tags(name)
+  local seen = {}
+  for _, t in ipairs(out) do seen[t] = true end
+  local function specific(list)
+    for _, t in ipairs(list) do
+      if t ~= "drum" then return true end
+    end
+    return false
+  end
+  if not specific(out) then
+    for i = #parts - 1, 1, -1 do
+      local ft = sm_instrument_tags(parts[i])
+      if specific(ft) then
+        for _, t in ipairs(ft) do
+          if not seen[t] then
+            seen[t] = true
+            out[#out + 1] = t
+          end
         end
         break
       end
     end
   end
-
-  local sorted = {}
-  for tag, weight in pairs(scored) do
-    table.insert(sorted, {tag = tag, weight = weight})
-  end
-  table.sort(sorted, function(a, b)
-    if a.weight == b.weight then
-      return a.tag < b.tag
+  if not seen.drum then
+    local melodic = false
+    for _, t in ipairs(out) do
+      if SM_MELODIC_INSTRUMENT[t] then melodic = true end
     end
-    return a.weight > b.weight
-  end)
-
-  local tags = {}
-  for _, entry in ipairs(sorted) do
-    if not (tag_is_suppressed and tag_is_suppressed(entry.tag)) then
-      tags[#tags + 1] = entry.tag
-      if #tags >= 6 then break end -- Keep cache lean
+    if not melodic then
+      for i = 1, #parts - 1 do
+        if seen.drum == nil then
+          for _, t in ipairs(sm_instrument_tags(parts[i])) do
+            if t == "drum" then
+              seen.drum = true
+              out[#out + 1] = "drum"
+              break
+            end
+          end
+        end
+      end
     end
   end
-
-  return tags
+  return out
 end
 
+-- Path below the sample's scan folder, with the scan folder's own name in
+-- front. Folders above it (drive, home, "Samples") never tag a sample.
+-- Outside every scan folder: the last three folders.
+function sm_rel_tag_path(path)
+  path = normalize_path(path or "")
+  local root = get_sample_scan_root and get_sample_scan_root(path)
+  if root and root ~= "" and #path > #root then
+    local leaf = root:match("([^/]+)$") or ""
+    return leaf .. "/" .. path:sub(#root + 2)
+  end
+  local parts = {}
+  for part in path:gmatch("[^/]+") do
+    parts[#parts + 1] = part
+  end
+  local first = math.max(1, #parts - 3)
+  return table.concat(parts, "/", first, #parts)
+end
+
+-- Instrument tags for a sample path, highest weight first (at most 6).
+function infer_tags_from_path(path, folder)
+  local found = sm_instrument_tags_for_rel_path(sm_rel_tag_path(path))
+  local list = {}
+  for _, tag in ipairs(found) do
+    if not (tag_is_suppressed and tag_is_suppressed(tag)) then
+      list[#list + 1] = tag
+    end
+  end
+  table.sort(list, function(a, b)
+    local wa, wb = TAG_KEYWORD_WEIGHT[a] or 0, TAG_KEYWORD_WEIGHT[b] or 0
+    if wa == wb then
+      return a < b
+    end
+    return wa > wb
+  end)
+  for i = #list, 7, -1 do
+    list[i] = nil
+  end
+  return list
+end
+
+-- Tempo from a name: "Groove_120bpm", "120 BPM", "BPM_95" (50-220).
+function sm_bpm_from_name(s)
+  s = tostring(s or "")
+  if not s:find("[bB][pP][mM]") then
+    return nil
+  end
+  local low = s:lower()
+  for num in low:gmatch("(%d+)%s*[%-_ ]?%s*bpm") do
+    local v = tonumber(num)
+    if #num >= 2 and #num <= 3 and v >= 50 and v <= 220 then
+      return v
+    end
+  end
+  for num in low:gmatch("bpm%s*[%-_ ]?%s*(%d+)") do
+    local v = tonumber(num)
+    if #num >= 2 and #num <= 3 and v >= 50 and v <= 220 then
+      return v
+    end
+  end
+  return nil
+end
+
+-- Musical key from a file name: "Am", "F#min", "Bb_Major", "C# minor", "Eb".
+-- Returns "A", "F#m", "Bb"... (minor keys end in m), or nil.
+function sm_key_from_name(s)
+  s = tostring(s or "")
+  local n = #s
+  local function at(i) return s:sub(i, i) end
+  local function word_char(c) return c ~= "" and c:match("%w") ~= nil end
+  local qualities = { "minor", "major", "min", "maj", "MINOR", "MAJOR", "MIN", "MAJ", "Minor", "Major", "Min", "Maj", "m" }
+  -- Key spelled from position j on (after the letter and accidental), or nil.
+  local function finish(letter, acc, j)
+    local k = j
+    while at(k) == " " or at(k) == "_" or at(k) == "-" do k = k + 1 end
+    for _, q in ipairs(qualities) do
+      if s:sub(k, k + #q - 1) == q and not word_char(at(k + #q)) then
+        local minor = q:lower():sub(1, 3) ~= "maj"
+        return letter .. acc .. (minor and "m" or "")
+      end
+    end
+    if acc ~= "" and not word_char(at(j)) then
+      return letter .. acc
+    end
+    return nil
+  end
+  -- Each A-G that starts a word.
+  local i = s:find("%f[%w][A-G]")
+  while i do
+    local c = at(i)
+    do
+      local key
+      if at(i + 1) == "#" then
+        key = finish(c, "#", i + 2)
+      elseif s:sub(i + 1, i + 5) == "sharp" then
+        key = finish(c, "#", i + 6)
+      elseif s:sub(i + 1, i + 4) == "flat" then
+        key = finish(c, "b", i + 5)
+      elseif at(i + 1) == "b" then
+        key = finish(c, "b", i + 2)
+      end
+      key = key or finish(c, "", i + 1)
+      if key then
+        return key
+      end
+    end
+    i = s:find("%f[%w][A-G]", i + 1)
+  end
+  return nil
+end
+
+-- Tempo / key tags (Tempo and Key groups): "120 bpm", "Am".
+function sm_tempo_tag(bpm)
+  return bpm and (tostring(math.floor(bpm + 0.5)) .. " bpm") or nil
+end
+
+function sm_is_tempo_tag(tag)
+  return type(tag) == "string" and tag:match("^%d+ bpm$") ~= nil
+end
+
+function sm_is_key_tag(tag)
+  return type(tag) == "string" and tag:match("^[A-G][#b]?m?$") ~= nil
+end
+
+-- Tempo named by a sample's file name, else by one of its two nearest folders
+-- (memoized per folder).
+local folder_bpm_memo, folder_bpm_memo_n = {}, 0
+
+function sm_bpm_for_path(path)
+  local norm = tostring(path or "")
+  if norm:find("\\", 1, true) then
+    norm = norm:gsub("\\", "/")
+  end
+  local dir, file = norm:match("^(.*)/([^/]*)$")
+  if not dir then
+    dir, file = "", norm
+  end
+  local bpm = sm_bpm_from_name((file:gsub("%.%w+$", "")))
+  if bpm then
+    return bpm
+  end
+  local cached = folder_bpm_memo[dir]
+  if cached == nil then
+    cached = false
+    local d = dir
+    for _ = 1, 2 do
+      local leaf = d:match("([^/]+)$")
+      if not leaf then
+        break
+      end
+      local v = sm_bpm_from_name(leaf)
+      if v then
+        cached = v
+        break
+      end
+      d = d:match("(.+)/[^/]+$") or ""
+    end
+    if folder_bpm_memo_n >= 20000 then
+      folder_bpm_memo, folder_bpm_memo_n = {}, 0
+    end
+    folder_bpm_memo[dir] = cached
+    folder_bpm_memo_n = folder_bpm_memo_n + 1
+  end
+  return cached or nil
+end
+
+-- True when duration (seconds) is a whole, even number of beats (2 or more)
+-- at bpm, within 0.06 of a beat.
+function sm_length_fits_bpm(duration, bpm)
+  if type(duration) ~= "number" or duration <= 0 or type(bpm) ~= "number" or bpm <= 0 then
+    return false
+  end
+  local beats = duration * bpm / 60.0
+  local whole = math.floor(beats + 0.5)
+  return whole >= 2 and whole % 2 == 0 and math.abs(beats - whole) < 0.06
+end
+
+-- bpm / key of a sample from its name (bpm also from its nearest folders).
+function sm_sample_bpm_key(path)
+  path = tostring(path or "")
+  local name = (path:match("([^/\\]+)$") or path):gsub("%.%w+$", "")
+  return sm_bpm_for_path(path), sm_key_from_name(name)
+end
 
 -- Match a genre key against a lowercased path/folder string using word-ish
 -- boundaries so "house" does not match "warehouse".
@@ -939,6 +1258,8 @@ function apply_discovered_library_tags()
     project = true, projects = true, session = true, sessions = true,
     swell = true, ones = true, wavs = true, audiofiles = true,
     scene = true, discover = true,
+    -- key / scale words ("Am", "C# minor" become Key tags instead)
+    min = true, maj = true, minor = true, major = true, sharp = true, flat = true,
   }
   for _, entry in ipairs(TAG_KEYWORDS) do
     skip[string.lower(entry.tag)] = true
@@ -951,6 +1272,15 @@ function apply_discovered_library_tags()
     for _, key in ipairs(entry.keys) do
       if #key >= 3 then
         skip[string.lower(key)] = true
+      end
+      -- Words of a two-word genre ("boom" / "bap" of "boom bap") would only
+      -- repeat the genre tag as fragments.
+      if key:find(" ", 1, true) then
+        for word in key:lower():gmatch("%w+") do
+          if #word >= 3 then
+            skip[word] = true
+          end
+        end
       end
     end
   end
@@ -1134,9 +1464,24 @@ function apply_discovered_library_tags()
     return c
   end
 
+  -- A Library tag has to recur across packs: a name found in only one or two
+  -- packs is that pack's or vendor's name.
+  local min_packs = 3
+  local covered = {}
+  for token, count in pairs(token_counts) do
+    if count >= min_count and token:find(" ", 1, true) and pack_count(token) >= min_packs then
+      -- A word that almost only appears inside this longer name is dropped.
+      for word in token:gmatch("%S+") do
+        local wc = token_counts[word]
+        if wc and count >= 0.9 * wc then
+          covered[word] = true
+        end
+      end
+    end
+  end
   local ranked = {}
   for token, count in pairs(token_counts) do
-    if count >= min_count and pack_count(token) >= 2 then
+    if count >= min_count and not covered[token] and pack_count(token) >= min_packs then
       ranked[#ranked + 1] = { tag = token, count = count }
     end
   end
@@ -1186,6 +1531,7 @@ function apply_discovered_library_tags()
   local no_custom_tags = type(custom_tags) == "table" and next(custom_tags) == nil
   local no_custom = {}
   local lower_of, suppressed_of = {}, {}
+  local bpm_key_of = {} -- Tempo / Key tags ("120 bpm", "Am") stay like core tags
   for i = 1, n do
     local sample = samples[i]
     if sample then
@@ -1212,7 +1558,12 @@ function apply_discovered_library_tags()
         else
           low = tostring(tag):lower()
         end
-        if core_keep[low] or custom[low] then
+        local bpm_key = bpm_key_of[tag]
+        if bpm_key == nil then
+          bpm_key = (sm_is_tempo_tag(tag) or sm_is_key_tag(tag)) and true or false
+          bpm_key_of[tag] = bpm_key
+        end
+        if core_keep[low] or custom[low] or bpm_key then
           local suppressed = suppressed_of[low]
           if suppressed == nil then
             suppressed = (tag_is_suppressed and tag_is_suppressed(low)) and true or false
@@ -1268,6 +1619,25 @@ function rebuild_tag_index()
           end
           list[#list + 1] = s
         end
+      end
+    end
+    -- A guessed drum type counts like a tag while guesses are shown.
+    local guess = sample_shown_guess_tag and sample_shown_guess_tag(s)
+    if guess and not set[guess] then
+      local suppressed = suppressed_of[guess]
+      if suppressed == nil then
+        suppressed = (tag_is_suppressed and tag_is_suppressed(guess)) and true or false
+        suppressed_of[guess] = suppressed
+      end
+      if not suppressed then
+        set[guess] = true
+        counts[guess] = (counts[guess] or 0) + 1
+        local list = by_tag[guess]
+        if not list then
+          list = {}
+          by_tag[guess] = list
+        end
+        list[#list + 1] = s
       end
     end
     s._tag_set = set

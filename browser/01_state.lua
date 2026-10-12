@@ -41,29 +41,59 @@ AUDIO_EXTS = {
   [".flac"] = true, [".mp3"] = true, [".ogg"] = true, [".m4a"] = true, [".wv"] = true
 }
 
--- Common tag keywords (ordered by priority for tagging)
+-- Instrument tags. keys are whole words after splitting a name into words
+-- (camelCase and digits split, simple plurals folded: see sm_name_words and
+-- sm_instrument_tags in 02_helpers.lua). weight orders a sample's tags and
+-- picks its map colour.
 TAG_KEYWORDS = {
-  {tag = "kick",   keys = {"kick", "kck"}, weight = 100},
-  {tag = "snare",  keys = {"snare", "snr"}, weight = 95},
-  {tag = "clap",   keys = {"clap"}, weight = 92},
-  {tag = "snap",   keys = {"snap", "finger", "finger snap", "finger snaps", "fingersnap", "fingersnaps"}, weight = 91},
-  {tag = "rim",    keys = {"rim", "rimshot"}, weight = 90},
-  {tag = "hat",    keys = {"hat", "hihat", "oh", "ch", "hh"}, weight = 88},
-  {tag = "tom",    keys = {"tom"}, weight = 82},
+  {tag = "kick",   keys = {"kick", "kik", "kck", "bd", "bassdrum", "kickdrum"}, weight = 100},
+  {tag = "snare",  keys = {"snare", "snr", "sd", "snaredrum"}, weight = 95},
+  {tag = "clap",   keys = {"clap", "clp", "handclap"}, weight = 92},
+  {tag = "snap",   keys = {"snap", "fingersnap"}, weight = 91},
+  {tag = "rim",    keys = {"rim", "rimshot", "sidestick"}, weight = 90},
+  {tag = "hat",    keys = {"hat", "hihat", "hh", "oh", "ch", "openhat", "closedhat", "ohh", "chh", "hht", "pedalhat"}, weight = 88},
+  {tag = "tom",    keys = {"tom", "floortom", "racktom"}, weight = 82},
   {tag = "ride",   keys = {"ride"}, weight = 80},
-  {tag = "crash",  keys = {"crash", "cymbal"}, weight = 79},
-  {tag = "perc",   keys = {"perc", "percussion", "shaker", "tamb", "cowbell"}, weight = 76},
-  {tag = "fx",     keys = {"fx", "sfx", "impact", "whoosh", "sweep", "riser", "uplift", "downlift"}, weight = 74},
-  {tag = "bass",   keys = {"bass", "sub"}, weight = 70},
-  {tag = "808s",   keys = {"808s", "808"}, weight = 69},
-  {tag = "vocal",  keys = {"vocal", "vox", "voice"}, weight = 65},
-  {tag = "drum",   keys = {"drum", "beat", "break"}, weight = 58},
-  {tag = "pad",    keys = {"pad"}, weight = 55},
-  {tag = "lead",   keys = {"lead"}, weight = 54},
+  {tag = "crash",  keys = {"crash", "cymbal", "cym", "splash", "china"}, weight = 79},
+  {tag = "perc",   keys = {"perc", "percussion", "shaker", "tamb", "tambourine", "cowbell", "conga", "bongo",
+                           "clave", "woodblock", "timbale", "guiro", "cabasa", "triangle", "agogo", "djembe", "tabla"}, weight = 76},
+  {tag = "fx",     keys = {"fx", "sfx", "impact", "whoosh", "sweep", "riser", "uplift", "downlift", "downer",
+                           "transition", "reverse", "rev", "noise", "glitch"}, weight = 74},
+  {tag = "bass",   keys = {"bass", "sub", "reese", "bassline"}, weight = 70},
+  {tag = "808s",   keys = {"808"}, weight = 69},
+  {tag = "vocal",  keys = {"vocal", "vox", "voice", "acapella", "adlib", "chant", "phrase", "choir", "vocalchop"}, weight = 65},
+  {tag = "drum",   keys = {"drum", "beat", "break", "breakbeat", "top", "tops", "groove", "fill"}, weight = 58},
+  {tag = "pad",    keys = {"pad", "atmosphere", "atmos", "drone", "texture"}, weight = 55},
+  {tag = "lead",   keys = {"lead", "arp"}, weight = 54},
   {tag = "pluck",  keys = {"pluck"}, weight = 53},
-  {tag = "keys",   keys = {"keys", "piano"}, weight = 52},
-  {tag = "guitar", keys = {"guitar"}, weight = 50},
+  {tag = "keys",   keys = {"keys", "piano", "rhodes", "epiano", "organ", "wurli"}, weight = 52},
+  {tag = "guitar", keys = {"guitar", "gtr"}, weight = 50},
 }
+
+-- Two-word names for one instrument ("bass drum" is a kick, not bass + drum).
+TAG_PHRASES = {
+  ["bass drum"] = "kick", ["kick drum"] = "kick", ["snare drum"] = "snare",
+  ["hi hat"] = "hat", ["open hat"] = "hat", ["closed hat"] = "hat",
+  ["finger snap"] = "snap", ["side stick"] = "rim",
+}
+
+-- Words ending in s that are not plurals of a keyword.
+TAG_NOT_PLURAL = {
+  bass = true, glass = true, class = true, mass = true, press = true, less = true, chess = true,
+  cross = true, hiss = true, bus = true, gas = true, atmos = true, fx = true, sfx = true,
+  vox = true, dnb = true, shs = true,
+}
+
+TAG_WORD_TO_TAG = {}
+do
+  for _, entry in ipairs(TAG_KEYWORDS) do
+    for _, key in ipairs(entry.keys) do
+      if TAG_WORD_TO_TAG[key] == nil then
+        TAG_WORD_TO_TAG[key] = entry.tag
+      end
+    end
+  end
+end
 
 -- O(1) tag → weight for map colors (avoids nested TAG_KEYWORDS scans per sample)
 TAG_KEYWORD_WEIGHT = {}
@@ -310,6 +340,12 @@ state = {
   -- Group chips (Drum, Melodic, Library...) and Loop / One shot sit on the
   -- search row; clicking a group opens its tags below.
   tag_groups_on_search_row = true,
+  -- Drum types guessed from the sound (sample.guess_tag) count as tags in
+  -- filters and colours (View > Show Guessed Drum Tags).
+  show_guessed_tags = true,
+  retag_job = nil,       -- Library > Re-tag Library while it runs (06b_retag.lua)
+  retag_preview = nil,   -- its result, until Apply / Cancel
+  guess_refresh = nil,   -- guessed drum tags being refreshed after a scan
   selected_tag_parents = {}, -- Collapsed mode: which parent chips are expanded (drum/melodic/genre)
   played_history = {},  -- Array of played samples (history)
   history_index = 0,  -- Current position in history (0 = most recent, higher = older)

@@ -776,10 +776,12 @@ function SampleCacheCodec.compact_sample(sample, intern_dir, intern_tag)
   local extra
   local sample_type, snap_offset, start_pos, gain = sample.sample_type, sample.snap_offset, sample.start_pos, sample.gain
   local brightness, sub_weight, mtime, file_id_size = sample.brightness, sample.sub_weight, sample.mtime, sample.file_id_size
+  local bpm, key, guess_tag = sample.bpm, sample.key, sample.guess_tag
   if sample_type ~= nil or snap_offset ~= nil
       or start_pos ~= nil or gain ~= nil
       or brightness ~= nil or sub_weight ~= nil
-      or mtime ~= nil or file_id_size ~= nil then
+      or mtime ~= nil or file_id_size ~= nil
+      or bpm ~= nil or key ~= nil or guess_tag ~= nil then
     extra = {}
     if sample_type ~= nil then extra.st = sample_type end
     if type(snap_offset) == "number" then extra.so = round(snap_offset, 5) end
@@ -793,6 +795,9 @@ function SampleCacheCodec.compact_sample(sample, intern_dir, intern_tag)
     if type(file_id_size) == "number" then
       extra.fs = m_floor(file_id_size + 0.5)
     end
+    if type(bpm) == "number" then extra.bpm = m_floor(bpm + 0.5) end
+    if type(key) == "string" and key ~= "" then extra.key = key end
+    if type(guess_tag) == "string" and guess_tag ~= "" then extra.gt = guess_tag end
   end
   local bps = sample.bps
   local row = {
@@ -879,6 +884,9 @@ function SampleCacheCodec.expand_sample(row, dirs, tag_dict)
     if type(extra.br) == "number" then sample.brightness = extra.br end
     if type(extra.sw) == "number" then sample.sub_weight = extra.sw end
     if extra.mt ~= nil then sample.mtime = tostring(extra.mt) end
+    if type(extra.bpm) == "number" then sample.bpm = extra.bpm end
+    if type(extra.key) == "string" then sample.key = extra.key end
+    if type(extra.gt) == "string" then sample.guess_tag = extra.gt end
     if type(extra.fs) == "number" then
       sample.file_id_size = extra.fs
       sample.file_size = extra.fs

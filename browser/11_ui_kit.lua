@@ -1287,7 +1287,7 @@ function tag_chip_kind(tag)
   local cat = categorize_tags(tag)
   if cat == "genre" then
     return "library"
-  elseif cat == "loop" then
+  elseif cat == "loop" or cat == "key" or cat == "tempo" then
     return "attr"
   end
   return "tag"
@@ -1699,6 +1699,11 @@ function sm_compute_tag_category(tag)
   if state.tag_parent_map and state.tag_parent_map[tag_lower] then
     return state.tag_parent_map[tag_lower]
   end
+  if sm_is_tempo_tag(tag) then
+    return "tempo"
+  elseif sm_is_key_tag(tag) then
+    return "key"
+  end
   if SM_TAG_CATEGORY_DRUM[tag_lower] then
     return "drum"
   elseif SM_TAG_CATEGORY_MELODIC[tag_lower] then
@@ -1753,6 +1758,8 @@ function builtin_tag_parents()
     { id = "melodic", label = "Melodic" },
     { id = "genre", label = "Library" },
     { id = "loop", label = "Loop" },
+    { id = "key", label = "Key" },
+    { id = "tempo", label = "Tempo" },
   }
 end
 
@@ -2487,10 +2494,24 @@ function render_parent_with_children(label, key, entries)
   tag_group_draw(g)
 end
 
+-- Key tags in musical order (C, C#, Db, D ... B; major before minor).
+SM_KEY_LETTER_ORDER = { C = 0, D = 2, E = 4, F = 5, G = 7, A = 9, B = 11 }
+
+local function sm_key_tag_rank(tag)
+  local letter, acc, minor = tostring(tag):match("^([A-G])([#b]?)(m?)$")
+  if not letter then
+    return 1000
+  end
+  local pitch = SM_KEY_LETTER_ORDER[letter] + (acc == "#" and 1 or acc == "b" and -1 or 0)
+  return ((pitch % 12) * 4) + (acc == "b" and 1 or 0) + (minor == "m" and 2 or 0)
+end
+
 -- Tags of state.tag_list split by group: drum, melodic, genre (Library),
--- loop (Loop / One shot) and custom parents ({ [id] = { parent, entries } }).
+-- loop (Loop / One shot), custom parents ({ [id] = { parent, entries } }),
+-- then key (in musical order) and tempo (slowest first).
 function sm_collect_tag_groups()
   local drum_tags, melodic_tags, genre_tags, loop_tags = {}, {}, {}, {}
+  local key_tags, tempo_tags = {}, {}
   local extra_groups = {}
   for _, parent in ipairs(state.custom_tag_parents or {}) do
     if parent and parent.id then
@@ -2507,12 +2528,30 @@ function sm_collect_tag_groups()
       genre_tags[#genre_tags + 1] = entry
     elseif category == "loop" then
       loop_tags[#loop_tags + 1] = entry
+    elseif category == "key" then
+      key_tags[#key_tags + 1] = entry
+    elseif category == "tempo" then
+      tempo_tags[#tempo_tags + 1] = entry
     elseif category and extra_groups[category] then
       local g = extra_groups[category].entries
       g[#g + 1] = entry
     end
   end
-  return drum_tags, melodic_tags, genre_tags, loop_tags, extra_groups
+  table.sort(key_tags, function(a, b)
+    local ra, rb = sm_key_tag_rank(a.tag), sm_key_tag_rank(b.tag)
+    if ra == rb then
+      return a.tag < b.tag
+    end
+    return ra < rb
+  end)
+  table.sort(tempo_tags, function(a, b)
+    local ta, tb = tonumber(a.tag:match("^(%d+)")) or 0, tonumber(b.tag:match("^(%d+)")) or 0
+    if ta == tb then
+      return a.tag < b.tag
+    end
+    return ta < tb
+  end)
+  return drum_tags, melodic_tags, genre_tags, loop_tags, extra_groups, key_tags, tempo_tags
 end
 
 -- --- Group tags on the search row ---------------------------------------------
@@ -2535,7 +2574,7 @@ end
 -- Ordered groups that have tags: { key, label, entries, toggles_all }.
 -- Library never applies a group filter (it would match nearly everything).
 function sm_tag_group_list()
-  local drum, melodic, genre, loop, extra = sm_collect_tag_groups()
+  local drum, melodic, genre, loop, extra, key, tempo = sm_collect_tag_groups()
   local out = {}
   local function add(key, label, entries, toggles_all)
     if entries and #entries > 0 then
@@ -2545,6 +2584,9 @@ function sm_tag_group_list()
   add("drum", "Drum", drum, true)
   add("melodic", "Melodic", melodic, true)
   add("genre", "Library", genre, false)
+  -- Key / Tempo never select every child either (no sample has two keys).
+  add("key", "Key", key, false)
+  add("tempo", "Tempo", tempo, false)
   for _, parent in ipairs(state.custom_tag_parents or {}) do
     local g = extra[parent.id]
     if g then
@@ -2686,7 +2728,7 @@ function render_tag_filters()
     return
   end
 
-  local drum_tags, melodic_tags, genre_tags, loop_tags, extra_groups = sm_collect_tag_groups()
+  local drum_tags, melodic_tags, genre_tags, loop_tags, extra_groups, key_tags, tempo_tags = sm_collect_tag_groups()
 
   -- Loop / one-shot sit on the search row when there is room.
   if #loop_tags > 0 then
@@ -2711,6 +2753,8 @@ function render_tag_filters()
     render_parent_with_children("Drum", "drum", drum_tags)
     render_parent_with_children("Melodic", "melodic", melodic_tags)
     render_parent_with_children("Library", "genre", genre_tags)
+    render_parent_with_children("Key", "key", key_tags)
+    render_parent_with_children("Tempo", "tempo", tempo_tags)
     for _, parent in ipairs(state.custom_tag_parents or {}) do
       local group = extra_groups[parent.id]
       if group then
@@ -2733,6 +2777,8 @@ function render_tag_filters()
     -- Library parent is accordion-only: selecting every pack/genre tag matches
     -- almost the whole library, so the chip never applies a group filter.
     render_parent_with_children("Library", "genre", genre_tags)
+    render_parent_with_children("Key", "key", key_tags)
+    render_parent_with_children("Tempo", "tempo", tempo_tags)
     for _, parent in ipairs(state.custom_tag_parents or {}) do
       local group = extra_groups[parent.id]
       if group then

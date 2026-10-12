@@ -275,7 +275,7 @@ function seq_note_uses_sustain_length(slot, resolved_sample)
     end
   end
   if resolved_sample and resolved_sample.path then
-    if detect_loop_or_oneshot(resolved_sample.path, resolved_sample.folder or "", resolved_sample.playback_type) == "loop" then
+    if detect_loop_or_oneshot(resolved_sample.path, resolved_sample.folder or "", resolved_sample.playback_type, resolved_sample.duration) == "loop" then
       return true
     end
   end
