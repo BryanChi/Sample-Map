@@ -808,6 +808,21 @@ function render_header()
       set_show_guessed_tags(not show_guessed_tags())
     end
     menu_item_tooltip("One-shots whose names don't say what they are get a drum type guessed from the sound\n(kick, snare, clap, hat, crash, tom, perc). Guesses count in tag filters and dot colours.")
+    if r.ImGui_MenuItem(ctx, "Map: Frequency Bands and Length Zones", nil, map_guides_enabled()) then
+      state.map_guides = not map_guides_enabled()
+      save_config()
+    end
+    menu_item_tooltip("Shade the map into SUB ... AIR bands and mark HITS / ONE-SHOTS / PHRASES / LOOPS by length.")
+    if r.ImGui_MenuItem(ctx, "Map: Tag Regions and Labels", nil, map_atlas_enabled()) then
+      state.map_atlas = not map_atlas_enabled()
+      save_config()
+    end
+    menu_item_tooltip("Outline where each tag's samples sit, with a label and count.\nClick a label to show only that tag; hover it to highlight its dots.")
+    if r.ImGui_MenuItem(ctx, "Map: Overview When Zoomed In", nil, map_overview_enabled()) then
+      state.map_overview = not map_overview_enabled()
+      save_config()
+    end
+    menu_item_tooltip("A small map of the whole library with your view boxed.\nClick or drag in it to move around.")
     if r.ImGui_MenuItem(ctx, "Hide Tags Until Search Is Clicked", nil, state.tags_hide_until_search == true) then
       set_tags_hide_until_search(not state.tags_hide_until_search)
     end
