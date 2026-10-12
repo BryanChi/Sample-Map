@@ -3990,6 +3990,124 @@ function map_waveform_handle_preview_click(sample, hovered, clicked, left_down, 
   end
 end
 
+-- Waveform module look ----------------------------------------------------
+
+WAVE_COL = {
+  panel = 0x101612FF,
+  panel_hi = 0xFFFFFF0A,
+  center = 0xFFFFFF10,
+  lane_sep = 0x00000070,
+  dim = 0x070A08B8,
+  hatch = 0xFFFFFF09,
+  end_line = 0xFFB24AFF,
+  end_hot = 0xFFD08AFF,
+  attack = 0xFF8A5BD0,
+  attack_tint = 0xFF8A5B12,
+  attack_line = 0xFF8A5BA0,
+  body = 0x6FA8FF70,
+  snap = 0xB48CFFFF,
+  snap_line = 0xB48CFFB0,
+  playhead = 0xFFFFFFF0,
+  flag_bg = 0x0B0E0CE8,
+}
+
+function draw_wave_panel(dl, x0, y0, x1, y1)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, WAVE_COL.panel, 6.0)
+  r.ImGui_DrawList_AddLine(dl, x0 + 6, y0 + 1, x1 - 6, y0 + 1, WAVE_COL.panel_hi, 1.0)
+  r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, UI_THEME.border, 6.0, 0, 1.0)
+end
+
+function wave_dashed_vline(dl, x, ya, yb, color, th)
+  local y = ya
+  while y < yb do
+    r.ImGui_DrawList_AddLine(dl, x, y, x, math.min(yb, y + 4), color, th or 1.0)
+    y = y + 7
+  end
+end
+
+-- Faint diagonal hatch over a cropped region.
+function wave_hatch(dl, x0, y0, x1, y1)
+  if x1 - x0 < 4 then
+    return
+  end
+  local h = y1 - y0
+  local x = x0 - h
+  while x < x1 do
+    local ax, ay, bx, by = x, y1, x + h, y0
+    if ax < x0 then
+      ay = y1 - (x0 - ax)
+      ax = x0
+    end
+    if bx > x1 then
+      by = y0 + (bx - x1)
+      bx = x1
+    end
+    if bx > ax then
+      r.ImGui_DrawList_AddLine(dl, ax, ay, bx, by, WAVE_COL.hatch, 1.0)
+    end
+    x = x + 9
+  end
+end
+
+-- Small label tab attached to a marker line (side: "left" or "right" of it,
+-- flipped when it would leave [min_x, max_x]). Returns its rect.
+function wave_flag(dl, line_x, y, text, color, side, min_x, max_x)
+  local tw, th = r.ImGui_CalcTextSize(ctx, text)
+  local w, h = tw + 10, th + 2
+  local fx = side == "left" and (line_x - w) or line_x
+  if fx < min_x then
+    fx = line_x
+  end
+  if fx + w > max_x then
+    fx = line_x - w
+  end
+  r.ImGui_DrawList_AddRectFilled(dl, fx, y, fx + w, y + h, WAVE_COL.flag_bg, 3.0)
+  r.ImGui_DrawList_AddRectFilled(dl, fx, y, fx + w, y + h, (color & 0xFFFFFF00) | 0x2C, 3.0)
+  r.ImGui_DrawList_AddRect(dl, fx + 0.5, y + 0.5, fx + w - 0.5, y + h - 0.5, (color & 0xFFFFFF00) | 0x90, 3.0, 0, 1.0)
+  r.ImGui_DrawList_AddText(dl, fx + 5, y + 1, color, text)
+  return fx, y, fx + w, y + h
+end
+
+-- One channel of the waveform: a filled body (low alpha) with a crisp
+-- outline, coloured by the dominant frequency, about one point per pixel.
+function draw_wave_lane(dl, lane, x0, width, view0, view1, file_dur, map_x)
+  local data, freq = lane.data, lane.freq
+  local cy = (lane.y0 + lane.y1) * 0.5
+  local half = (lane.y1 - lane.y0) * 0.44
+  r.ImGui_DrawList_AddLine(dl, x0, cy, x0 + width, cy, WAVE_COL.center, 1.0)
+  if lane.sep then
+    r.ImGui_DrawList_AddLine(dl, x0, lane.y1, x0 + width, lane.y1, WAVE_COL.lane_sep, 1.0)
+  end
+  local n = #data
+  local fd = math.max(file_dur, 0.0001)
+  local i0 = math.max(1, math.floor((view0 / fd) * n) - 1)
+  local i1 = math.min(n, math.ceil((view1 / fd) * n) + 1)
+  local step = math.max(1, math.floor((i1 - i0) / math.max(1, width)))
+  local prev_x, prev_t, prev_b, prev_c
+  local i = i0
+  while i <= i1 do
+    local v, fi = 0.0, i
+    for j = i, math.min(i1, i + step - 1) do
+      local dv = data[j] or 0.0
+      if dv > v then
+        v, fi = dv, j
+      end
+    end
+    v = math.min(1.0, v)
+    local x = map_x(((i - 1) / n) * file_dur)
+    local top, bot = cy - v * half, cy + v * half
+    local col = frequency_to_color(freq and freq[fi])
+    if prev_x then
+      local mix = wave_mix_color(col, prev_c) & 0xFFFFFF00
+      r.ImGui_DrawList_AddQuadFilled(dl, prev_x, prev_t, x, top, x, bot, prev_x, prev_b, mix | 0x48)
+      r.ImGui_DrawList_AddLine(dl, prev_x, prev_t, x, top, mix | 0xE6, 1.2)
+      r.ImGui_DrawList_AddLine(dl, prev_x, prev_b, x, bot, mix | 0xE6, 1.2)
+    end
+    prev_x, prev_t, prev_b, prev_c = x, top, bot, col
+    i = i + step
+  end
+end
+
 -- Waveform module extras -------------------------------------------------
 
 function wave_ruler_step(span, width)
@@ -4169,7 +4287,7 @@ function render_waveform()
     update_pending_drop_tracking()
   end
 
-  ui_draw_panel(dl, x0, y0, x0 + width, y0 + height, 6.0, UI_THEME.bg_panel, UI_THEME.border, false, false)
+  draw_wave_panel(dl, x0, y0, x0 + width, y0 + height)
 
   if not preview_sample_obj or not waveform_data then
     local msg = preview_sample_obj and "Loading waveform…" or "No sample selected"
@@ -4219,117 +4337,85 @@ function render_waveform()
     end
     local channels = waveform_data.channels or 1
     local channel_data = waveform_data.channel_data
-    local frequency_data = waveform_data.frequency_data
     local frequency_channel_data = waveform_data.frequency_channel_data
-    
-    -- For mono: draw centered waveform (backward compatible)
-    -- For stereo+: draw separate waveforms per channel
+    -- One lane per channel (mono: one lane over the whole height).
+    local lanes = {}
     if channels == 1 or not channel_data then
-      -- Mono waveform: centered display
-      local center_y = y0 + height * 0.5
-      local half_height = height * 0.4
-      
-      -- Draw center line
-      r.ImGui_DrawList_AddLine(dl, x0, center_y, x0 + width, center_y, UI_THEME.border, 1.0)
-      
-      -- Draw waveform
-      local n = #waveform
-      local i0 = math.max(1, math.floor((view0 / math.max(file_dur, 0.0001)) * n) - 1)
-      local i1 = math.min(n, math.ceil((view1 / math.max(file_dur, 0.0001)) * n) + 1)
-      local prev_x = nil
-      local prev_y_top = center_y
-      local prev_y_bot = center_y
-      local prev_color = nil
-      
-      for i = i0, i1 do
-        local x = map_x(((i - 1) / n) * file_dur)
-        local value = waveform[i] or 0.0
-        local y_top = center_y - value * half_height
-        local y_bot = center_y + value * half_height
-        
-        -- Get frequency-based color for this pixel
-        local freq = frequency_data and frequency_data[i]
-        local color = frequency_to_color(freq)
-        
-        -- Draw vertical line for this sample
-        r.ImGui_DrawList_AddLine(dl, x, y_top, x, y_bot, (color & 0xFFFFFF00) | 0x9C, 1.5)
-        
-        -- Draw connecting line to previous sample (use average color for smooth transition)
-        if prev_x then
-          local prev_freq = frequency_data and frequency_data[i - 1]
-          local prev_color_val = frequency_to_color(prev_freq)
-          local avg_color = wave_mix_color(color, prev_color_val)
-          r.ImGui_DrawList_AddLine(dl, prev_x, prev_y_top, x, y_top, avg_color, 1.0)
-          r.ImGui_DrawList_AddLine(dl, prev_x, prev_y_bot, x, y_bot, avg_color, 1.0)
-        end
-        
-        prev_x = x
-        prev_y_top = y_top
-        prev_y_bot = y_bot
-        prev_color = color
-      end
+      lanes[1] = { data = waveform, freq = waveform_data.frequency_data, y0 = y0, y1 = y0 + height }
     else
-      -- Multi-channel waveform: draw separate waveforms per channel
-      -- For stereo: left channel on top half, right channel on bottom half
-      local channel_height = height / channels
-      
+      local ch_h = height / channels
       for ch = 0, channels - 1 do
-        local ch_data = channel_data[ch]
-        local ch_freq_data = frequency_channel_data and frequency_channel_data[ch]
-        if ch_data and #ch_data > 0 then
-          -- Calculate channel-specific parameters
-          local ch_y0 = y0 + ch * channel_height
-          local ch_y1 = y0 + (ch + 1) * channel_height
-          local ch_center_y = (ch_y0 + ch_y1) * 0.5
-          local ch_half_height = channel_height * 0.4
-          
-          -- Draw center line for this channel
-          r.ImGui_DrawList_AddLine(dl, x0, ch_center_y, x0 + width, ch_center_y, UI_THEME.border_soft, 1.0)
-          
-          -- Draw waveform for this channel
-          local n = #ch_data
-          local i0 = math.max(1, math.floor((view0 / math.max(file_dur, 0.0001)) * n) - 1)
-          local i1 = math.min(n, math.ceil((view1 / math.max(file_dur, 0.0001)) * n) + 1)
-          local prev_x = nil
-          local prev_y_top = ch_center_y
-          local prev_y_bot = ch_center_y
-          
-          for i = i0, i1 do
-            local x = map_x(((i - 1) / n) * file_dur)
-            local value = ch_data[i] or 0.0
-            local y_top = ch_center_y - value * ch_half_height
-            local y_bot = ch_center_y + value * ch_half_height
-            
-            -- Get frequency-based color for this pixel/channel
-            local freq = ch_freq_data and ch_freq_data[i]
-            local color = frequency_to_color(freq)
-            
-            -- Draw vertical line for this sample
-            r.ImGui_DrawList_AddLine(dl, x, y_top, x, y_bot, (color & 0xFFFFFF00) | 0x9C, 1.5)
-            
-            -- Draw connecting line to previous sample (use average color for smooth transition)
-            if prev_x then
-              local prev_freq = ch_freq_data and ch_freq_data[i - 1]
-              local prev_color_val = frequency_to_color(prev_freq)
-              local avg_color = wave_mix_color(color, prev_color_val)
-              r.ImGui_DrawList_AddLine(dl, prev_x, prev_y_top, x, y_top, avg_color, 1.0)
-              r.ImGui_DrawList_AddLine(dl, prev_x, prev_y_bot, x, y_bot, avg_color, 1.0)
-            end
-            
-            prev_x = x
-            prev_y_top = y_top
-            prev_y_bot = y_bot
-          end
-          
-          -- Draw separator line between channels (except after last channel)
-          if ch < channels - 1 then
-            r.ImGui_DrawList_AddLine(dl, x0 + 6, ch_y1, x0 + width - 6, ch_y1, UI_THEME.border, 1.0)
-          end
+        local d = channel_data[ch]
+        if d and #d > 0 then
+          lanes[#lanes + 1] = {
+            data = d,
+            freq = frequency_channel_data and frequency_channel_data[ch],
+            y0 = y0 + ch * ch_h,
+            y1 = y0 + (ch + 1) * ch_h,
+            sep = ch < channels - 1,
+          }
         end
       end
     end
-    
-    -- Effective length marker (draggable) + dim cropped tail
+    for _, lane in ipairs(lanes) do
+      draw_wave_lane(dl, lane, x0, width, view0, view1, file_dur, map_x)
+    end
+    local mx, my = r.ImGui_GetMousePos(ctx)
+    -- the top-right corner belongs to the volume knob and menu
+    local ctl_left = x0 + width - 110
+
+    -- Transient / sustain split (drum one-shots): a warm tint over the attack,
+    -- a dashed line where it ends, and attack / body bands along the top edge.
+    if preview_sample_obj and type(preview_sample_obj.transient_end) == "number"
+        and preview_sample_obj.transient_end > 0 and width > 1 then
+      local ts_dur = waveform_data.duration or preview_sample_obj.duration or 0.0
+      if ts_dur > 0 then
+        local function time_to_x(t)
+          return math.max(x0, math.min(x0 + width, map_x(t)))
+        end
+        local onset_t = preview_sample_obj.onset
+        if type(onset_t) ~= "number" or onset_t < 0 then
+          onset_t = 0.0
+        end
+        local trans_t = preview_sample_obj.transient_end
+        local sustain_t = sample_map_duration(preview_sample_obj)
+        if sustain_t <= 0 then
+          sustain_t = ts_dur
+        end
+        local onset_x = time_to_x(onset_t)
+        local trans_x = time_to_x(trans_t)
+        local sustain_x = time_to_x(sustain_t)
+        if trans_x > onset_x + 0.5 then
+          r.ImGui_DrawList_AddRectFilled(dl, onset_x, y0, trans_x, y0 + height, WAVE_COL.attack_tint, 0)
+          r.ImGui_DrawList_AddRectFilled(dl, onset_x, y0, trans_x, y0 + 3, WAVE_COL.attack, 0)
+        end
+        if sustain_x > trans_x + 0.5 then
+          r.ImGui_DrawList_AddRectFilled(dl, trans_x, y0, sustain_x, y0 + 3, WAVE_COL.body, 0)
+        end
+        wave_dashed_vline(dl, trans_x, y0 + 3, y0 + height, WAVE_COL.attack_line, 1.0)
+        if hovered and math.abs(mx - trans_x) <= 3 and not state.waveform_eff_drag then
+          hint_tooltip(string.format("Transient ends at %.3fs\nWarm band: attack. Blue band: body (to the end marker).", trans_t))
+        end
+      end
+    end
+
+    -- Snap offset: a dashed violet line with a diamond at the top.
+    if preview_sample_obj and preview_sample_obj.snap_offset then
+      local snap_time = preview_sample_obj.snap_offset
+      local duration = waveform_data.duration or preview_sample_obj.duration or 1.0
+      if duration > 0 and snap_time >= 0 and snap_time <= duration then
+        local snap_x = math.max(x0, math.min(x0 + width, map_x(snap_time)))
+        wave_dashed_vline(dl, snap_x, y0 + 4, y0 + height, WAVE_COL.snap_line, 1.2)
+        local d = 4.5
+        r.ImGui_DrawList_AddQuadFilled(dl, snap_x, y0 + 1, snap_x + d, y0 + 1 + d, snap_x, y0 + 1 + d * 2, snap_x - d, y0 + 1 + d, WAVE_COL.snap)
+        if hovered and math.abs(mx - snap_x) <= 3 then
+          hint_tooltip(string.format("Snap offset  %.3fs", snap_time))
+        end
+      end
+    end
+
+    -- Effective length (end marker, draggable): the cropped tail is dimmed;
+    -- the line has a grip in the middle and its time in a flag.
     if preview_sample_obj and file_dur > 0 and width > 1 then
       if state.waveform_eff_drag and state.waveform_eff_drag_path
           and state.waveform_eff_drag_path ~= preview_sample_obj.path then
@@ -4342,39 +4428,36 @@ function render_waveform()
         eff = file_dur
       end
       local eff_x = math.max(x0, math.min(x0 + width, map_x(eff)))
-
-      if eff < file_dur - 0.0005 then
-        r.ImGui_DrawList_AddRectFilled(dl, eff_x, y0, x0 + width, y0 + height, 0x00000099, 0)
+      local cropped = eff < file_dur - 0.0005
+      if cropped then
+        r.ImGui_DrawList_AddRectFilled(dl, eff_x, y0, x0 + width, y0 + height, WAVE_COL.dim, 0)
+        wave_hatch(dl, eff_x, y0, x0 + width, y0 + height)
       end
 
-      local handle_color = 0xFF9A3CFF  -- Orange (RRGGBBAA)
-      local handle_hover = 0xFFC070FF
-      local mx, my = r.ImGui_GetMousePos(ctx)
       local handle_hit = 8.0
       local near_handle = math.abs(mx - eff_x) <= handle_hit and my >= y0 - 4 and my <= y0 + height + 4
-      local color = (near_handle or state.waveform_eff_drag) and handle_hover or handle_color
-
-      r.ImGui_DrawList_AddLine(dl, eff_x, y0, eff_x, y0 + height, color, 2.0)
-      local tri = 7.0
-      r.ImGui_DrawList_AddTriangleFilled(dl,
-        eff_x, y0 + 1,
-        eff_x - tri, y0 + tri + 1,
-        eff_x + tri, y0 + tri + 1,
-        color)
-      r.ImGui_DrawList_AddTriangleFilled(dl,
-        eff_x, y0 + height - 1,
-        eff_x - tri, y0 + height - tri - 1,
-        eff_x + tri, y0 + height - tri - 1,
-        color)
-
-      local label = string.format("%.2fs", eff)
-      local label_w = select(1, r.ImGui_CalcTextSize(ctx, label)) or 36
-      local label_x = math.min(eff_x + 6, x0 + width - label_w - 4)
-      if label_x < x0 + 4 then
-        label_x = x0 + 4
+      local hot = near_handle or state.waveform_eff_drag
+      local color = hot and WAVE_COL.end_hot or WAVE_COL.end_line
+      if cropped or hot then
+        r.ImGui_DrawList_AddLine(dl, eff_x, y0, eff_x, y0 + height, (color & 0xFFFFFF00) | 0xD8, 1.5)
+        local gy = y0 + height * 0.5
+        local gh = math.min(11, height * 0.18)
+        r.ImGui_DrawList_AddRectFilled(dl, eff_x - 3, gy - gh, eff_x + 3, gy + gh, color, 3)
+        r.ImGui_DrawList_AddLine(dl, eff_x - 0.8, gy - gh + 4, eff_x - 0.8, gy + gh - 4, 0x00000070, 1.0)
+        r.ImGui_DrawList_AddLine(dl, eff_x + 1.2, gy - gh + 4, eff_x + 1.2, gy + gh - 4, 0x00000070, 1.0)
+        local label = string.format("%.2fs", eff)
+        local fy = y0 + 3
+        local fw = (select(1, r.ImGui_CalcTextSize(ctx, label)) or 30) + 10
+        if eff_x - fw < x0 or eff_x > ctl_left then
+          fy = y0 + height - 20
+        end
+        if height >= 44 then
+          wave_flag(dl, eff_x, fy, label, color, "left", x0, x0 + width)
+        end
+      else
+        -- full length: just a quiet grab tab at the right edge
+        r.ImGui_DrawList_AddRectFilled(dl, eff_x - 3, y0 + height * 0.5 - 8, eff_x, y0 + height * 0.5 + 8, (color & 0xFFFFFF00) | 0x70, 2)
       end
-      r.ImGui_DrawList_AddText(dl, label_x + 1, y0 + 8, 0x000000AA, label)
-      r.ImGui_DrawList_AddText(dl, label_x, y0 + 7, color, label)
 
       if (hovered and near_handle) or state.waveform_eff_drag then
         if r.ImGui_MouseCursor_ResizeEW then
@@ -4385,7 +4468,7 @@ function render_waveform()
       end
 
       if hovered and near_handle and not state.waveform_eff_drag then
-        hint_tooltip("Effective length\nDrag to crop trailing silence\nDouble-click to reset to full file")
+        hint_tooltip("End marker (effective length)\nDrag to crop trailing silence\nDouble-click to reset to full file")
       end
 
       if hovered and near_handle and r.ImGui_IsMouseDoubleClicked(ctx, 0) then
@@ -4413,102 +4496,17 @@ function render_waveform()
       end
     end
 
-    -- Transient / sustain split (drum one-shots)
-    if preview_sample_obj and type(preview_sample_obj.transient_end) == "number"
-        and preview_sample_obj.transient_end > 0 and width > 1 then
-      local ts_dur = waveform_data.duration or preview_sample_obj.duration or 0.0
-      if ts_dur > 0 then
-        local function time_to_x(t)
-          return math.max(x0, math.min(x0 + width, map_x(t)))
-        end
-        local onset_t = preview_sample_obj.onset
-        if type(onset_t) ~= "number" or onset_t < 0 then
-          onset_t = 0.0
-        end
-        local trans_t = preview_sample_obj.transient_end
-        local sustain_t = sample_map_duration(preview_sample_obj)
-        if sustain_t <= 0 then
-          sustain_t = ts_dur
-        end
-        local onset_x = time_to_x(onset_t)
-        local trans_x = time_to_x(trans_t)
-        local sustain_x = time_to_x(sustain_t)
-
-        if trans_x > onset_x + 0.5 then
-          r.ImGui_DrawList_AddRectFilled(dl, onset_x, y0, trans_x, y0 + height, 0xFF6B3C33, 0)
-        end
-        if sustain_x > trans_x + 0.5 then
-          r.ImGui_DrawList_AddRectFilled(dl, trans_x, y0, sustain_x, y0 + height, 0x4A9CFF28, 0)
-        end
-
-        local ts_color = 0x7CFF4AFF  -- Lime (RRGGBBAA)
-        r.ImGui_DrawList_AddLine(dl, trans_x, y0, trans_x, y0 + height, ts_color, 2.0)
-        local tri = 5.5
-        r.ImGui_DrawList_AddTriangleFilled(dl,
-          trans_x, y0,
-          trans_x - tri, y0 + tri,
-          trans_x + tri, y0 + tri,
-          ts_color)
-        r.ImGui_DrawList_AddTriangleFilled(dl,
-          trans_x, y0 + height,
-          trans_x - tri, y0 + height - tri,
-          trans_x + tri, y0 + height - tri,
-          ts_color)
-        if (trans_x - onset_x) >= 10.0 then
-          r.ImGui_DrawList_AddText(dl, onset_x + 3, y0 + 2, ts_color, "T")
-        end
-        if (sustain_x - trans_x) >= 10.0 then
-          r.ImGui_DrawList_AddText(dl, trans_x + 4, y0 + 2, 0xA8D4FFFF, "S")
-        end
-      end
-    end
-
-    -- Draw snap offset marker if available
-    if preview_sample_obj and preview_sample_obj.snap_offset then
-      local snap_time = preview_sample_obj.snap_offset
-      local duration = waveform_data.duration or preview_sample_obj.duration or 1.0
-      if duration > 0 and snap_time >= 0 and snap_time <= duration then
-        local snap_x = math.max(x0, math.min(x0 + width, map_x(snap_time)))
-        
-        -- Draw snap offset line (bright yellow/green, distinct from playhead)
-        local snap_color = 0x00FFFFFF  -- Cyan (RRGGBBAA format)
-        local snap_thickness = 2.5
-        r.ImGui_DrawList_AddLine(dl, snap_x, y0, snap_x, y0 + height, snap_color, snap_thickness)
-        
-        -- Draw snap offset indicators at top and bottom (triangles pointing down/up)
-        local triangle_size = 6.0
-        -- Top triangle (pointing down)
-        r.ImGui_DrawList_AddTriangleFilled(dl, 
-          snap_x, y0, 
-          snap_x - triangle_size, y0 + triangle_size, 
-          snap_x + triangle_size, y0 + triangle_size, 
-          snap_color)
-        -- Bottom triangle (pointing up)
-        r.ImGui_DrawList_AddTriangleFilled(dl, 
-          snap_x, y0 + height, 
-          snap_x - triangle_size, y0 + height - triangle_size, 
-          snap_x + triangle_size, y0 + height - triangle_size, 
-          snap_color)
-      end
-    end
-    
-    -- Draw playhead when playing or paused
+    -- Playhead: a white line with a soft glow and a cap at the top.
     local current_pos = get_preview_position()
     local duration = waveform_data.duration or 1.0
     if (preview_proc ~= nil or state.preview_paused) and current_pos ~= nil and duration > 0
         and current_pos >= view0 and current_pos <= view1 then
-      local playhead_x = math.max(x0, math.min(x0 + width, map_x(current_pos)))
-      
-      -- Draw playhead line (bright yellow, thicker for visibility)
-      local playhead_color = 0xFFFF88FF  -- Yellow (RRGGBBAA format)
-      local playhead_thickness = 2.0
-      r.ImGui_DrawList_AddLine(dl, playhead_x, y0, playhead_x, y0 + height, playhead_color, playhead_thickness)
-      
-      -- Draw playhead indicators at top and bottom (filled circles for better visibility)
-      local indicator_radius = 5.0
-      r.ImGui_DrawList_AddCircleFilled(dl, playhead_x, y0, indicator_radius, playhead_color, 16)
+      local px = math.max(x0, math.min(x0 + width, map_x(current_pos)))
+      r.ImGui_DrawList_AddLine(dl, px, y0, px, y0 + height, 0xFFFFFF22, 5.0)
+      r.ImGui_DrawList_AddLine(dl, px, y0, px, y0 + height, WAVE_COL.playhead, 1.5)
+      r.ImGui_DrawList_AddTriangleFilled(dl, px - 5, y0, px + 5, y0, px, y0 + 6, WAVE_COL.playhead)
     end
-    draw_waveform_extras(dl, x0, y0, width, height, view0, view1, file_dur, hovered, select(1, r.ImGui_GetMousePos(ctx)))
+    draw_waveform_extras(dl, x0, y0, width, height, view0, view1, file_dur, hovered, mx)
     if r.ImGui_DrawList_PopClipRect then
       r.ImGui_DrawList_PopClipRect(dl)
     end
