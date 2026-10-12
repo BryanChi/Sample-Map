@@ -726,16 +726,27 @@ function process_waveform_peaks(job, deadline)
     job.peaks_building = false
   end
   local width, channels = job.width, job.channels
-  local buf = r.new_array(channels * width * 2)
+  local buf = r.new_array(channels * width * 3)
   buf.clear()
-  local ret = r.PCM_Source_GetPeaks(src, width / job.duration, 0.0, channels, width, 0, buf)
-  local got = math.floor(tonumber(ret) or 0) % 1048576
+  -- Extra type 115 ('s') also asks for REAPER's spectral peaks: a third block
+  -- whose values hold the dominant frequency in Hz in their low 15 bits.
+  -- Bit 24 of the return value says whether that block was filled.
+  local ret = tonumber(r.PCM_Source_GetPeaks(src, width / job.duration, 0.0, channels, width, 115, buf)) or 0
+  local got = math.floor(ret) % 1048576
   if got <= 0 then
     return false
+  end
+  local has_spectral = math.floor(ret / 16777216) % 2 == 1
+  -- Without spectral peaks, tint the whole wave by the analysed pitch so it
+  -- is not just grey.
+  local fallback_freq = tonumber(job.sample and job.sample.dominant_freq)
+  if fallback_freq and fallback_freq <= 0 then
+    fallback_freq = nil
   end
   local vals = buf.table and buf.table() or buf
   -- Block of maxima (frame-major, channel-interleaved), then a block of minima.
   local min_off = channels * width
+  local spec_off = channels * width * 2
   for i = 0, width - 1 do
     for c = 0, channels - 1 do
       local v = 0.0
@@ -745,7 +756,14 @@ function process_waveform_peaks(job, deadline)
         v = hi > lo and hi or lo
       end
       job.waveform_channels[c][i + 1] = v
-      job.frequency_channels[c][i + 1] = nil
+      local freq = nil
+      if has_spectral and i < got then
+        local hz = math.floor(math.abs(vals[spec_off + i * channels + c + 1] or 0.0)) % 32768
+        if hz >= 20 then
+          freq = hz
+        end
+      end
+      job.frequency_channels[c][i + 1] = freq or fallback_freq
       if v > job.max_val_per_channel[c] then
         job.max_val_per_channel[c] = v
       end
