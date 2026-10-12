@@ -26,3 +26,6 @@ __pycache__/
 
 # Editor / agent debug traces
 .cursor/
+
+# numpy installed for the analyzer (Library > Re-analyze > Install numpy)
+pylib/
