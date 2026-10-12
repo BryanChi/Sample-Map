@@ -97,31 +97,12 @@ function swap_seq_track_sample_neighbor(slot, direction)
   return true
 end
 
--- Esc clears the filter applied to the map: first the tag chips (and the tag
--- groups they opened), then the search text. Layout edit keeps its own Esc.
-function map_clear_applied_filter()
-  if next(state.active_tags or {}) ~= nil or next(state.selected_tag_parents or {}) ~= nil then
-    state.active_tags = {}
-    state.selected_tag_parents = {}
-    return true
-  end
-  if (state.filter or "") ~= "" then
-    state.filter = ""
-    return true
-  end
-  return false
-end
-
 function handle_map_arrow_keys()
   if not sample_map_is_open() then
     return
   end
   if imgui_any_popup_open and imgui_any_popup_open() then
     return
-  end
-  if not state.map_ui_edit and r.ImGui_IsKeyPressed and r.ImGui_Key_Escape
-      and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
-    map_clear_applied_filter()
   end
   local left = shortcut_pressed("map_prev_sample")
   local right = shortcut_pressed("map_next_sample")
