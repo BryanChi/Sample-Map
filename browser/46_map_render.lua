@@ -966,6 +966,16 @@ function finish_scan_session(still_incomplete)
     end
   end
 
+  -- Background scans that went fine end with a toast instead of a window.
+  if scan_in_background() and error_count == 0 and not note then
+    play_scan_complete_sound()
+    sm_notify(string.format("%s finished in %s  ·  library: %s samples",
+      kind, format_scan_clock(elapsed), sm_format_count(#state.samples)))
+    add_scan_log(string.format("%s finished in %s", kind, format_scan_clock(elapsed)))
+    state.scan_session = nil
+    return
+  end
+
   state.scan_complete_dialog = {
     title = "Scan complete",
     subtitle = kind,
@@ -1435,116 +1445,270 @@ function update_scan_eta(phase, done, remaining, now)
   return eta.remain
 end
 
-function draw_map_scan_progress_overlay(dl, x0, y0, width, height)
+-- "12,345"
+function sm_format_count(n)
+  local s = tostring(math.floor(tonumber(n) or 0))
+  local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  return (out:gsub("^,", ""))
+end
+
+-- What the running scan is doing, for the progress bars (nil when no scan runs):
+-- { phase, label, done, total, fraction, eta, elapsed, detail, indeterminate }.
+function sm_compute_scan_progress(now)
   if not state.scan_running then
-    return 0
+    return nil
   end
-  local file_scanning = #state.scan_queue > 0
-  local analyzing = (state.incomplete_analysis_total or 0) > 0
-      and state.scan_started > 0
-      and #state.scan_queue == 0
-      and (#state.analyzer_queue > 0 or #state.active_processes > 0)
-
-  if not file_scanning and not analyzing then
-    return 0
+  local session = state.scan_session
+  local started = (type(session) == "table" and session.started_at)
+    or (state.scan_started and state.scan_started > 0 and state.scan_started) or now
+  local elapsed = math.max(0, now - started + ((type(session) == "table" and session.elapsed_so_far) or 0))
+  local p = { elapsed = elapsed }
+  local enum = state.scan_enum
+  if enum then
+    p.phase = "list"
+    p.label = "Looking for files"
+    p.short = "Finding files"
+    p.indeterminate = true
+    p.detail = string.format("%s folders checked  ·  %s new files found",
+      sm_format_count(enum.dirs_done or 0), sm_format_count(#(enum.paths or {})))
+    return p
   end
-
-  local done, total, elapsed, label
-  if file_scanning then
-    done = state.scan_total - #state.scan_queue
-    total = state.scan_total
-    elapsed = r.time_precise() - state.scan_started
-    label = "Scanning"
+  local remaining
+  if #state.scan_queue > 0 then
+    local total = math.max(state.scan_total or 0, #state.scan_queue)
+    remaining = #state.scan_queue
+    p.phase = "index"
+    p.label = "Adding new files"
+    p.short = "Adding files"
+    p.done, p.total = total - remaining, total
   else
-    local remaining = #state.analyzer_queue + #state.active_processes
-    total = math.max(state.incomplete_analysis_total or 0, remaining)
-    done = math.max(0, total - remaining)
-    elapsed = r.time_precise() - state.scan_started
-    label = state.analyzer_job_label or "Analyzing incomplete"
+    remaining = #state.analyzer_queue + #state.active_processes
+    if remaining == 0 then
+      p.phase = "finish"
+      p.label = "Finishing up"
+      p.short = "Finishing"
+      p.indeterminate = true
+      p.detail = "Saving the library"
+      return p
+    end
+    local done = 0
+    if type(session) == "table" then
+      done = (session.analyzed or 0) + (session.analyze_errors or 0)
+    end
+    p.phase = "analyze"
+    p.label = (state.analyzer_job_label and state.analyzer_job_label ~= "") and state.analyzer_job_label or "Analyzing sounds"
+    p.short = "Analyzing"
+    p.done, p.total = done, done + remaining
   end
-  local progress = total > 0 and (done / total) or 0.0
+  p.fraction = p.total > 0 and math.max(0, math.min(1, p.done / p.total)) or 0
+  p.eta = update_scan_eta(p.phase, p.done, remaining, now)
+  p.detail = string.format("%s of %s files", sm_format_count(p.done), sm_format_count(p.total))
+  return p
+end
 
-  -- Floating card across the top of the plot: label + percentage, a slim
-  -- accent bar, then counts and the time estimate in dim text.
-  local overlay_height = 118.0
-  local overlay_y = y0
-  local card_margin = 10.0
-  local card_x0 = x0 + card_margin
-  local card_x1 = x0 + width - card_margin
-  local card_y0 = overlay_y + 6.0
-  local card_y1 = overlay_y + overlay_height - 4.0
-  r.ImGui_DrawList_AddRectFilled(dl, x0, overlay_y, x0 + width, overlay_y + overlay_height, 0x00000066, UI_METRICS.radius_panel)
-  r.ImGui_DrawList_AddRectFilled(dl, card_x0, card_y0, card_x1, card_y1, 0x111612F4, UI_METRICS.radius_panel)
-  r.ImGui_DrawList_AddRect(dl, card_x0 + 0.5, card_y0 + 0.5, card_x1 - 0.5, card_y1 - 0.5, UI_THEME.border, UI_METRICS.radius_panel, 0, 1.0)
-
-  local bar_padding = 26.0
-  local bar_y = overlay_y + 36.0
-  local bar_width = width - (bar_padding * 2)
-  local bar_height = 6.0
-
-  local pct_text = string.format("%.0f%%", progress * 100.0)
-  local head = label
-  local _, head_h = r.ImGui_CalcTextSize(ctx, head)
-  local pct_w = select(1, r.ImGui_CalcTextSize(ctx, pct_text)) or 30
-  local text_y = overlay_y + 14.0
-  local pulse = 0.55 + 0.45 * math.sin(r.time_precise() * 4.0)
-  r.ImGui_DrawList_AddCircleFilled(dl, x0 + bar_padding + 3, text_y + head_h * 0.5, 3.5,
-    (UI_THEME.accent & 0xFFFFFF00) | math.floor(120 + 135 * pulse), 12)
-  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + 12, text_y, UI_THEME.text, head)
-  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + 12.5, text_y, UI_THEME.text, head)
-  r.ImGui_DrawList_AddText(dl, x0 + bar_padding + bar_width - pct_w, text_y, UI_THEME.accent, pct_text)
-
-  r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y, x0 + bar_padding + bar_width, bar_y + bar_height, 0x1E2621FF, bar_height * 0.5)
-  local fill_width = bar_width * math.max(0.0, math.min(1.0, progress))
-  if fill_width > bar_height then
-    r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y, x0 + bar_padding + fill_width, bar_y + bar_height, UI_THEME.accent, bar_height * 0.5)
-    r.ImGui_DrawList_AddRectFilled(dl, x0 + bar_padding, bar_y - 2, x0 + bar_padding + fill_width, bar_y + bar_height + 2, 0x1EFF5E1C, bar_height)
+-- Once per frame: the map card and the toolbar bar both read it.
+function sm_scan_progress()
+  local frame = (ctx and r.ImGui_GetFrameCount and r.ImGui_GetFrameCount(ctx)) or 0
+  local c = state._scan_progress_cache
+  if c and frame ~= 0 and c.frame == frame then
+    return c.p
   end
+  local p = sm_compute_scan_progress(r.time_precise())
+  state._scan_progress_cache = { frame = frame, p = p }
+  return p
+end
 
-  local text = string.format("%d of %d files  ·  %s elapsed", done, total, format_scan_clock(elapsed))
-  local remaining_y = bar_y + bar_height + 8.0
-  r.ImGui_DrawList_AddText(dl, x0 + bar_padding, remaining_y, UI_THEME.text_dim, text)
-
-  -- Estimate time remaining (right side, same row)
-  local remaining_count = file_scanning and #state.scan_queue or (#state.analyzer_queue + #state.active_processes)
-  local phase = file_scanning and "scan" or "analyze"
-  local eta_sec = update_scan_eta(phase, done, remaining_count, r.time_precise())
-  local remaining_text = nil
-  if remaining_count > 0 and type(eta_sec) == "number" and eta_sec > 0.5 then
-    remaining_text = "About " .. format_scan_clock(eta_sec) .. " left"
-  elseif remaining_count > 0 and done < 4 then
-    remaining_text = "Estimating time left…"
+-- "About 3 min left", "Estimating time left…" or nil.
+function sm_scan_eta_text(p)
+  if not p or p.indeterminate then
+    return nil
   end
-  if remaining_text then
-    local rw = select(1, r.ImGui_CalcTextSize(ctx, remaining_text)) or 0
-    r.ImGui_DrawList_AddText(dl, x0 + bar_padding + bar_width - rw, remaining_y, UI_THEME.text_dim, remaining_text)
+  if type(p.eta) == "number" and p.eta > 0.5 then
+    return "About " .. format_scan_clock(p.eta) .. " left"
   end
+  if (p.done or 0) < 4 and (p.total or 0) > (p.done or 0) then
+    return "Estimating time left…"
+  end
+  return nil
+end
 
-  local btn_w, btn_h = 72, 22
-  local btn_x = x0 + (width - btn_w) * 0.5
-  local btn_y = overlay_y + overlay_height - btn_h - 12.0
+-- Slim progress bar; an indeterminate bar shows a sliding segment.
+function sm_draw_progress_bar(dl, x0, y0, x1, y1, fraction, indeterminate, track_col, fill_col)
+  local h = y1 - y0
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, track_col or 0x1E2621FF, h * 0.5)
+  local w = x1 - x0
+  if indeterminate then
+    local seg = math.max(h * 2, w * 0.28)
+    local t = (r.time_precise() * 0.55) % 1.0
+    local sx = x0 - seg + (w + seg) * t
+    local a, b = math.max(x0, sx), math.min(x1, sx + seg)
+    if b - a > 1 then
+      r.ImGui_DrawList_AddRectFilled(dl, a, y0, b, y1, fill_col or UI_THEME.accent, h * 0.5)
+    end
+    return
+  end
+  local fw = w * math.max(0.0, math.min(1.0, fraction or 0))
+  if fw > 1 then
+    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + math.max(fw, h), y1, fill_col or UI_THEME.accent, h * 0.5)
+  end
+end
+
+-- Hit-tested button drawn over the map (the map's InvisibleButton sits under
+-- the card and would steal a normal item click).
+local function overlay_button(id, label, x, y, w, h, style, tip)
   local mx, my = r.ImGui_GetMousePos(ctx)
-  local over_btn = mx >= btn_x and mx <= (btn_x + btn_w) and my >= btn_y and my <= (btn_y + btn_h)
-  -- Ignore the rect while another window/popup covers the map.
-  if over_btn and r.ImGui_IsWindowHovered then
+  local over = mx >= x and mx <= (x + w) and my >= y and my <= (y + h)
+  if over and r.ImGui_IsWindowHovered then
     local hover_flags = 0
     if r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem then
       hover_flags = r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem()
     end
-    over_btn = r.ImGui_IsWindowHovered(ctx, hover_flags) and true or false
+    over = r.ImGui_IsWindowHovered(ctx, hover_flags) and true or false
   end
-  -- The map InvisibleButton sits under this overlay and steals ImGui item clicks.
-  -- Hit-test the Stop rect directly so the button always works.
-  if over_btn and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0) then
+  local clicked = over and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0)
+  r.ImGui_SetCursorScreenPos(ctx, x, y)
+  draw_ui_button(id, label, w, h, { style = style, compact = true })
+  if over and tip then
+    r.ImGui_SetTooltip(ctx, tip)
+  end
+  return clicked
+end
+
+-- Card across the top of the map while a full-speed scan runs. Hidden while
+-- scanning in the background (the toolbar bar still shows progress).
+function draw_map_scan_progress_overlay(dl, x0, y0, width, height)
+  local p = sm_scan_progress()
+  if not p or scan_in_background() then
+    return 0
+  end
+
+  local overlay_height = 108.0
+  local card_margin = 10.0
+  local card_x0 = x0 + card_margin
+  local card_x1 = x0 + width - card_margin
+  local card_y0 = y0 + 6.0
+  local card_y1 = y0 + overlay_height - 4.0
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + overlay_height, 0x00000066, UI_METRICS.radius_panel)
+  r.ImGui_DrawList_AddRectFilled(dl, card_x0, card_y0, card_x1, card_y1, 0x111612F4, UI_METRICS.radius_panel)
+  r.ImGui_DrawList_AddRect(dl, card_x0 + 0.5, card_y0 + 0.5, card_x1 - 0.5, card_y1 - 0.5, UI_THEME.border, UI_METRICS.radius_panel, 0, 1.0)
+
+  local pad = 26.0
+  local bar_w = width - pad * 2
+  local text_y = y0 + 16.0
+  local _, head_h = r.ImGui_CalcTextSize(ctx, p.label)
+  local pulse = 0.55 + 0.45 * math.sin(r.time_precise() * 4.0)
+  r.ImGui_DrawList_AddCircleFilled(dl, x0 + pad + 3, text_y + head_h * 0.5, 3.5,
+    (UI_THEME.accent & 0xFFFFFF00) | math.floor(120 + 135 * pulse), 12)
+  r.ImGui_DrawList_AddText(dl, x0 + pad + 12, text_y, UI_THEME.text, p.label)
+  r.ImGui_DrawList_AddText(dl, x0 + pad + 12.5, text_y, UI_THEME.text, p.label)
+  if not p.indeterminate then
+    local pct_text = string.format("%.0f%%", (p.fraction or 0) * 100.0)
+    local pct_w = select(1, r.ImGui_CalcTextSize(ctx, pct_text)) or 30
+    r.ImGui_DrawList_AddText(dl, x0 + pad + bar_w - pct_w, text_y, UI_THEME.accent, pct_text)
+  end
+
+  local bar_y = y0 + 40.0
+  sm_draw_progress_bar(dl, x0 + pad, bar_y, x0 + pad + bar_w, bar_y + 6.0, p.fraction, p.indeterminate)
+
+  local row_y = bar_y + 14.0
+  local left = (p.detail or "") .. "  ·  " .. format_scan_clock(p.elapsed) .. " elapsed"
+  r.ImGui_DrawList_AddText(dl, x0 + pad, row_y, UI_THEME.text_dim, left)
+  local eta_text = sm_scan_eta_text(p)
+  if eta_text then
+    local rw = select(1, r.ImGui_CalcTextSize(ctx, eta_text)) or 0
+    r.ImGui_DrawList_AddText(dl, x0 + pad + bar_w - rw, row_y, UI_THEME.text_dim, eta_text)
+  end
+
+  local btn_h = 22
+  local stop_w, bg_w = 64, 150
+  local btn_y = y0 + overlay_height - btn_h - 12.0
+  local total_w = stop_w + 8 + bg_w
+  local bx = x0 + (width - total_w) * 0.5
+  if overlay_button("scan_bg", "Run in background", bx, btn_y, bg_w, btn_h, nil,
+      "Keep scanning, slower, so REAPER and the map stay quick to use.\nProgress stays in the toolbar. Library > Scan in Background changes it back.") then
+    set_scan_background(true)
+  end
+  if overlay_button("scan_stop", "Stop", bx + bg_w + 8, btn_y, stop_w, btn_h, "danger",
+      "Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.") then
     stop_scan()
-  end
-  r.ImGui_SetCursorScreenPos(ctx, btn_x, btn_y)
-  draw_ui_button("scan_stop", "Stop", btn_w, btn_h, { style = "danger", compact = true })
-  if over_btn then
-    r.ImGui_SetTooltip(ctx, "Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.")
   end
 
   return overlay_height
+end
+
+-- Compact progress in the toolbar, shown during every scan in every view:
+-- what it's doing, a bar, the time left, and a stop button.
+SM_SCAN_CHIP_W = 250
+
+function draw_scan_progress_chip()
+  local p = sm_scan_progress()
+  if not p then
+    return false
+  end
+  local h = UI_METRICS.toolbar_h
+  local w = SM_SCAN_CHIP_W
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  r.ImGui_InvisibleButton(ctx, "##scan_chip", w, h)
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, hovered and 0x1A221DFF or 0x141A16FF, h * 0.5)
+  r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, UI_THEME.border, h * 0.5, 0, 1.0)
+
+  local pulse = 0.55 + 0.45 * math.sin(r.time_precise() * 4.0)
+  local _, th = r.ImGui_CalcTextSize(ctx, "Ag")
+  local ty = y + (h - th) * 0.5 - 3
+  r.ImGui_DrawList_AddCircleFilled(dl, x + 13, ty + th * 0.5, 3.2,
+    (UI_THEME.accent & 0xFFFFFF00) | math.floor(120 + 135 * pulse), 12)
+  local right
+  if p.indeterminate then
+    right = ""
+  else
+    right = string.format("%.0f%%", (p.fraction or 0) * 100)
+    if type(p.eta) == "number" and p.eta > 0.5 then
+      local sec = math.floor(p.eta + 0.5)
+      local clock = sec >= 3600 and string.format("%d:%02d:%02d", sec // 3600, (sec // 60) % 60, sec % 60)
+        or string.format("%d:%02d", sec // 60, sec % 60)
+      right = right .. "  ·  " .. clock .. " left"
+    end
+  end
+  local label = p.short or p.label
+  if scan_in_background() then
+    label = label .. " (bg)"
+  end
+  local rw = right ~= "" and (select(1, r.ImGui_CalcTextSize(ctx, right)) or 0) or 0
+  local text_x0, text_x1 = x + 22, x + w - 12
+  r.ImGui_DrawList_PushClipRect(dl, text_x0, y, text_x1 - rw - 8, y + h, true)
+  r.ImGui_DrawList_AddText(dl, text_x0, ty, UI_THEME.text, label)
+  r.ImGui_DrawList_PopClipRect(dl)
+  if rw > 0 then
+    r.ImGui_DrawList_AddText(dl, text_x1 - rw, ty, UI_THEME.accent, right)
+  end
+  local bar_y = y + h - 8
+  sm_draw_progress_bar(dl, x + 22, bar_y, x + w - 12, bar_y + 3, p.fraction, p.indeterminate)
+
+  if hovered then
+    local lines = { p.label }
+    if p.detail and p.detail ~= "" then lines[#lines + 1] = p.detail end
+    lines[#lines + 1] = format_scan_clock(p.elapsed) .. " elapsed"
+    local eta_text = sm_scan_eta_text(p)
+    if eta_text then lines[#lines + 1] = eta_text end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = scan_in_background()
+      and "Scanning in the background (slower). Click for full speed."
+      or "Click to keep scanning in the background (slower, REAPER stays quick)."
+    r.ImGui_SetTooltip(ctx, table.concat(lines, "\n"))
+  end
+  if r.ImGui_IsItemClicked(ctx, 0) then
+    set_scan_background(not scan_in_background())
+  end
+  r.ImGui_SameLine(ctx, 0, 4)
+  if draw_ui_button("scan_stop_toolbar", "Stop", nil, h, { style = "danger", compact = true }) then
+    stop_scan()
+  end
+  if r.ImGui_IsItemHovered(ctx) then
+    r.ImGui_SetTooltip(ctx, "Stop scanning and save progress.\nThe next scan will continue from here — you won't start over.")
+  end
+  return true
 end
 
 
@@ -1577,7 +1741,7 @@ function render_map()
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local mx, my = r.ImGui_GetMousePos(ctx)
   -- Previous frame's drawn overlay height (0 when the overlay is hidden).
-  local overlay_h = (state.scan_running and (state.map_scan_overlay_h or 118)) or 0
+  local overlay_h = (state.scan_running and not scan_in_background() and (state.map_scan_overlay_h or 108)) or 0
   local over_scan_overlay = overlay_h > 0 and my >= y0 and my <= (y0 + overlay_h)
 
   handle_map_view_input(hovered and not over_scan_overlay, mx, my, width, height, x0, y0)

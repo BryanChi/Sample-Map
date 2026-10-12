@@ -716,6 +716,10 @@ function render_header()
         menu_item_tooltip("Only look for new and removed files (faster on big libraries).\nA file edited in place keeps its old analysis until a full Rescan.")
       end
     end
+    if r.ImGui_MenuItem(ctx, "Scan in Background (slower)", nil, scan_in_background()) then
+      set_scan_background(not scan_in_background())
+    end
+    menu_item_tooltip("Scans use less of the computer so REAPER and the map stay quick to use.\nThey take longer. Progress shows in the toolbar either way.")
     if r.ImGui_MenuItem(ctx, "Re-tag Library…", nil, false, not retag_running() and not state.scan_running) then
       sm_start_retag()
     end
