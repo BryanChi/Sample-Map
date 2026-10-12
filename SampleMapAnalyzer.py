@@ -1424,56 +1424,102 @@ def analyze_job_payload(path: str, mode: str) -> Dict[str, object]:
     return payload
 
 
+WORKER_POLL_MIN = 0.004
+WORKER_POLL_MAX = 0.05
+WORKER_IDLE_EXIT = 15 * 60.0  # seconds without a job before a worker exits on its own
+
+
+def _write_text_atomic(path: str, text: str) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def run_worker(slot: int, work_dir: str) -> int:
     os.makedirs(work_dir, exist_ok=True)
     req_path = os.path.join(work_dir, f"req_{slot}")
     res_path = os.path.join(work_dir, f"res_{slot}")
     quit_path = os.path.join(work_dir, f"quit_{slot}")
+    # The pid file doubles as the liveness marker: Lua restarts a worker whose
+    # pid file has disappeared, and kills busy workers by pid on shutdown.
+    pid_path = os.path.join(work_dir, f"pid_{slot}")
+    try:
+        _write_text_atomic(pid_path, str(os.getpid()))
+    except OSError:
+        pass
+    parent_pid = os.getppid()
     sys.stdout.write("ready\n")
     sys.stdout.flush()
-    while True:
-        if os.path.isfile(quit_path):
+    poll = WORKER_POLL_MIN
+    last_job = time.monotonic()
+    try:
+        while True:
+            if os.path.isfile(quit_path):
+                _remove_quietly(quit_path)
+                break
+            if not os.path.isfile(req_path):
+                # Exit when REAPER/the script is gone or after a long idle spell.
+                if not os.path.isdir(work_dir):
+                    break
+                if os.getppid() != parent_pid:
+                    break
+                if time.monotonic() - last_job > WORKER_IDLE_EXIT:
+                    _remove_quietly(pid_path)
+                    if os.path.isfile(req_path):
+                        # A job arrived while shutting down: keep serving.
+                        try:
+                            _write_text_atomic(pid_path, str(os.getpid()))
+                        except OSError:
+                            pass
+                        last_job = time.monotonic()
+                        continue
+                    break
+                time.sleep(poll)
+                poll = min(poll * 2.0, WORKER_POLL_MAX)
+                continue
+            poll = WORKER_POLL_MIN
+            last_job = time.monotonic()
+            mode = "full"
+            path = ""
             try:
-                os.remove(quit_path)
-            except OSError:
-                pass
-            break
-        if not os.path.isfile(req_path):
-            time.sleep(0.004)
-            continue
-        mode = "full"
-        path = ""
-        try:
-            with open(req_path, "r", encoding="utf-8") as fh:
-                raw = fh.read()
+                with open(req_path, "r", encoding="utf-8") as fh:
+                    raw = fh.read()
+                _remove_quietly(req_path)
+                line = (raw or "").strip()
+                if "\t" in line:
+                    mode, path = line.split("\t", 1)
+                else:
+                    path = line
+                mode = (mode or "full").strip() or "full"
+                path = path.strip()
+                if mode not in ("full", "transient", "weight"):
+                    mode = "full"
+                payload = analyze_job_payload(path, mode)
+            except Exception as exc:
+                payload = {"_path": path, "_error": str(exc)}
+            tmp = res_path + ".tmp"
             try:
-                os.remove(req_path)
-            except OSError:
-                pass
-            line = (raw or "").strip()
-            if "\t" in line:
-                mode, path = line.split("\t", 1)
-            else:
-                path = line
-            mode = (mode or "full").strip() or "full"
-            path = path.strip()
-            if mode not in ("full", "transient", "weight"):
-                mode = "full"
-            payload = analyze_job_payload(path, mode)
-        except Exception as exc:
-            payload = {"_path": path, "_error": str(exc)}
-        tmp = res_path + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload))
-                fh.write("\n")
-            os.replace(tmp, res_path)
-        except Exception:
-            try:
-                if os.path.isfile(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(payload))
+                    fh.write("\n")
+                os.replace(tmp, res_path)
+            except Exception:
+                try:
+                    if os.path.isfile(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+            last_job = time.monotonic()
+    finally:
+        _remove_quietly(pid_path)
     return 0
 
 

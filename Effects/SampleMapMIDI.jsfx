@@ -3,6 +3,10 @@ author:bryan
 tags: MIDI drums sampler
 // Bridges incoming MIDI note-ons into gmem so Sample Map Browser can trigger drums.
 // Passes MIDI through unchanged. Mapping (which notes fire which pads) lives in the script.
+// Use a single instance (the script keeps one on the Sample Map folder track):
+// every instance writes the same gmem ring, so extra instances double events.
+// gmem layout: [0] serial, [1..4] last event, [5] write index, [8] init magic,
+// [16 + i*4] ring entries (note, vel, on, serial).
 
 slider1:last_note=0<0,127,1>Last note
 slider2:last_vel=0<0,127,1>Last velocity
@@ -20,8 +24,15 @@ NOTE_OFF = $x80;
 RING_CAP = 64;
 RING_BASE = 16; // gmem[16 + i*4] = note, vel, on, serial
 
-gmem[0] = 0; // serial
-gmem[5] = 0; // write index
+GMEM_MAGIC_SLOT = 8;
+GMEM_MAGIC = 731905;
+// Reset the ring only once per REAPER session, not on every @init (re-init on
+// sample-rate change or a second instance would rewind the serial under the script).
+gmem[GMEM_MAGIC_SLOT] != GMEM_MAGIC ? (
+  gmem[0] = 0; // serial
+  gmem[5] = 0; // write index
+  gmem[GMEM_MAGIC_SLOT] = GMEM_MAGIC;
+);
 
 @block
 while (midirecv(offset, msg1, msg2, msg3)) (

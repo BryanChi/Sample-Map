@@ -2,8 +2,12 @@ desc:Sample Map Player
 author:bryan
 tags: MIDI drums sampler
 // Per-track sampler for Sample Map Browser. Plays layered samples with
-// start offset, pitch, and the track volume envelope. MIDI note filter
-// plus a trigger slider for UI hits. Falls back to SampleMapMIDI gmem.
+// start offset, pitch, and the track volume envelope. Responds to MIDI
+// note-ons in [MIDI lo, MIDI hi] plus a trigger slider for UI hits.
+// The script writes the config to SampleMapPlayerData/<project key>_<instance>.txt;
+// instances without a project key read the legacy <instance>.txt name.
+// Samples are read and resampled a chunk per @block and swapped in when
+// complete, so a reload never blocks the audio thread for a whole file.
 
 slider1:midi_lo=36<0,127,1>MIDI lo
 slider2:midi_hi=36<0,127,1>MIDI hi
@@ -11,11 +15,12 @@ slider3:pitch=0<-24,24,0.01>Pitch (st)
 slider4:gain=1<0,4,0.001>Gain
 slider5:trigger=0<0,1000000,1>Trigger
 slider6:reload=0<0,1000000,1>Reload
-slider7:instance_id=0<0,4095,1>Instance
+slider7:instance_id=0<0,999999,1>Instance
 slider8:vel=100<1,127,1>Trigger velocity
 slider9:overlap=0<0,1,1{Off,On}>Overlap
 slider10:root=36<0,127,1>Root note
 slider11:loaded=0<0,6,1>Loaded layers
+slider12:proj_key=0<0,999999,1>Project key
 
 filename:0,SampleMapPlayerData/placeholder.txt
 
@@ -24,7 +29,7 @@ in_pin:right input
 out_pin:left output
 out_pin:right output
 
-options:gmem=SampleMapMIDI maxmem=16777216
+options:maxmem=33554432
 
 @init
 ext_noinit = 1;
@@ -33,9 +38,13 @@ MAX_LAYERS = 6;
 MAX_VOICES = 8;
 MAX_ENV = 32;
 MAX_SEC = 8;
-RING_CAP = 64;
-RING_BASE = 16;
+MAX_SR = 192000;
+READ_CHUNK = 32768;
+RES_CHUNK = 16384;
+MIN_FADE_IN = 0.0005;
+MIN_FADE_OUT = 0.003;
 
+// Per-layer tables (8 slots each, MAX_LAYERS <= 8).
 L_START = 0;
 L_LEN = 8;
 L_DELAY = 16;
@@ -46,6 +55,7 @@ L_FRAMES = 48;
 L_BUF = 56;
 L_USED = 64;
 
+// Per-voice tables (10 slots each, MAX_VOICES <= 10).
 V_ON = 80;
 V_AGE = 90;
 V_VEL = 100;
@@ -55,30 +65,53 @@ V_KILL = 130;
 V_END = 140;
 V_WAIT = 150;
 
+// Envelope tables (40 slots each, MAX_ENV <= 40).
 E_T = 200;
 E_AMP = 240;
 E_CURVE = 280;
 
+// Pending layer params from the last parsed config (8 slots each).
+P_START = 320;
+P_LEN = 328;
+P_DELAY = 336;
+P_FADEIN = 344;
+P_FADEOUT = 352;
+P_VOL = 360;
+
+// Audio memory: MAX_LAYERS live buffers + 1 staging buffer, then the raw
+// file scratch area. All of it lies at or above MEM_BASE.
 MEM_BASE = 65536;
-SCRATCH = 32768;
+MEM_TOP = 33554432; // matches options:maxmem (EEL names are case-insensitive)
+
+// Close a file left open by a load that an @init re-run interrupted.
+ld_open ? file_close(ld_fh);
+ld_open = 0;
+ld_fh = -1;
+ld_state = 0;
+ld_idx = 0;
+load_pending = 1;
 
 n_layers = 0;
 n_env = 0;
+env_end = 0;
 last_reload = -1;
 last_trigger = trigger;
 last_instance = -1;
+last_key = -1;
 last_srate = 0;
-last_gserial = -1;
-gmem_primed = 0;
-midi_this_block = 0;
 cfg_pitch = 0;
 cfg_gain = 1;
-voice_end_max = 0.2;
 
 function alloc_layer_bufs()
+local(i, cap, raw_min)
 (
   max_frames = (MAX_SEC * srate)|0;
   max_frames < 2048 ? max_frames = 2048;
+  // Keep room for the pool plus at least MAX_SEC of stereo source at MAX_SR.
+  raw_min = MAX_SEC * MAX_SR * 2;
+  cap = ((MEM_TOP - MEM_BASE - raw_min) / (2 * (MAX_LAYERS + 1)))|0;
+  cap < 2048 ? cap = 2048;
+  max_frames > cap ? max_frames = cap;
   layer_stride = max_frames * 2;
   mem_next = MEM_BASE;
   i = 0;
@@ -89,6 +122,12 @@ function alloc_layer_bufs()
     L_FRAMES[i] = 0;
     i += 1;
   );
+  stage_buf = mem_next;
+  mem_next += layer_stride;
+  SCRATCH = mem_next;
+  raw_cap = MEM_TOP - SCRATCH - 64;
+  raw_cap < 0 ? raw_cap = 0;
+  loaded = 0;
 );
 
 function env_ease(u, curve)
@@ -126,6 +165,7 @@ local(i, found, got, span, u, last_i)
   );
 );
 
+// #lpN: path currently loaded in layer N. #ppN: path the last config asked for.
 function layer_path_same(idx)
 (
   idx == 0 ? strcmp(#lp0, #path) == 0 : (
@@ -152,69 +192,29 @@ function layer_path_store(idx)
   );
 );
 
-function read_layer_file(idx)
-local(fh, nch, sr, avail, frames, out_n, src_i, frac, s0, s1, d, si, in_i, out_i, ptr, tmp)
+function pending_path_store(idx)
 (
-  idx < 0 || idx >= MAX_LAYERS ? 0 : (
-    L_USED[idx] = 0;
-    L_FRAMES[idx] = 0;
-    strlen(#path) <= 0 ? 0 : (
-      fh = file_open(#path);
-      fh < 0 ? 0 : (
-        nch = 0;
-        sr = 0;
-        file_riff(fh, nch, sr);
-        nch < 1 ? nch = 1;
-        sr < 1 ? sr = srate;
-        avail = file_avail(fh);
-        avail < 2 ? (
-          file_close(fh);
-          0;
-        ) : (
-          avail > 4000000 ? avail = 4000000;
-          tmp = SCRATCH;
-          file_mem(fh, tmp, avail);
-          file_close(fh);
-          frames = (avail / nch)|0;
-          frames < 1 ? 0 : (
-            out_n = (frames * srate / sr)|0;
-            out_n > max_frames ? out_n = max_frames;
-            out_n < 1 ? out_n = 1;
-            ptr = L_BUF[idx];
-            out_i = 0;
-            loop(out_n,
-              src_i = out_i * sr / srate;
-              si = src_i|0;
-              frac = src_i - si;
-              si >= frames - 1 ? (
-                si = frames - 1;
-                frac = 0;
-              );
-              nch >= 2 ? (
-                in_i = si * nch;
-                s0 = tmp[in_i];
-                s1 = tmp[in_i + 1];
-                si + 1 < frames ? (
-                  s0 += (tmp[in_i + nch] - tmp[in_i]) * frac;
-                  s1 += (tmp[in_i + nch + 1] - tmp[in_i + 1]) * frac;
-                );
-              ) : (
-                s0 = tmp[si];
-                si + 1 < frames ? s0 += (tmp[si + 1] - tmp[si]) * frac;
-                s1 = s0;
-              );
-              d = ptr + out_i * 2;
-              d[0] = s0;
-              d[1] = s1;
-              out_i += 1;
-            );
-            L_FRAMES[idx] = out_n;
-            L_USED[idx] = 1;
-            1;
-          );
-        );
-      );
-    );
+  idx == 0 ? strcpy(#pp0, #path) : (
+    idx == 1 ? strcpy(#pp1, #path) : (
+      idx == 2 ? strcpy(#pp2, #path) : (
+        idx == 3 ? strcpy(#pp3, #path) : (
+          idx == 4 ? strcpy(#pp4, #path) : strcpy(#pp5, #path)
+        )
+      )
+    )
+  );
+);
+
+function pending_path_load(idx)
+(
+  idx == 0 ? strcpy(#path, #pp0) : (
+    idx == 1 ? strcpy(#path, #pp1) : (
+      idx == 2 ? strcpy(#path, #pp2) : (
+        idx == 3 ? strcpy(#path, #pp3) : (
+          idx == 4 ? strcpy(#path, #pp4) : strcpy(#path, #pp5)
+        )
+      )
+    )
   );
 );
 
@@ -244,13 +244,45 @@ local(n, c, keep)
   );
 );
 
+function recount_loaded()
+local(i, n)
+(
+  n = 0;
+  i = 0;
+  loop(n_layers,
+    L_USED[i] ? n += 1;
+    i += 1;
+  );
+  loaded = n;
+);
+
+// Apply the pending params of layer idx to its (now loaded) buffer.
+function finalize_layer(idx)
+local(remain)
+(
+  L_START[idx] = P_START[idx];
+  L_LEN[idx] = P_LEN[idx];
+  L_DELAY[idx] = P_DELAY[idx];
+  L_FADEIN[idx] = P_FADEIN[idx];
+  L_FADEOUT[idx] = P_FADEOUT[idx];
+  L_VOL[idx] = P_VOL[idx];
+  L_LEN[idx] <= 0.0001 ? L_LEN[idx] = L_FRAMES[idx] / srate;
+  L_START[idx] * srate >= L_FRAMES[idx] ? L_START[idx] = 0;
+  // Lengths are in source seconds; stop 2 frames early so interpolation stays in range.
+  remain = ((L_FRAMES[idx] - 2) / srate) - L_START[idx];
+  remain < 0.001 ? remain = 0.001;
+  L_LEN[idx] > remain ? L_LEN[idx] = remain;
+  L_USED[idx] = 1;
+);
+
 function parse_config(fh)
-local(i, ok, start, len, delay, fadein, fadeout, vol)
+local(i, ok, start, len, delay, fadein, fadeout, vol, n_new)
 (
   ok = 0;
   file_string(fh, #magic);
   rstrip_magic();
   strcmp(#magic, "SMP1") == 0 ? (
+    n_new = 0;
     file_var(fh, cfg_pitch);
     file_var(fh, midi_lo);
     file_var(fh, midi_hi);
@@ -258,13 +290,13 @@ local(i, ok, start, len, delay, fadein, fadeout, vol)
     file_var(fh, cfg_gain);
     file_var(fh, overlap);
     file_var(fh, n_env);
-    file_var(fh, n_layers);
+    file_var(fh, n_new);
     n_env |= 0;
-    n_layers |= 0;
+    n_new |= 0;
     n_env < 0 ? n_env = 0;
     n_env > MAX_ENV ? n_env = MAX_ENV;
-    n_layers < 0 ? n_layers = 0;
-    n_layers > MAX_LAYERS ? n_layers = MAX_LAYERS;
+    n_new < 0 ? n_new = 0;
+    n_new > MAX_LAYERS ? n_new = MAX_LAYERS;
     i = 0;
     loop(n_env,
       file_var(fh, E_T[i]);
@@ -272,16 +304,16 @@ local(i, ok, start, len, delay, fadein, fadeout, vol)
       file_var(fh, E_CURVE[i]);
       i += 1;
     );
-    i = n_layers;
-    loop(MAX_LAYERS - n_layers,
-      L_USED[i] = 0;
-      L_FRAMES[i] = 0;
-      i += 1;
-    );
-    loaded = 0;
-    voice_end_max = 0.05;
+    env_end = 0;
+    n_env >= 1 ? env_end = E_T[n_env - 1];
     i = 0;
-    loop(n_layers,
+    loop(n_new,
+      start = 0;
+      len = 0;
+      delay = 0;
+      fadein = 0;
+      fadeout = 0;
+      vol = 1;
       file_var(fh, start);
       file_var(fh, len);
       file_var(fh, delay);
@@ -291,29 +323,24 @@ local(i, ok, start, len, delay, fadein, fadeout, vol)
       file_string(fh, #path);
       strlen(#path) <= 0 ? file_string(fh, #path);
       rstrip_path();
-      L_START[i] = max(0, start);
-      L_LEN[i] = max(0, len);
-      L_DELAY[i] = max(0, delay);
-      L_FADEIN[i] = max(0, fadein);
-      L_FADEOUT[i] = max(0, fadeout);
-      L_VOL[i] = max(0, vol);
-      keep = layer_path_same(i) && L_USED[i] && L_FRAMES[i] > 0;
-      keep || read_layer_file(i) ? (
-        keep ? 0 : layer_path_store(i);
-        loaded += 1;
-        L_LEN[i] <= 0.0001 ? L_LEN[i] = L_FRAMES[i] / srate;
-        L_START[i] * srate >= L_FRAMES[i] ? L_START[i] = 0;
-        remain = (L_FRAMES[i] / srate) - L_START[i];
-        remain < 0.001 ? remain = 0.001;
-        L_LEN[i] > remain ? L_LEN[i] = remain;
-        endt = L_DELAY[i] + L_LEN[i];
-        endt > voice_end_max ? voice_end_max = endt;
-      );
+      P_START[i] = max(0, start);
+      P_LEN[i] = max(0, len);
+      P_DELAY[i] = max(0, delay);
+      P_FADEIN[i] = max(0, fadein);
+      P_FADEOUT[i] = max(0, fadeout);
+      P_VOL[i] = max(0, vol);
+      pending_path_store(i);
       i += 1;
     );
-    n_env >= 1 ? (
-      E_T[n_env - 1] > voice_end_max ? voice_end_max = E_T[n_env - 1];
+    // Layers past the new count stop now; the rest keep playing their old
+    // audio until their replacement is loaded.
+    i = n_new;
+    loop(MAX_LAYERS - n_new,
+      L_USED[i] = 0;
+      L_FRAMES[i] = 0;
+      i += 1;
     );
+    n_layers = n_new;
     pitch = cfg_pitch;
     gain = cfg_gain;
     ok = 1;
@@ -321,24 +348,200 @@ local(i, ok, start, len, delay, fadein, fadeout, vol)
   ok;
 );
 
-function load_config()
+function open_config()
+local(fh, key, id)
+(
+  key = proj_key|0;
+  id = instance_id|0;
+  key > 0 ? (
+    sprintf(#cfg, "SampleMapPlayerData/%d_%d.txt", key, id);
+    fh = file_open(#cfg);
+    fh < 0 ? (
+      sprintf(#cfg, "Effects/SampleMapPlayerData/%d_%d.txt", key, id);
+      fh = file_open(#cfg);
+    );
+    fh < 0 ? (
+      sprintf(#cfg, "Data/SampleMapPlayerData/%d_%d.txt", key, id);
+      fh = file_open(#cfg);
+    );
+  ) : (
+    // Legacy name, for projects saved before per-project keys.
+    sprintf(#cfg, "SampleMapPlayerData/%d.txt", id);
+    fh = file_open(#cfg);
+    fh < 0 ? (
+      sprintf(#cfg, "Effects/SampleMapPlayerData/%d.txt", id);
+      fh = file_open(#cfg);
+    );
+    fh < 0 ? (
+      sprintf(#cfg, "Data/SampleMapPlayerData/%d.txt", id);
+      fh = file_open(#cfg);
+    );
+    fh < 0 ? fh = file_open(0);
+  );
+  fh;
+);
+
+function abort_load()
+(
+  ld_open ? file_close(ld_fh);
+  ld_open = 0;
+  ld_fh = -1;
+  ld_state = 0;
+);
+
+// Read the config (small text file) and queue the layers for loading.
+function begin_reload()
 local(fh)
 (
-  sprintf(#cfg, "SampleMapPlayerData/%d.txt", instance_id|0);
-  fh = file_open(#cfg);
-  fh < 0 ? (
-    sprintf(#cfg, "Effects/SampleMapPlayerData/%d.txt", instance_id|0);
-    fh = file_open(#cfg);
-  );
-  fh < 0 ? (
-    sprintf(#cfg, "Data/SampleMapPlayerData/%d.txt", instance_id|0);
-    fh = file_open(#cfg);
-  );
-  fh < 0 ? fh = file_open(0);
+  abort_load();
+  fh = open_config();
   fh >= 0 ? (
-    file_text(fh, 1);
-    parse_config(fh);
+    parse_config(fh) ? (
+      ld_idx = 0;
+      ld_state = 1;
+    );
     file_close(fh);
+  );
+);
+
+// Open #path for layer idx. Sets up the chunked read; returns 1 on success.
+function open_layer_file()
+local(avail, need, ok)
+(
+  ok = 0;
+  strlen(#path) > 0 ? (
+    ld_fh = file_open(#path);
+    ld_fh >= 0 ? (
+      ld_open = 1;
+      ld_nch = 0;
+      ld_sr = 0;
+      file_riff(ld_fh, ld_nch, ld_sr);
+      ld_nch = ld_nch|0;
+      ld_nch < 1 ? ld_nch = 1;
+      ld_sr < 1 ? ld_sr = srate;
+      avail = file_avail(ld_fh);
+      // Read only the source frames that fit in a layer buffer.
+      need = (((max_frames * ld_sr / srate)|0) + 4) * ld_nch;
+      avail > need ? avail = need;
+      avail > raw_cap ? avail = raw_cap;
+      ld_total = ((avail / ld_nch)|0) * ld_nch;
+      ld_total < ld_nch ? (
+        abort_load();
+      ) : (
+        ld_pos = 0;
+        ok = 1;
+      );
+    ) : (
+      ld_fh = -1;
+    );
+  );
+  ok;
+);
+
+function fail_layer()
+(
+  L_USED[ld_idx] = 0;
+  L_FRAMES[ld_idx] = 0;
+  ld_idx += 1;
+  ld_state = 1;
+);
+
+// Linear-resample output frames [o0, o0 + cnt) from SCRATCH into stage_buf.
+function resample_range(o0, cnt)
+local(o, src_i, si, frac, in_i, s0, s1, d, nch, fr, step, raw)
+(
+  nch = ld_nch;
+  fr = ld_frames;
+  raw = SCRATCH;
+  step = ld_sr / srate;
+  o = o0;
+  d = stage_buf + o0 * 2;
+  loop(cnt,
+    src_i = o * step;
+    si = src_i|0;
+    frac = src_i - si;
+    si >= fr - 1 ? (
+      si = fr - 1;
+      frac = 0;
+    );
+    in_i = si * nch;
+    nch >= 2 ? (
+      s0 = raw[in_i];
+      s1 = raw[in_i + 1];
+      frac > 0 ? (
+        s0 += (raw[in_i + nch] - s0) * frac;
+        s1 += (raw[in_i + nch + 1] - s1) * frac;
+      );
+    ) : (
+      s0 = raw[in_i];
+      frac > 0 ? s0 += (raw[in_i + 1] - s0) * frac;
+      s1 = s0;
+    );
+    d[0] = s0;
+    d[1] = s1;
+    d += 2;
+    o += 1;
+  );
+);
+
+// One bounded step of the loader. States: 1 = next layer, 2 = read, 3 = resample.
+function load_step()
+local(n, p)
+(
+  ld_state == 1 ? (
+    ld_idx >= n_layers ? (
+      ld_state = 0;
+      recount_loaded();
+    ) : (
+      pending_path_load(ld_idx);
+      (L_USED[ld_idx] && L_FRAMES[ld_idx] > 0 && layer_path_same(ld_idx)) ? (
+        finalize_layer(ld_idx);
+        ld_idx += 1;
+      ) : (
+        open_layer_file() ? (
+          ld_state = 2;
+        ) : (
+          fail_layer();
+        );
+      );
+    );
+  ) : ld_state == 2 ? (
+    n = ld_total - ld_pos;
+    n > READ_CHUNK ? n = READ_CHUNK;
+    n > 0 ? file_mem(ld_fh, SCRATCH + ld_pos, n);
+    ld_pos += max(n, 0);
+    ld_pos >= ld_total ? (
+      file_close(ld_fh);
+      ld_open = 0;
+      ld_fh = -1;
+      ld_frames = (ld_total / ld_nch)|0;
+      ld_frames < 1 ? (
+        fail_layer();
+      ) : (
+        ld_out_n = (ld_frames * srate / ld_sr)|0;
+        ld_out_n > max_frames ? ld_out_n = max_frames;
+        ld_out_n < 1 ? ld_out_n = 1;
+        ld_out_i = 0;
+        ld_state = 3;
+      );
+    );
+  ) : ld_state == 3 ? (
+    n = ld_out_n - ld_out_i;
+    n > RES_CHUNK ? n = RES_CHUNK;
+    n > 0 ? resample_range(ld_out_i, n);
+    ld_out_i += max(n, 0);
+    ld_out_i >= ld_out_n ? (
+      // Swap the finished staging buffer in; the old one becomes staging.
+      p = L_BUF[ld_idx];
+      L_BUF[ld_idx] = stage_buf;
+      stage_buf = p;
+      L_FRAMES[ld_idx] = ld_out_n;
+      pending_path_load(ld_idx);
+      layer_path_store(ld_idx);
+      finalize_layer(ld_idx);
+      ld_idx += 1;
+      ld_state = 1;
+    );
   );
 );
 
@@ -358,7 +561,7 @@ local(v)
 );
 
 function start_voice_at(note, velocity, wait)
-local(v, free, oldest, age, rate_st)
+local(v, free, oldest, age, rate_st, rate, end_t, e, i)
 (
   note < midi_lo || note > midi_hi ? 0 : (
     velocity < 1 ? 0 : (
@@ -382,14 +585,26 @@ local(v, free, oldest, age, rate_st)
       rate_st = pitch + (note - root);
       rate_st < -24 ? rate_st = -24;
       rate_st > 24 ? rate_st = 24;
+      rate = pow(2, rate_st / 12);
+      // Voice length in wall time: each layer ends at delay + len / rate.
+      end_t = env_end;
+      i = 0;
+      loop(n_layers,
+        L_USED[i] ? (
+          e = L_DELAY[i] + L_LEN[i] / rate;
+          e > end_t ? end_t = e;
+        );
+        i += 1;
+      );
+      end_t < 0.05 ? end_t = 0.05;
       V_ON[free] = 1;
       V_AGE[free] = 0;
       V_VEL[free] = velocity / 127;
-      V_RATE[free] = pow(2, rate_st / 12);
+      V_RATE[free] = rate;
       V_NOTE[free] = note;
       V_KILL[free] = 0;
       V_WAIT[free] = max(0, wait|0);
-      V_END[free] = voice_end_max / max(0.05, V_RATE[free]);
+      V_END[free] = end_t;
       1;
     );
   );
@@ -400,90 +615,69 @@ function start_voice(note, velocity)
   start_voice_at(note, velocity, 0);
 );
 
-function layer_sample(idx, sec, rate)
-local(pos, si, frac, ptr, maxp, a, b)
+// src_t is seconds of source audio since the layer's start offset.
+function layer_sample(idx, src_t)
+local(pos, si, frac, ptr, maxp)
 (
   L_USED[idx] <= 0 ? 0 : (
-    pos = (L_START[idx] + sec) * srate * rate;
+    pos = (L_START[idx] + src_t) * srate;
     maxp = L_FRAMES[idx] - 2;
     pos < 0 || pos >= maxp ? 0 : (
       si = pos|0;
       frac = pos - si;
       ptr = L_BUF[idx] + si * 2;
-      a = ptr[0] + (ptr[2] - ptr[0]) * frac;
-      b = ptr[1] + (ptr[3] - ptr[1]) * frac;
-      spl_l += a;
-      spl_r += b;
+      spl_l += ptr[0] + (ptr[2] - ptr[0]) * frac;
+      spl_r += ptr[1] + (ptr[3] - ptr[1]) * frac;
       1;
     );
   );
 );
 
 function play_voice(v)
-local(t, amp, i, local_t, fade, dur, fi, fo)
+local(t, amp, i, src_t, fade, dur, fi, fo, rate)
 (
   V_WAIT[v] > 0 ? (
     V_WAIT[v] -= 1;
     0;
   ) : (
-  t = V_AGE[v] / srate;
-  amp = V_VEL[v] * gain * env_eval(t);
-  V_KILL[v] > 0 ? (
-    amp *= V_KILL[v] / 24;
-    V_KILL[v] -= 1;
-    V_KILL[v] <= 0 ? V_ON[v] = 0;
-  );
-  amp > 0.0000001 ? (
-    i = 0;
-    loop(n_layers,
-      L_USED[i] ? (
-        local_t = t - L_DELAY[i];
-        dur = L_LEN[i];
-        (local_t >= 0 && local_t < dur) ? (
-          fade = 1;
-          fi = L_FADEIN[i];
-          fo = L_FADEOUT[i];
-          fi > 0 && local_t < fi ? fade *= local_t / fi;
-          fo > 0 && local_t > dur - fo ? fade *= (dur - local_t) / fo;
-          fade > 0 ? (
-            spl_l = 0;
-            spl_r = 0;
-            layer_sample(i, local_t, V_RATE[v]);
-            out_l += spl_l * amp * L_VOL[i] * fade;
-            out_r += spl_r * amp * L_VOL[i] * fade;
-          );
-        );
-      );
-      i += 1;
+    t = V_AGE[v] / srate;
+    rate = V_RATE[v];
+    amp = V_VEL[v] * gain * env_eval(t);
+    V_KILL[v] > 0 ? (
+      amp *= V_KILL[v] / 24;
+      V_KILL[v] -= 1;
+      V_KILL[v] <= 0 ? V_ON[v] = 0;
     );
-  );
-  V_AGE[v] += 1;
-  t >= V_END[v] && V_KILL[v] <= 0 ? V_ON[v] = 0;
-  );
-);
-
-function poll_gmem()
-local(serial, i, base, es, note, velocity)
-(
-  serial = gmem[0];
-  !gmem_primed ? (
-    last_gserial = serial;
-    gmem_primed = 1;
-  ) : (
-    serial > last_gserial ? (
+    amp > 0.0000001 ? (
       i = 0;
-      loop(RING_CAP,
-        base = RING_BASE + i * 4;
-        es = gmem[base + 3];
-        (es > last_gserial && es <= serial && gmem[base + 2] > 0.5) ? (
-          note = gmem[base]|0;
-          velocity = gmem[base + 1]|0;
-          start_voice(note, velocity);
+      loop(n_layers,
+        L_USED[i] ? (
+          // Region position and length are compared in source time.
+          src_t = (t - L_DELAY[i]) * rate;
+          dur = L_LEN[i];
+          (src_t >= 0 && src_t < dur) ? (
+            // Always a tiny fade-in and a short fade-out so region ends never click.
+            fi = max(L_FADEIN[i], MIN_FADE_IN);
+            fo = max(L_FADEOUT[i], MIN_FADE_OUT);
+            fi > dur * 0.5 ? fi = dur * 0.5;
+            fo > dur * 0.5 ? fo = dur * 0.5;
+            fade = 1;
+            src_t < fi ? fade *= src_t / fi;
+            src_t > dur - fo ? fade *= (dur - src_t) / fo;
+            fade > 0 ? (
+              spl_l = 0;
+              spl_r = 0;
+              layer_sample(i, src_t);
+              out_l += spl_l * amp * L_VOL[i] * fade;
+              out_r += spl_r * amp * L_VOL[i] * fade;
+            );
+          );
         );
         i += 1;
       );
-      last_gserial = serial;
     );
+    V_AGE[v] += 1;
+    t >= V_END[v] && V_KILL[v] <= 0 ? V_ON[v] = 0;
   );
 );
 
@@ -497,10 +691,12 @@ alloc_layer_bufs();
 last_srate = srate;
 
 @slider
-instance_id != last_instance || reload != last_reload ? (
+// Only flag the reload here; @block does the file work in bounded steps.
+(instance_id != last_instance || reload != last_reload || proj_key != last_key) ? (
   last_instance = instance_id;
   last_reload = reload;
-  load_config();
+  last_key = proj_key;
+  load_pending = 1;
 );
 trigger != last_trigger ? (
   last_trigger = trigger;
@@ -510,21 +706,19 @@ trigger != last_trigger ? (
 @block
 srate != last_srate ? (
   last_srate = srate;
+  abort_load();
   alloc_layer_bufs();
-  load_config();
+  load_pending = 1;
 );
+load_pending ? (
+  load_pending = 0;
+  begin_reload();
+);
+ld_state > 0 ? load_step();
 
-midi_this_block = 0;
 while (midirecv(offset, msg1, msg2, msg3)) (
   status = msg1 & $xF0;
-  is_on = (status == $x90 && msg3 > 0);
-  is_on ? (
-    midi_this_block = 1;
-    midiq_note = msg2;
-    midiq_vel = msg3;
-    midiq_off = offset;
-    start_voice_at(midiq_note, midiq_vel, offset);
-  );
+  (status == $x90 && msg3 > 0) ? start_voice_at(msg2, msg3, offset);
   midisend(offset, msg1, msg2, msg3);
 );
 
