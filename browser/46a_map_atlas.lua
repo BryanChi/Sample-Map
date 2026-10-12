@@ -2,26 +2,33 @@
 -- Loaded in order by "Sample Map Browser.lua"; shares globals with the other modules.
 local r = reaper
 
--- --- Map atlas: axes, guides, tag regions, overview -----------------------------
+-- --- Map atlas: axes, guides, galaxy look, overview ------------------------------
 -- Everything here is drawn behind or around the dots by render_map():
 --   * axis bounds read from the library the same way layout_samples() places
 --     dots, so grid labels line up with the dots they describe
 --   * an adaptive grid: decades, then 2 / 5, then every step fade in as the
 --     zoom gives them room (instead of stretching ten fixed lines)
---   * frequency bands (SUB ... AIR) and length zones (HITS ... LOOPS)
---   * the atlas: a coarse density grid of the filtered samples, built a slice
---     per frame, giving one outlined region and label per colour tag, density
---     contours, the overview map and the off-screen counts
+--   * optional frequency bands (SUB ... AIR) and length zones (HITS ... LOOPS)
+--   * the galaxy: deep-space backdrop with parallax star dust, a nebula glow
+--     in the tag colours where samples crowd together, samples drawn as stars,
+--     and (zoomed in) constellation lines between close samples of one tag
+--   * an atlas of the filtered samples, built a slice per frame: the nebula
+--     grid, one label per colour tag, the overview map and off-screen counts
 -- The atlas grid is in map space (0..1), so it never rebuilds while panning or
 -- zooming; only filter, library or layout changes rebuild it.
 
 MAP_ATLAS_COLS = 96
 MAP_ATLAS_ROWS = 64
 MAP_ATLAS_SLICE = 6000          -- samples binned per frame while building
-MAP_ATLAS_MIN_TAG = 25          -- smallest tag that gets a region
-MAP_ATLAS_REGION_LEVEL = 0.30   -- region edge, as a share of the tag's peak density
+MAP_ATLAS_MIN_TAG = 25          -- smallest tag that gets a label
 MAP_ATLAS_MAX_LABELS = 14
 MAP_OVERVIEW_ZOOM = 1.25        -- overview map shows above this zoom
+MAP_STAR_HALO_MAX = 7000        -- stars get a glow halo when at most this many are drawn
+MAP_LINK_ZOOM = 3.0             -- constellation lines from this zoom
+MAP_LINK_MAX_STARS = 4000       -- ... while at most this many stars are drawn
+MAP_LINK_CELL = 0.01            -- longest constellation link, in map units
+MAP_LINK_BUDGET = 900           -- samples whose links are found per frame
+MAP_STAR_DUST_N = 420
 
 MAP_BANDS = {
   { 40, 60, "SUB" }, { 60, 250, "LOW" }, { 250, 500, "LOW MID" }, { 500, 2000, "MID" },
@@ -32,19 +39,21 @@ MAP_ZONES = {
 }
 
 MAP_ATLAS_COL = {
-  bg          = 0x0B0F0DFF,
-  band_fill   = 0xFFFFFF05,
-  band_edge   = 0xFFFFFF0B,
-  guide_text  = 0xB4D2C433,
-  zone_edge   = 0xFFFFFF10,
-  topo        = 0x99E6B300,     -- alpha added per level
-  label_bg    = 0x080B09E8,
-  label_count = 0xC8D4CCB0,
-  chip_bg     = 0x090C0AE0,
-  chip_text   = 0xB9C9BFD8,
+  bg          = 0x06070DFF,     -- gutters and frame fill
+  space_mid   = 0x15112BFF,     -- plot centre
+  space_edge  = 0x04050CFF,     -- plot corners
+  nebula_dim  = 0x3A4280FF,     -- colour of empty nebula cells (alpha 0)
+  dust        = 0xC8D2FF00,
+  band_fill   = 0xFFFFFF04,
+  band_edge   = 0xFFFFFF09,
+  guide_text  = 0xB4BEF02E,
+  zone_edge   = 0xFFFFFF0E,
+  label_count = 0xC4CAF0A0,
+  label_shadow = 0x000000B0,
+  chip_text   = 0xB9C0E6D8,
   view_box    = 0xFFFFFFD8,
   view_fill   = 0xFFFFFF14,
-  overview_bg = 0x050706F0,
+  overview_bg = 0x05060EF0,
 }
 
 map_atlas = {
@@ -165,11 +174,11 @@ function map_view_frame(padded_x0, padded_y0, padded_width, padded_height, padde
   }
 end
 
--- Dots grow a little as you zoom in (1x at the widest view, ~1.25x at 4x,
--- 1.75x at 16x).
+-- Stars are small when zoomed out (0.8x the dot size) and grow as you zoom
+-- in (~1x at 4x, 1.6x at 16x).
 function map_dot_zoom_scale()
   local d = map_zoom_depth()
-  return 1.0 + 0.75 * d * math.sqrt(d)
+  return 0.8 + 0.8 * d * math.sqrt(d)
 end
 
 -- --- Formatting ----------------------------------------------------------------
@@ -267,15 +276,15 @@ function map_linear_ticks(lo, hi, ppu)
 end
 
 local function grid_line_col(major, a)
-  local base = major and 0x22 or 0x0E
-  return with_alpha(0x8FB39A00, base * a)
+  local base = major and 0x1C or 0x0B
+  return with_alpha(0x8C9EE600, base * a)
 end
 
 local function label_col(level, a)
   if level == 1 then
-    return with_alpha(0xB4C6BA00, 0xE6 * a)
+    return with_alpha(0xB4BCE600, 0xE6 * a)
   end
-  return with_alpha(0x7F8B83FF, 0xB8 * a)
+  return with_alpha(0x7C83A8FF, 0xB8 * a)
 end
 
 -- Places labels in priority order (coarse levels first) and skips any that
@@ -292,12 +301,18 @@ end
 
 -- --- Background, guides, grid --------------------------------------------------
 
+-- Bands and zones are off by default in the galaxy look (map_bands, not the
+-- older map_guides key, so earlier saved settings don't turn them on).
 function map_guides_enabled()
-  return state.map_guides ~= false
+  return state.map_bands == true
 end
 
 function map_atlas_enabled()
   return state.map_atlas ~= false
+end
+
+function map_constellations_enabled()
+  return state.map_constellations ~= false
 end
 
 function map_overview_enabled()
@@ -464,9 +479,6 @@ end
 -- Starts (or restarts) a build when the filter or layout changed. Called each
 -- frame by render_map before drawing.
 function map_atlas_update()
-  if not map_atlas_enabled() and not map_overview_enabled() then
-    return
-  end
   local key = map_atlas_build_key()
   local job = map_atlas.job
   if map_atlas.key == key and (map_atlas.ready or (job and job.key == key)) then
@@ -489,6 +501,7 @@ function map_atlas_update()
     rs = new_grid(n), gs = new_grid(n), bs = new_grid(n),
     tags = {},        -- tag -> sparse { [cell] = count }
     tag_total = {},
+    link_hash = map_atlas_new_link_hash(),
     finish = nil,
   }
   map_atlas.key = key
@@ -567,126 +580,105 @@ function map_atlas_count_in(sat, nx0, ny0, nx1, ny1)
   return math.max(0, v)
 end
 
--- Marching squares on a grid sampled at cell centres. Returns a flat list of
--- segments in map space {x1, y1, x2, y2, ...}. Outside the grid counts as 0,
--- so regions touching the edge still close.
-function map_atlas_contour(f, cols, rows, thr)
-  local segs = {}
-  local function val(row, c)
-    if row < 0 or c < 0 or row >= rows or c >= cols then return 0 end
-    return f[row * cols + c + 1]
+-- Nebula grid: the average dot colour of each cell, blurred wide and close and
+-- mixed, so crowded areas glow in their tags' colours. Brightness is measured
+-- against the brightest cells (99th percentile), so a whole library and a
+-- filtered handful both glow; the very densest cores go towards white.
+-- Returns { [cell] = RRGGBBAA } at cell centres.
+function map_atlas_build_nebula(job)
+  local cols, rows = MAP_ATLAS_COLS, MAP_ATLAS_ROWS
+  local n = cols * rows
+  local wt = blur_grid(job.tot, cols, rows, 6)
+  local mt = blur_grid(job.tot, cols, rows, 2)
+  local wr, wg, wb = blur_grid(job.rs, cols, rows, 6), blur_grid(job.gs, cols, rows, 6), blur_grid(job.bs, cols, rows, 6)
+  local mr, mg, mb = blur_grid(job.rs, cols, rows, 2), blur_grid(job.gs, cols, rows, 2), blur_grid(job.bs, cols, rows, 2)
+  local inten = {}
+  local sorted = {}
+  for i = 1, n do
+    local v = wt[i] * 0.6 + mt[i] * 0.4
+    inten[i] = v
+    if v > 1e-6 then sorted[#sorted + 1] = v end
   end
-  local function px(gx) return (gx + 0.5) / cols end
-  local function py(gy) return (gy + 0.5) / rows end
-  local n = 0
-  local function seg(ax, ay, bx, by)
-    segs[n + 1], segs[n + 2], segs[n + 3], segs[n + 4] = px(ax), py(ay), px(bx), py(by)
-    n = n + 4
-  end
-  for row = -1, rows - 1 do
-    for c = -1, cols - 1 do
-      local a = val(row, c)          -- top left
-      local b = val(row, c + 1)      -- top right
-      local cc = val(row + 1, c + 1) -- bottom right
-      local d = val(row + 1, c)      -- bottom left
-      local idx = (a >= thr and 8 or 0) + (b >= thr and 4 or 0) + (cc >= thr and 2 or 0) + (d >= thr and 1 or 0)
-      if idx ~= 0 and idx ~= 15 then
-        local function lerp(v0, v1) local dv = v1 - v0 if dv == 0 then return 0.5 end return (thr - v0) / dv end
-        local Tx, Ty = c + lerp(a, b), row
-        local Rx, Ry = c + 1, row + lerp(b, cc)
-        local Bx, By = c + lerp(d, cc), row + 1
-        local Lx, Ly = c, row + lerp(a, d)
-        if idx == 1 or idx == 14 then seg(Lx, Ly, Bx, By)
-        elseif idx == 2 or idx == 13 then seg(Bx, By, Rx, Ry)
-        elseif idx == 3 or idx == 12 then seg(Lx, Ly, Rx, Ry)
-        elseif idx == 4 or idx == 11 then seg(Tx, Ty, Rx, Ry)
-        elseif idx == 6 or idx == 9 then seg(Tx, Ty, Bx, By)
-        elseif idx == 7 or idx == 8 then seg(Tx, Ty, Lx, Ly)
-        elseif idx == 5 then seg(Tx, Ty, Rx, Ry) seg(Lx, Ly, Bx, By)
-        elseif idx == 10 then seg(Lx, Ly, Tx, Ty) seg(Bx, By, Rx, Ry)
-        end
-      end
+  table.sort(sorted)
+  local ref = sorted[math.max(1, math.floor(#sorted * 0.99))] or 1
+  if ref <= 0 then ref = 1 end
+  local dim_r, dim_g, dim_b = (MAP_ATLAS_COL.nebula_dim >> 24) & 0xFF, (MAP_ATLAS_COL.nebula_dim >> 16) & 0xFF, (MAP_ATLAS_COL.nebula_dim >> 8) & 0xFF
+  local out = {}
+  for i = 1, n do
+    local d = wt[i] * 0.6 + mt[i] * 0.4
+    local rr, gg, bb = dim_r, dim_g, dim_b
+    if d > 1e-6 then
+      rr = (wr[i] * 0.6 + mr[i] * 0.4) / d
+      gg = (wg[i] * 0.6 + mg[i] * 0.4) / d
+      bb = (wb[i] * 0.6 + mb[i] * 0.4) / d
     end
+    local t = inten[i] / ref
+    local a = 1 - math.exp(-1.5 * t)
+    local hot = math.max(0, math.min(1, (t - 0.75) * 0.8))
+    rr = rr + (255 - rr) * hot
+    gg = gg + (255 - gg) * hot
+    bb = bb + (255 - bb) * hot
+    local ab = math.floor(math.min(1, a) * 0xA8 + 0.5)
+    out[i] = (math.floor(rr) << 24) | (math.floor(gg) << 16) | (math.floor(bb) << 8) | ab
   end
-  return segs
+  return out
 end
 
-local function segs_bounds(segs)
-  local x0, y0, x1, y1 = 1, 1, 0, 0
-  for i = 1, #segs, 2 do
-    local x, y = segs[i], segs[i + 1]
-    if x < x0 then x0 = x end
-    if x > x1 then x1 = x end
-    if y < y0 then y0 = y end
-    if y > y1 then y1 = y end
-  end
-  return x0, y0, x1, y1
+-- Samples by tag and MAP_LINK_CELL-sized map cell (x scaled by the plot's
+-- aspect so links are measured as they look on screen). Filled while binning.
+function map_atlas_new_link_hash()
+  local aspect = (state.map_view_w and state.map_view_h and state.map_view_h > 0)
+    and (state.map_view_w / state.map_view_h) or 1.6
+  return { aspect = aspect, cell = MAP_LINK_CELL, buckets = {} }
 end
 
--- Joins contour segments into polylines ({x1, y1, x2, y2, ...} in map space)
--- so drawing can skip points when zoomed out.
-function map_atlas_chain(segs)
-  local function key(x, y)
-    return math.floor(x * 1e6 + 0.5) * 4000000 + math.floor(y * 1e6 + 0.5)
+function map_atlas_link_hash_add(hash, s, tag)
+  local cell = hash.cell
+  local key = tag .. ":" .. math.floor(s.x * hash.aspect / cell) .. ":" .. math.floor(s.y / cell)
+  local b = hash.buckets[key]
+  if not b then
+    b = {}
+    hash.buckets[key] = b
   end
-  local n = #segs // 4
-  local ends = {}
-  for i = 0, n - 1 do
-    local b = i * 4
-    for e = 0, 1 do
-      local k = key(segs[b + 1 + e * 2], segs[b + 2 + e * 2])
-      local list = ends[k]
-      if not list then
-        list = {}
-        ends[k] = list
-      end
-      list[#list + 1] = i
-    end
+  b[#b + 1] = s
+end
+
+-- The two nearest samples of the same tag within MAP_LINK_CELL (or false).
+function map_atlas_links_for(res, s)
+  local hash = res.link_hash
+  local tag = map_atlas_tag_of(s)
+  if not tag or not hash then
+    return false
   end
-  local used = {}
-  local lines = {}
-  local function other_end(i, k)
-    local b = i * 4
-    if key(segs[b + 1], segs[b + 2]) == k then
-      return segs[b + 3], segs[b + 4]
-    end
-    return segs[b + 1], segs[b + 2]
-  end
-  local function next_seg(k)
-    local list = ends[k]
-    if not list then return nil end
-    for j = 1, #list do
-      if not used[list[j]] then return list[j] end
-    end
-    return nil
-  end
-  for i = 0, n - 1 do
-    if not used[i] then
-      used[i] = true
-      local b = i * 4
-      local pts = { segs[b + 1], segs[b + 2], segs[b + 3], segs[b + 4] }
-      -- forward from the second point, then backward from the first
-      for dir = 1, 2 do
-        while true do
-          local lx, ly
-          if dir == 1 then lx, ly = pts[#pts - 1], pts[#pts] else lx, ly = pts[1], pts[2] end
-          local k = key(lx, ly)
-          local j = next_seg(k)
-          if not j then break end
-          used[j] = true
-          local nx, ny = other_end(j, k)
-          if dir == 1 then
-            pts[#pts + 1], pts[#pts + 2] = nx, ny
-          else
-            table.insert(pts, 1, ny)
-            table.insert(pts, 1, nx)
+  local aspect, cell = hash.aspect, hash.cell
+  local sx, sy = s.x * aspect, s.y
+  local gx, gy = math.floor(sx / cell), math.floor(sy / cell)
+  local lim = cell * cell
+  local b1, d1, b2, d2 = nil, lim, nil, lim
+  for cy = gy - 1, gy + 1 do
+    for cx = gx - 1, gx + 1 do
+      local b = hash.buckets[tag .. ":" .. cx .. ":" .. cy]
+      if b then
+        for k = 1, #b do
+          local o = b[k]
+          if o ~= s then
+            local dx, dy = o.x * aspect - sx, o.y - sy
+            local d = dx * dx + dy * dy
+            if d < d1 then
+              b2, d2 = b1, d1
+              b1, d1 = o, d
+            elseif d < d2 then
+              b2, d2 = o, d
+            end
           end
         end
       end
-      lines[#lines + 1] = pts
     end
   end
-  return lines
+  if not b1 then
+    return false
+  end
+  return { b1, math.sqrt(d1), b2, b2 and math.sqrt(d2) or nil }
 end
 
 -- One build step: bin a slice of samples, then finish one tag per frame.
@@ -697,6 +689,7 @@ function map_atlas_step(job)
     local last = math.min(#list, job.i + MAP_ATLAS_SLICE - 1)
     local floor = math.floor
     local tot, rs, gs, bs = job.tot, job.rs, job.gs, job.bs
+    local link_hash = job.link_hash
     for k = job.i, last do
       local s = list[k]
       local x, y = s and s.x, s and s.y
@@ -720,6 +713,7 @@ function map_atlas_step(job)
           end
           g[cell] = (g[cell] or 0) + 1
           job.tag_total[tag] = (job.tag_total[tag] or 0) + 1
+          map_atlas_link_hash_add(link_hash, s, tag)
         end
       end
     end
@@ -735,22 +729,19 @@ function map_atlas_step(job)
     res.total_sat = build_sat(job.tot, cols, rows)
     res.total_count = 0
     for i = 1, #job.tot do res.total_count = res.total_count + job.tot[i] end
-    -- Density for contours: blurred, log-scaled to 0..1
-    local blur = blur_grid(job.tot, cols, rows, 2)
-    local mx = 0
-    for i = 1, #blur do if blur[i] > mx then mx = blur[i] end end
-    local dens = {}
-    local lm = math.log(1 + mx)
-    for i = 1, #blur do dens[i] = lm > 0 and math.log(1 + blur[i]) / lm or 0 end
-    res.topo = {
-      coarse = {}, fine = {},
-    }
-    for _, lv in ipairs({ 0.35, 0.55, 0.75 }) do
-      res.topo.coarse[#res.topo.coarse + 1] = { level = lv, lines = map_atlas_chain(map_atlas_contour(dens, cols, rows, lv)) }
-    end
-    for _, lv in ipairs({ 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85 }) do
-      res.topo.fine[#res.topo.fine + 1] = { level = lv, lines = map_atlas_chain(map_atlas_contour(dens, cols, rows, lv)) }
-    end
+    job.res = res
+    job.phase = "nebula"
+    return
+  end
+
+  if job.phase == "nebula" then
+    job.res.nebula = map_atlas_build_nebula(job)
+    job.phase = "order"
+    return
+  end
+
+  if job.phase == "order" then
+    local res = job.res
     -- Overview: 2x2 blocks with the average dot colour
     local ocols, orows = cols // 2, rows // 2
     local ov = { cols = ocols, rows = orows, cells = {} }
@@ -783,7 +774,6 @@ function map_atlas_step(job)
       if ta ~= tb then return ta > tb end
       return a < b2
     end)
-    job.res = res
     job.tag_i = 1
     job.phase = "tags"
     return
@@ -801,22 +791,21 @@ function map_atlas_step(job)
       for i = 1, #f do
         if f[i] > mx then mx, mi = f[i], i end
       end
-      local segs = map_atlas_contour(f, cols, rows, mx * MAP_ATLAS_REGION_LEVEL)
-      local bx0, by0, bx1, by1 = segs_bounds(segs)
       local prow, pc = (mi - 1) // cols, (mi - 1) % cols
       res.tags[tag] = {
         tag = tag,
         total = job.tag_total[tag],
         sat = build_sat(g, cols, rows),
-        segs = segs,
-        lines = map_atlas_chain(segs),
-        bounds = { bx0, by0, bx1, by1 },
         peak_x = (pc + 0.5) / cols,
         peak_y = (prow + 0.5) / rows,
       }
       job.tag_i = job.tag_i + 1
       return
     end
+    -- Constellation links are found lazily per visible star, through the
+    -- tag/cell index filled while binning.
+    res.link_hash = job.link_hash
+    res.links = setmetatable({}, { __mode = "k" })
     map_atlas.res = res
     map_atlas.res_key = job.key
     map_atlas.ready = true
@@ -825,50 +814,6 @@ function map_atlas_step(job)
 end
 
 -- --- Atlas drawing -------------------------------------------------------------
-
--- Draws chained contour lines. Zoomed out, contours are many small steps for
--- a few pixels each, so every other (or every third) point is skipped; the
--- shape stays smooth and it costs a third of the lines.
-local function draw_lines(dl, v, lines, col, thick)
-  local add_line = r.ImGui_DrawList_AddLine
-  local vx0, vy0, vx1, vy1 = v.x0 - 2, v.y0 - 2, v.x1 + 2, v.y1 + 2
-  local cell_px = v.w * v.z / MAP_ATLAS_COLS
-  local step = cell_px >= 18 and 1 or (cell_px >= 9 and 2 or 3)
-  local cx, cy, w, h, z = v.cx, v.cy, v.w, v.h, v.z
-  local hw, hh = w * 0.5, h * 0.5
-  for li = 1, #lines do
-    local pts = lines[li]
-    local n = #pts // 2
-    local ax = cx + (pts[1] * w - hw) * z
-    local ay = cy + (pts[2] * h - hh) * z
-    local i = 1 + step
-    while true do
-      if i > n then
-        if i - step < n then i = n else break end
-      end
-      local bx = cx + (pts[i * 2 - 1] * w - hw) * z
-      local by = cy + (pts[i * 2] * h - hh) * z
-      if not ((ax < vx0 and bx < vx0) or (ax > vx1 and bx > vx1) or (ay < vy0 and by < vy0) or (ay > vy1 and by > vy1)) then
-        add_line(dl, ax, ay, bx, by, col, thick)
-      end
-      ax, ay = bx, by
-      i = i + step
-    end
-  end
-end
-
--- Density contours, under the dots. They stay while a rebuild runs.
-function draw_map_atlas_under(dl, v)
-  local res = map_atlas.ready and map_atlas.res
-  if not res or not map_atlas_enabled() then
-    return
-  end
-  local levels = v.z > 2.2 and res.topo.fine or res.topo.coarse
-  for _, lv in ipairs(levels) do
-    local a = 0x0B + lv.level * 0x14
-    draw_lines(dl, v, lv.lines, with_alpha(MAP_ATLAS_COL.topo, a), 1.0)
-  end
-end
 
 -- Regions and labels belong to one filter; hide them while a new filter's
 -- atlas is still being built so they never describe the wrong dots.
@@ -880,22 +825,230 @@ function map_atlas_current()
   return nil
 end
 
--- One outline per tag region, over the dots so dense areas don't hide it.
-function draw_map_atlas_over(dl, v)
-  local res = map_atlas_current()
-  if not res or not map_atlas_enabled() then
-    return
+-- Fixed background stars in a field three times the map's size; they move
+-- at sqrt(zoom) so zooming in feels like flying past them.
+function map_star_dust()
+  local dust = map_atlas.dust
+  if dust then
+    return dust
   end
-  local hot = state.map_atlas_hot_tag
-  for _, tag in ipairs(res.tag_order) do
-    local t = res.tags[tag]
-    if t and #t.segs > 0 then
-      local base = lift(build_color_rrgbbaa(extract_rgb(state.tag_colors[tag] or 0x888888)), 0.3)
-      local is_hot = hot == tag
-      local a = hot and (is_hot and 0xF0 or 0x22) or 0x8C
-      draw_lines(dl, v, t.lines, with_alpha(base, a), is_hot and 2.2 or 1.5)
+  dust = {}
+  local seed = 12345
+  local function rnd()
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return seed / 2147483648
+  end
+  for i = 1, MAP_STAR_DUST_N do
+    local b = rnd()
+    dust[i] = { rnd() * 3 - 1, rnd() * 3 - 1, b * b * b }
+  end
+  map_atlas.dust = dust
+  return dust
+end
+
+-- Deep-space plot background: vignette, parallax star dust, then the nebula.
+function draw_map_galaxy_backdrop(dl, v)
+  local C = MAP_ATLAS_COL
+  local add_multi = r.ImGui_DrawList_AddRectFilledMultiColor
+  local mx, my = (v.x0 + v.x1) * 0.5, v.y0 + (v.y1 - v.y0) * 0.55
+  local mid, edge = C.space_mid, C.space_edge
+  local side_x = map_lerp_color(edge, mid, 0.45)
+  add_multi(dl, v.x0, v.y0, mx, my, edge, side_x, mid, side_x)
+  add_multi(dl, mx, v.y0, v.x1, my, side_x, edge, side_x, mid)
+  add_multi(dl, mx, my, v.x1, v.y1, mid, side_x, edge, side_x)
+  add_multi(dl, v.x0, my, mx, v.y1, side_x, mid, side_x, edge)
+
+  local pz = math.sqrt(v.z)
+  local add_rect = r.ImGui_DrawList_AddRectFilled
+  local dust = map_star_dust()
+  local half_w, half_h = v.w * 0.5, v.h * 0.5
+  -- Same parallax centre as the map: the map point at the plot centre.
+  local ncx, ncy = nx_of(v, v.x0 + half_w), ny_of(v, v.y0 + half_h)
+  for i = 1, #dust do
+    local d = dust[i]
+    local x = v.x0 + half_w + (d[1] - ncx) * v.w * pz
+    local y = v.y0 + half_h + (d[2] - ncy) * v.h * pz
+    if x >= v.x0 and x <= v.x1 and y >= v.y0 and y <= v.y1 then
+      local sz = 0.8 + d[3] * 1.0
+      add_rect(dl, x, y, x + sz, y + sz, with_alpha(C.dust, 0x22 + d[3] * 0x80))
     end
   end
+
+  local res = map_atlas.ready and map_atlas.res
+  if res and res.nebula then
+    draw_map_nebula(dl, v, res.nebula)
+  end
+end
+
+-- The nebula grid drawn as smooth quads between cell centres (each corner
+-- takes its cell's colour). It fades a little as you zoom in, where the
+-- stars carry the picture.
+function draw_map_nebula(dl, v, neb)
+  local cols, rows = MAP_ATLAS_COLS, MAP_ATLAS_ROWS
+  -- Faded colours, cached per (nebula, fade step).
+  local fade = 1.0 - 0.5 * math.min(1.0, map_zoom_depth() * 1.2)
+  local fq = math.floor(fade * 32 + 0.5)
+  local fc = map_atlas.neb_fade
+  if not fc or fc.neb ~= neb or fc.q ~= fq then
+    fc = { neb = neb, q = fq, cols = {} }
+    local f = fq / 32
+    for i = 1, #neb do
+      local cc = neb[i]
+      fc.cols[i] = (cc & 0xFFFFFF00) | math.floor((cc & 0xFF) * f + 0.5)
+    end
+    map_atlas.neb_fade = fc
+  end
+  local faded = fc.cols
+  local edge_col = MAP_ATLAS_COL.nebula_dim & 0xFFFFFF00
+  local cw, ch = v.w * v.z / cols, v.h * v.z / rows
+  -- The field is heavily blurred, so when cells are small on screen every
+  -- other cell centre is enough (a quarter of the quads).
+  local st = (cw < 16 and ch < 16) and 2 or 1
+  local add_multi = r.ImGui_DrawList_AddRectFilledMultiColor
+  local nx0, nx1 = nx_of(v, v.x0), nx_of(v, v.x1)
+  local ny0, ny1 = ny_of(v, v.y0), ny_of(v, v.y1)
+  local function snap(i) return i - (i % st) end
+  local c0 = snap(math.max(-st, math.floor(nx0 * cols - 0.5)))
+  local c1 = math.min(cols - 1, math.floor(nx1 * cols - 0.5) + 1)
+  local r0 = snap(math.max(-st, math.floor(ny0 * rows - 0.5)))
+  local r1 = math.min(rows - 1, math.floor(ny1 * rows - 0.5) + 1)
+  local function col_at(row, c)
+    if row < 0 or c < 0 or row >= rows or c >= cols then
+      return edge_col
+    end
+    return faded[row * cols + c + 1]
+  end
+  local ox = v.cx - v.w * 0.5 * v.z
+  local oy = v.cy - v.h * 0.5 * v.z
+  local qw, qh = cw * st, ch * st
+  for row = r0, r1, st do
+    local y0 = oy + (row + 0.5) * ch
+    local y1 = y0 + qh
+    local tl, bl = col_at(row, c0), col_at(row + st, c0)
+    for c = c0, c1, st do
+      local tr, br = col_at(row, c + st), col_at(row + st, c + st)
+      if ((tl | tr | bl | br) & 0xFF) ~= 0 then
+        local x0 = ox + (c + 0.5) * cw
+        add_multi(dl, x0, y0, x0 + qw, y1, tl, tr, br, bl)
+      end
+      tl, bl = tr, br
+    end
+  end
+end
+
+-- Constellation lines between each visible star and its nearest same-tag
+-- neighbours, once zoomed in. Links are found lazily (a budget per frame)
+-- and kept for the life of the atlas.
+function draw_map_constellations(dl, entries, n, dot_radius)
+  local res = map_atlas_current()
+  if not res or not map_constellations_enabled() or (state.zoom or 1) < MAP_LINK_ZOOM or n > MAP_LINK_MAX_STARS then
+    return
+  end
+  local v = map_atlas.frame_view
+  if not v then return end
+  local links = res.links
+  local budget = MAP_LINK_BUDGET
+  local reach = math.min(26 + 4 * v.z, MAP_LINK_CELL * v.h * v.z)
+  local add_line = r.ImGui_DrawList_AddLine
+  local half_w, half_h = v.w * 0.5, v.h * 0.5
+  local fade_in = math.min(1, (v.z - MAP_LINK_ZOOM) / 1.5 + 0.35)
+  local tag_col = {}
+  for i = 1, n do
+    local e = entries[i]
+    local s = e.s
+    local l = links[s]
+    if l == nil and budget > 0 then
+      l = map_atlas_links_for(res, s)
+      links[s] = l
+      budget = budget - 1
+    end
+    if l then
+      for k = 1, 3, 2 do
+        local o = l[k]
+        if o then
+          local ox = v.cx + (o.x * v.w - half_w) * v.z
+          local oy = v.cy + (o.y * v.h - half_h) * v.z
+          local dx, dy = ox - e.px, oy - e.py
+          local d = math.sqrt(dx * dx + dy * dy)
+          -- Mutual links are drawn once (from the sample with the lower path).
+          local lo = links[o]
+          local mutual = lo and (lo[1] == s or lo[3] == s)
+          if d < reach and d > dot_radius * 2 and (not mutual or (s.path or "") < (o.path or "")) then
+            local tag = map_atlas_tag_of(s)
+            local col = tag_col[tag]
+            if not col then
+              col = lift(build_color_rrgbbaa(extract_rgb(state.tag_colors[tag] or 0x8899CC)), 0.25)
+              tag_col[tag] = col
+            end
+            local a = (1 - d / reach) * 0x70 * fade_in
+            -- Stop short of both stars so lines join halos, not cores
+            local ux, uy = dx / d, dy / d
+            local inset = dot_radius + 1.5
+            add_line(dl, e.px + ux * inset, e.py + uy * inset, ox - ux * inset, oy - uy * inset, with_alpha(col, a), 1.0)
+          end
+        end
+      end
+    end
+  end
+end
+
+-- Star colours: dot colours lifted towards white (and the hovered label's
+-- tag kept bright while other tags dim). Cached per entry list.
+function map_star_colors(cache, n)
+  local tag = state.map_atlas_hot_tag
+  local memo = map_atlas.star_memo
+  if memo and memo.tag == tag and memo.gen == cache.entries_gen and memo.n == n then
+    return memo.cols
+  end
+  local keep = tag and map_atlas_tag_dot_colors(tag) or nil
+  local src = cache.draw_col
+  local out = {}
+  local lifted = {}
+  for i = 1, n do
+    local c = src[i]
+    local l = lifted[c]
+    if not l then
+      l = lift(c, 0.35)
+      lifted[c] = l
+    end
+    if keep and not keep[c] then
+      l = (l & 0xFFFFFF00) | 0x26
+    end
+    out[i] = l
+  end
+  map_atlas.star_memo = { tag = tag, gen = cache.entries_gen, n = n, cols = out }
+  return out
+end
+
+-- Soft glow behind each star once few enough are drawn.
+function draw_map_star_halos(dl, n, pxs, pys, cols, dot_radius)
+  if n > MAP_STAR_HALO_MAX or (state.zoom or 1) < 1.5 then
+    return
+  end
+  local add_circle_filled = r.ImGui_DrawList_AddCircleFilled
+  local hr = dot_radius * 2.6
+  for i = 1, n do
+    local c = cols[i]
+    if (c & 0xFF) > 0x80 then
+      add_circle_filled(dl, pxs[i], pys[i], hr, (c & 0xFFFFFF00) | 0x22, 10)
+    end
+  end
+end
+
+-- Cross-shaped flare on the hovered star.
+function draw_map_star_flare(dl, px, py, color, size)
+  local col = lift(color, 0.5)
+  local add_line = r.ImGui_DrawList_AddLine
+  for k = 1, 3 do
+    local len = size * (1 - (k - 1) * 0.3)
+    local a = 0x30 + (k - 1) * 0x38
+    add_line(dl, px - len, py, px + len, py, with_alpha(col, a), 1.0)
+    add_line(dl, px, py - len, px, py + len, with_alpha(col, a), 1.0)
+  end
+  local d = size * 0.4
+  add_line(dl, px - d, py - d, px + d, py + d, with_alpha(col, 0x40), 1.0)
+  add_line(dl, px - d, py + d, px + d, py - d, with_alpha(col, 0x40), 1.0)
+  r.ImGui_DrawList_AddCircleFilled(dl, px, py, size * 0.35, with_alpha(col, 0x30), 16)
 end
 
 -- Colours a tag's dots take (stereo and the brighter mono variant).
@@ -908,32 +1061,28 @@ function map_atlas_tag_dot_colors(tag)
   return set
 end
 
--- Dimmed colour array for the hovered label's tag, cached per entry list.
-function map_atlas_hot_colors(cache, n)
-  local tag = state.map_atlas_hot_tag
-  if not tag then return nil end
-  local memo = map_atlas.hot_memo
-  if memo and memo.tag == tag and memo.gen == cache.entries_gen and memo.n == n then
-    return memo.cols
+-- Plural, upper-case tag names for labels ("KICKS", "808S", "FX").
+local LABEL_AS_IS = { fx = true, bass = true, perc = true, keys = true, sfx = true }
+function map_label_text(tag)
+  tag = tostring(tag)
+  if LABEL_AS_IS[tag] or tag:sub(-1) == "s" then
+    return string.upper(tag)
   end
-  local keep = map_atlas_tag_dot_colors(tag)
-  local src = cache.draw_col
-  local out = {}
-  for i = 1, n do
-    local c = src[i]
-    out[i] = keep[c] and c or ((c & 0xFFFFFF00) | 0x2C)
+  if tag:sub(-1) == "h" then
+    return string.upper(tag .. "es")
   end
-  map_atlas.hot_memo = { tag = tag, gen = cache.entries_gen, n = n, cols = out }
-  return out
+  return string.upper(tag .. "s")
+end
+local label_text = map_label_text
+
+-- Letter-spaced, like names on a star chart.
+local function spaced(text)
+  return (text:gsub("(.)", "%1 "):gsub(" $", ""))
 end
 
-local function label_text(tag)
-  return string.upper(tostring(tag))
-end
-
--- Labels on top of the dots: at each region's peak, or pinned to the nearest
--- view edge (with an arrow) when the peak is off-screen but part of the region
--- is in view. Click toggles the tag filter; hover highlights the region.
+-- Star-chart labels over each tag's densest spot, or pinned to the nearest
+-- view edge (with an arrow) when that spot is off-screen but some of the tag
+-- is in view. Click toggles the tag filter; hover dims the other tags.
 function draw_map_atlas_labels(dl, v, hits, keep_clear)
   local res = map_atlas_current()
   state.map_atlas_hot_tag_next = nil
@@ -957,7 +1106,7 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
   table.sort(cands, function(a, b) return a.cnt > b.cnt end)
 
   local _, th = r.ImGui_CalcTextSize(ctx, "A")
-  local h = th + 6
+  local h = th * 2 + 2
   -- Other controls (edge counts, overview) and the status card / zoom chip
   -- strip along the bottom stay clear of labels.
   local placed = {}
@@ -976,10 +1125,11 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
   local mx, my = r.ImGui_GetMousePos(ctx)
   local hot_tag = state.map_atlas_hot_tag
   local shown = 0
+  local add_text = r.ImGui_DrawList_AddText
   for _, cand in ipairs(cands) do
     if shown >= MAP_ATLAS_MAX_LABELS then break end
     local t = cand.t
-    local name = label_text(t.tag)
+    local name = spaced(label_text(t.tag))
     local total = t.total
     local cnt = math.floor(cand.cnt + 0.5)
     local sub = (cnt >= total * 0.97) and count_text(total) or (count_text(cnt) .. " of " .. count_text(total))
@@ -988,14 +1138,14 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
     local px, py = sx_of(v, t.peak_x), sy_of(v, t.peak_y)
     local margin = 8
     local pinned = px < v.x0 + 30 or px > v.x1 - 30 or py < v.y0 + 14 or py > v.y1 - 14
-    local arrow_w = pinned and 10 or 0
-    local w = nw + sw + 22 + arrow_w
+    local w = math.max(nw, sw) + 8
+    -- The label sits above its spot, with a short tick down to it.
     local cx = math.max(v.x0 + w * 0.5 + margin, math.min(v.x1 - w * 0.5 - margin, px))
-    local cy = math.max(v.y0 + h * 0.5 + margin + 18, math.min(v.y1 - h * 0.5 - margin, py))
+    local cy = math.max(v.y0 + h * 0.5 + margin + 18, math.min(v.y1 - h * 0.5 - margin, py - h * 0.5 - 8))
     local x0, y0 = cx - w * 0.5, cy - h * 0.5
     local ok = free(x0, y0, x0 + w, y0 + h)
     if not ok then
-      for _, dy in ipairs({ h + 3, -(h + 3), 2 * (h + 3), -2 * (h + 3) }) do
+      for _, dy in ipairs({ -(h + 3), h + 3, -2 * (h + 3), 2 * (h + 3) }) do
         if free(x0, y0 + dy, x0 + w, y0 + dy + h) and y0 + dy > v.y0 + 18 and y0 + dy + h < v.y1 - 4 then
           y0 = y0 + dy
           ok = true
@@ -1006,21 +1156,22 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
     if ok then
       shown = shown + 1
       placed[#placed + 1] = { x0 - 2, y0 - 2, x0 + w + 2, y0 + h + 2 }
-      local base = lift(build_color_rrgbbaa(extract_rgb(state.tag_colors[t.tag] or 0x888888)), 0.35)
+      local base = lift(build_color_rrgbbaa(extract_rgb(state.tag_colors[t.tag] or 0x888888)), 0.5)
       local over = mx >= x0 and mx <= x0 + w and my >= y0 and my <= y0 + h
       local active = state.active_tags and state.active_tags[t.tag]
       local dim = hot_tag and hot_tag ~= t.tag
-      local bg = MAP_ATLAS_COL.label_bg
-      r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, dim and with_alpha(bg, 0x90) or bg, h * 0.5)
+      local a = dim and 0x50 or ((over or active) and 0xFF or 0xD8)
+      -- Dark plate so names stay readable over crowded stars.
+      r.ImGui_DrawList_AddRectFilled(dl, x0 - 4, y0 - 2, x0 + w + 4, y0 + h + 2, with_alpha(MAP_ATLAS_COL.space_edge, dim and 0x60 or 0xA8), 4)
       if over or active then
-        r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, with_alpha(base, 0x38), h * 0.5)
+        r.ImGui_DrawList_AddRectFilled(dl, x0 - 4, y0 - 2, x0 + w + 4, y0 + h + 2, with_alpha(base, 0x22), 4)
+        r.ImGui_DrawList_AddRect(dl, x0 - 3.5, y0 - 1.5, x0 + w + 3.5, y0 + h + 1.5, with_alpha(base, 0x70), 4, 0, 1.0)
       end
-      r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x0 + w - 0.5, y0 + h - 0.5,
-        with_alpha(base, dim and 0x50 or (over and 0xFF or 0xC8)), h * 0.5, 0, (over or active) and 1.6 or 1.0)
-      local tx = x0 + 9
+      local nx = cx - nw * 0.5
+      local sx = cx - sw * 0.5
       if pinned then
-        -- Arrow towards the region's centre
-        local ax, ay = tx + 3, y0 + h * 0.5
+        -- Arrow towards the tag's densest spot
+        local ax, ay = x0 - 6, y0 + th * 0.5
         local dx, dy = px - cx, py - cy
         local len = math.sqrt(dx * dx + dy * dy)
         if len > 0 then
@@ -1029,14 +1180,17 @@ function draw_map_atlas_labels(dl, v, hits, keep_clear)
             ax + dx * 4, ay + dy * 4,
             ax - dx * 3 - dy * 3, ay - dy * 3 + dx * 3,
             ax - dx * 3 + dy * 3, ay - dy * 3 - dx * 3,
-            with_alpha(base, dim and 0x60 or 0xE0))
+            with_alpha(base, a))
         end
-        tx = tx + arrow_w
+      elseif math.abs(cy - (py - h * 0.5 - 8)) < 1 then
+        r.ImGui_DrawList_AddLine(dl, px, y0 + h + 1, px, py - 3, with_alpha(base, a * 0.5), 1.0)
       end
-      r.ImGui_DrawList_AddText(dl, tx, y0 + 3, with_alpha(base, dim and 0x70 or 0xFF), name)
-      r.ImGui_DrawList_AddText(dl, tx + 0.5, y0 + 3, with_alpha(base, dim and 0x70 or 0xFF), name)
-      r.ImGui_DrawList_AddText(dl, tx + nw + 5, y0 + 3, with_alpha(MAP_ATLAS_COL.label_count, dim and 0x60 or 0xB0), sub)
-      hits[#hits + 1] = { x0, y0, x0 + w, y0 + h, kind = "label", tag = t.tag }
+      add_text(dl, nx + 1, y0 + 1, MAP_ATLAS_COL.label_shadow, name)
+      add_text(dl, nx, y0, with_alpha(base, a), name)
+      add_text(dl, nx + 0.5, y0, with_alpha(base, a), name)
+      add_text(dl, sx + 1, y0 + th + 3, MAP_ATLAS_COL.label_shadow, sub)
+      add_text(dl, sx, y0 + th + 2, with_alpha(MAP_ATLAS_COL.label_count, dim and 0x50 or 0xA8), sub)
+      hits[#hits + 1] = { x0 - 4, y0 - 2, x0 + w + 4, y0 + h + 2, kind = "label", tag = t.tag }
       if over then
         state.map_atlas_hot_tag_next = t.tag
       end
@@ -1068,8 +1222,8 @@ function draw_map_edge_counts(dl, v, hits)
     local x0 = math.max(v.x0 + 2, math.min(v.x1 - w - 2, cx - w * 0.5))
     local y0 = math.max(v.y0 + 2, math.min(v.y1 - h - 2, cy - h * 0.5))
     local over = mx >= x0 and mx <= x0 + w and my >= y0 and my <= y0 + h
-    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, over and 0x1B2620F0 or 0x090C0AC8, h * 0.5)
-    r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x0 + w - 0.5, y0 + h - 0.5, over and UI_THEME.accent or 0x2C3A31FF, h * 0.5, 0, 1.0)
+    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, over and 0x1B1E3AF0 or 0x07081AC8, h * 0.5)
+    r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x0 + w - 0.5, y0 + h - 0.5, over and UI_THEME.accent or 0x2C3256FF, h * 0.5, 0, 1.0)
     local col = over and 0xE6F2EAFF or MAP_ATLAS_COL.chip_text
     local ax, ay = x0 + 8, y0 + h * 0.5
     if dir == "left" then
@@ -1110,7 +1264,7 @@ function draw_map_overview(dl, v, hits, bottom_reserved)
     return
   end
   r.ImGui_DrawList_AddRectFilled(dl, x0 - 3, y0 - 3, x1 + 3, y1 + 3, MAP_ATLAS_COL.overview_bg, 6)
-  r.ImGui_DrawList_AddRect(dl, x0 - 2.5, y0 - 2.5, x1 + 2.5, y1 + 2.5, 0x2C3A31FF, 6, 0, 1.0)
+  r.ImGui_DrawList_AddRect(dl, x0 - 2.5, y0 - 2.5, x1 + 2.5, y1 + 2.5, 0x2C3256FF, 6, 0, 1.0)
   local cw, ch = ow / ov.cols, oh / ov.rows
   local lm = math.log(1 + (ov.max or 1))
   local add_rect = r.ImGui_DrawList_AddRectFilled

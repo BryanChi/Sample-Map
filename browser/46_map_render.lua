@@ -16,26 +16,25 @@ function round_to_nice_map_freq(freq)
   end
 end
 
--- Map canvas palette. The plot sits on the darkest surface with a faint
--- accent glow in the middle; the axis gutters are a shade darker still and
--- carry the scale labels, so the plot area itself stays clean.
+-- Map canvas palette: deep-space navy. The axis gutters are a shade darker
+-- than the plot and carry the scale labels, so the plot itself stays clean.
 MAP_CANVAS = {
-  plot_bg      = 0x0C100DFF,
-  plot_bg_deep = 0x09141AFF,
-  gutter_bg    = 0x090C0AFF,
-  gutter_edge  = 0x222B25FF,
-  frame        = 0x26302AFF,
-  glow         = 0x1EFF5E06,
-  glow_deep    = 0x3FD6E00E,
-  grid_major   = 0x8FB39A1E,
-  grid_minor   = 0x8FB39A0C,
-  tick         = 0x5F6962FF,
-  label_major  = 0x9FB2A5D8,
-  label_minor  = 0x6F7B73B0,
-  axis_caption = 0x5F6962FF,
-  guide        = 0xE8EEEA30,
-  readout_bg   = 0x0E2A18F0,
-  readout_text = 0xDFFFE8FF,
+  plot_bg      = 0x070A16FF,
+  plot_bg_deep = 0x050713FF,
+  gutter_bg    = 0x05070FFF,
+  gutter_edge  = 0x1A2038FF,
+  frame        = 0x1D2440FF,
+  glow         = 0x6A7CFF06,
+  glow_deep    = 0x9A6CFF0C,
+  grid_major   = 0x9FB0E01A,
+  grid_minor   = 0x9FB0E00A,
+  tick         = 0x5A6280FF,
+  label_major  = 0xA4AECED8,
+  label_minor  = 0x6E7696B0,
+  axis_caption = 0x5A6280FF,
+  guide        = 0xE6EAFF30,
+  readout_bg   = 0x161C3CF0,
+  readout_text = 0xE6EBFFFF,
 }
 MAP_GUTTER_LEFT = 70
 MAP_GUTTER_TOP = 25
@@ -131,8 +130,8 @@ function draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_w
     if r.ImGui_DrawList_PushClipRect then
       r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, x0 + width, y0 + height, true)
     end
+    draw_map_galaxy_backdrop(dl, v)
     draw_map_guides(dl, v, b)
-    draw_map_atlas_under(dl, v)
     if r.ImGui_DrawList_PopClipRect then
       r.ImGui_DrawList_PopClipRect(dl)
     end
@@ -446,17 +445,12 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
   -- the other; then use the entries directly.
   local flat = pxs ~= nil and cache.draw_arrays_for == entries and cache.draw_arrays_n == n_entries
   if flat then
-    -- Hovering a region label dims every other tag's dots.
-    cols = map_atlas_hot_colors(cache, n_entries) or cols
+    -- Dot colours lifted towards white like stars; hovering a label dims
+    -- every other tag.
+    cols = map_star_colors(cache, n_entries)
+    draw_map_star_halos(dl, n_entries, pxs, pys, cols, dot_radius)
   end
-  -- Dark rim under each dot once they are big and few enough to read one by one.
-  if dot_radius >= 2.6 and n_entries <= MAP_DOT_RIM_MAX then
-    local rim_r = dot_radius + 1.0
-    for i = 1, n_entries do
-      local e = entries[i]
-      add_circle_filled(dl, e.px, e.py, rim_r, 0x00000080, segments)
-    end
-  end
+  draw_map_constellations(dl, entries, n_entries, dot_radius)
   if flat and not playing_path and next(highlight_info) == nil then
     -- Common case (nothing playing, no hovered track): plain dot loop.
     for i = 1, n_entries do
@@ -581,6 +575,7 @@ function render_map_samples(dl, hovered, mx, my, padded_x0, padded_y0, padded_wi
       r.ImGui_DrawList_AddCircleFilled(dl, px, py, dot_radius * 1.4, closest.color, 12)
     end
     r.ImGui_DrawList_AddCircle(dl, px, py, dot_radius + 3.0, s.hot_color or hover_color, 16, 1.5)
+    draw_map_star_flare(dl, px, py, closest.color, dot_radius + 12.0)
 
     -- Pin to the hovered dot so ImGui nav cannot relocate this tooltip.
     if r.ImGui_SetNextWindowPos then
@@ -1666,6 +1661,11 @@ function render_map()
   state._map_frame_filter_key = map_filter_key
   map_atlas_update()
 
+  if #state.samples > 0 and state.samples[1].x then
+    map_atlas.frame_view = map_view_frame(padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
+  else
+    map_atlas.frame_view = nil
+  end
   draw_map_canvas_backdrop(dl, x0, y0, width, height, padded_x0, padded_y0)
   draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
 
@@ -1692,7 +1692,6 @@ function render_map()
     if r.ImGui_DrawList_PushClipRect then
       r.ImGui_DrawList_PushClipRect(dl, padded_x0, padded_y0, x0 + width, y0 + height, true)
     end
-    draw_map_atlas_over(dl, v)
     draw_map_edge_counts(dl, v, hits)
     draw_map_overview(dl, v, hits, 30)
     local controls = {}
