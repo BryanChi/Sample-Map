@@ -401,8 +401,8 @@ function render_seq_neighbor_popup()
 
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local px, py = r.ImGui_GetWindowPos(ctx)
-  local bg = UI_THEME.surface or 0x121816FF
-  local border = UI_THEME.border or 0x2A3830FF
+  local bg = UI_THEME.surface or 0x151619FF
+  local border = UI_THEME.border or 0x323336FF
   local function fade_col(col)
     local orig_a = (col % 256) / 255.0
     return change_color_alpha(col, orig_a * alpha)
@@ -557,8 +557,8 @@ function draw_seq_minimap_rulers(dl, pop, x0, y0, w, h, alpha, draw_labels)
   end
   local center_x = x0 + w * 0.5 + (pop.pan_x or 0)
   local center_y = y0 + h * 0.5 + (pop.pan_y or 0)
-  local grid_color = seq_minimap_fade_col(0x4A5850AA, alpha)
-  local text_color = seq_minimap_fade_col(0xC8D4CCDD, alpha)
+  local grid_color = seq_minimap_fade_col(0x525356AA, alpha)
+  local text_color = seq_minimap_fade_col(0xCECFD3DD, alpha)
   local n = 3
   local nx0 = ((x0 - center_x) / (w * zoom)) + 0.5
   local nx1 = ((x0 + w - center_x) / (w * zoom)) + 0.5

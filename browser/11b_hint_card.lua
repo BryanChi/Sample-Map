@@ -27,19 +27,19 @@ HINT_CARD = {
 }
 
 HINT_COLORS = {
-  bg          = 0x101612F4,
-  border      = 0x2E3C33FF,
+  bg          = 0x131417F4,
+  border      = 0x36373AFF,
   shadow      = 0x00000050,
-  title       = 0xF1F6F2FF,
-  text        = 0xC9D3CCFF,
-  qual        = 0x8E9A92FF,
-  plus        = 0x5F6962FF,
+  title       = 0xF3F4F8FF,
+  text        = 0xCECFD3FF,
+  qual        = 0x95969AFF,
+  plus        = 0x646569FF,
   rule        = 0xFFFFFF14,
-  key_fill    = 0x27302AFF,
-  key_edge    = 0x3C4A42FF,
-  key_base    = 0x0A0D0BFF,
-  key_text    = 0xE8EEEAFF,
-  mouse_line  = 0xB4C0B8FF,
+  key_fill    = 0x2C2D30FF,
+  key_edge    = 0x444548FF,
+  key_base    = 0x0B0C0FFF,
+  key_text    = 0xEBECF0FF,
+  mouse_line  = 0xBBBCC0FF,
 }
 
 hint_state = hint_state or {

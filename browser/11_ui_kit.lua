@@ -3,26 +3,27 @@
 local r = reaper
 
 -- --- UI kit: modern minimal custom-drawn controls ---------------------------
--- Palette keyed to accent #1EFF5E (hue ~137°). Neutrals are charcoal with a
--- faint forest cast so the UI never reads as blue-gray. Surfaces step up in
+-- Palette keyed to accent #1EFF5E (hue ~137°). Neutrals are plain near-black
+-- grays with a faint cool cast to sit with the deep-space map; green is kept
+-- for the accent and selected/active states only. Surfaces step up in
 -- small, even increments (bg → panel → surface → elevated) so nested areas
 -- read as layers without needing heavy borders.
 UI_THEME = {
-  bg            = 0x0E120FFF,
-  bg_panel      = 0x131915FF,
-  surface       = 0x19201BFF,
-  surface_hvr   = 0x232C26FF,
-  surface_act   = 0x141A16FF,
-  elevated      = 0x1E2621FF,
-  border        = 0x26302AFF,
-  border_soft   = 0x1E2622FF,
-  border_hvr    = 0x3D5446FF,
-  text          = 0xE8EEEAFF,
-  text_dim      = 0x95A098FF,
-  text_mute     = 0x5F6962FF,
-  popup_bg      = 0x151B17F8,
-  title_bg      = 0x0B0E0CFF,
-  title_bg_act  = 0x101411FF,
+  bg            = 0x0F1013FF,
+  bg_panel      = 0x16171AFF,
+  surface       = 0x1C1D20FF,
+  surface_hvr   = 0x28292CFF,
+  surface_act   = 0x17181BFF,
+  elevated      = 0x222326FF,
+  border        = 0x2B2C2FFF,
+  border_soft   = 0x222326FF,
+  border_hvr    = 0x4B4C4FFF,
+  text          = 0xEBECF0FF,
+  text_dim      = 0x9B9CA0FF,
+  text_mute     = 0x646569FF,
+  popup_bg      = 0x18191CF8,
+  title_bg      = 0x0C0D10FF,
+  title_bg_act  = 0x111215FF,
   accent        = 0x1EFF5EFF,
   accent_hvr    = 0x62FF8AFF,
   accent_fill   = 0x0E2A18FF,
@@ -35,8 +36,8 @@ UI_THEME = {
   success_hvr   = 0x244830FF,
   folder        = 0x2A5A34FF,
   folder_hvr    = 0x3A7544FF,
-  grid_line     = 0x8FB39A1C,
-  grid_text     = 0x8FA396A0,
+  grid_line     = 0xA4A5A91C,
+  grid_text     = 0x9B9CA0A0,
 }
 
 -- Shared sizing so toolbars, tabs and section headers line up across views.
@@ -268,9 +269,9 @@ function ui_push_theme()
   col(r.ImGui_Col_ResizeGrip, 0x1EFF5E22)
   col(r.ImGui_Col_ResizeGripHovered, 0x1EFF5E66)
   col(r.ImGui_Col_ResizeGripActive, T.accent)
-  col(r.ImGui_Col_ScrollbarBg, 0x0C0F0D00)
-  col(r.ImGui_Col_ScrollbarGrab, 0x3A4A4070)
-  col(r.ImGui_Col_ScrollbarGrabHovered, 0x5A6A60AA)
+  col(r.ImGui_Col_ScrollbarBg, 0x0D0E1100)
+  col(r.ImGui_Col_ScrollbarGrab, 0x43444770)
+  col(r.ImGui_Col_ScrollbarGrabHovered, 0x636468AA)
   col(r.ImGui_Col_ScrollbarGrabActive, T.accent)
   col(r.ImGui_Col_Tab, T.surface)
   col(r.ImGui_Col_TabHovered, T.surface_hvr)
@@ -369,7 +370,7 @@ function ui_button_colors(style, hovered, active, selected)
   elseif style == "ghost_arrow" then
     if active then return 0x00000000, 0x00000000, 0xB6FFD0FF, 0x1EFF5E33, 0.0 end
     if hovered then return 0x00000000, 0x00000000, 0xFFFFFFFF, 0x1EFF5E28, 0.0 end
-    return 0x00000000, 0x00000000, 0x8AA898FF, 0x00000000, 0.0
+    return 0x00000000, 0x00000000, 0x9C9DA1FF, 0x00000000, 0.0
   elseif style == "success" then
     if active then return T.success_fill, 0x00000000, 0xFFFFFFFF, T.success, 1.0 end
     if hovered then return T.success_hvr, 0x5EDC8A28, 0xFFFFFFFF, 0x5EDC8A55, 1.0 end
@@ -1361,19 +1362,19 @@ local function tag_chip_colors(base, kind, active, hovered, pressed)
   elseif active then
     fill = blend_colors(T.bg, base, hovered and 0.82 or 0.70)
     border = blend_colors(base, 0xFFFFFFFF, 0.35)
-    text = chip_luma(fill) > 0.55 and 0x0E120FFF or 0xFFFFFFFF
+    text = chip_luma(fill) > 0.55 and 0x0F1013FF or 0xFFFFFFFF
     dot = text
   elseif kind == "library" then
     -- Library chips sit back: barely tinted, the colour bar carries them.
     fill = hovered and blend_colors(T.surface_hvr, base, 0.16) or blend_colors(T.bg_panel, base, 0.05)
     border = hovered and blend_colors(T.surface_hvr, base, 0.50) or blend_colors(T.bg_panel, base, 0.22)
-    text = hovered and T.text or 0xAEB8B1FF
+    text = hovered and T.text or 0xB3B4B8FF
     dot = chip_dot_color(base)
   elseif kind == "attr" then
     -- Attribute chips are outlines only.
     fill = hovered and blend_colors(T.surface_hvr, base, 0.14) or 0x00000000
     border = hovered and blend_colors(T.surface_hvr, base, 0.70) or blend_colors(T.surface, base, 0.45)
-    text = hovered and T.text or 0xC3CCC6FF
+    text = hovered and T.text or 0xC8C9CDFF
     dot = chip_dot_color(base)
   elseif hovered then
     fill = blend_colors(T.surface_hvr, base, 0.24)
@@ -1383,7 +1384,7 @@ local function tag_chip_colors(base, kind, active, hovered, pressed)
   else
     fill = blend_colors(T.surface, base, 0.12)
     border = blend_colors(T.surface, base, 0.30)
-    text = 0xC3CCC6FF
+    text = 0xC8C9CDFF
     dot = chip_dot_color(base)
   end
   if pressed then
@@ -3993,11 +3994,11 @@ end
 -- Waveform module look ----------------------------------------------------
 
 WAVE_COL = {
-  panel = 0x101612FF,
+  panel = 0x131417FF,
   panel_hi = 0xFFFFFF0A,
   center = 0xFFFFFF10,
   lane_sep = 0x00000070,
-  dim = 0x070A08B8,
+  dim = 0x08090CB8,
   hatch = 0xFFFFFF09,
   end_line = 0xFFB24AFF,
   end_hot = 0xFFD08AFF,
@@ -4008,7 +4009,7 @@ WAVE_COL = {
   snap = 0xB48CFFFF,
   snap_line = 0xB48CFFB0,
   playhead = 0xFFFFFFF0,
-  flag_bg = 0x0B0E0CE8,
+  flag_bg = 0x0C0D10E8,
 }
 
 function draw_wave_panel(dl, x0, y0, x1, y1)

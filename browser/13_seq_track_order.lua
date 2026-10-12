@@ -869,7 +869,7 @@ function draw_sample_drag_ghost()
   local y1 = y0 + chip_h
 
   r.ImGui_DrawList_AddRectFilled(dl, x0 + 2, y0 + 3, x1 + 2, y1 + 3, 0x00000070, 7.0)
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, 0x1E2620F5, 7.0)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, 0x222326F5, 7.0)
 
   local cr, cg, cb = extract_rgb_rrgbbaa(dot_color)
   local border = build_color_rrgbbaa(cr, cg, cb, math.floor(140 + 115 * pulse))

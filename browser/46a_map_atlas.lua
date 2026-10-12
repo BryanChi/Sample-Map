@@ -1284,7 +1284,7 @@ function draw_map_edge_counts(dl, v, hits)
     local over = mx >= x0 and mx <= x0 + w and my >= y0 and my <= y0 + h
     r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, over and 0x1B1E3AF0 or 0x07081AC8, h * 0.5)
     r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x0 + w - 0.5, y0 + h - 0.5, over and UI_THEME.accent or 0x2C3256FF, h * 0.5, 0, 1.0)
-    local col = over and 0xE6F2EAFF or MAP_ATLAS_COL.chip_text
+    local col = over and 0xEDEEF2FF or MAP_ATLAS_COL.chip_text
     local ax, ay = x0 + 8, y0 + h * 0.5
     if dir == "left" then
       r.ImGui_DrawList_AddTriangleFilled(dl, ax - 3, ay, ax + 2, ay - 3, ax + 2, ay + 3, col)

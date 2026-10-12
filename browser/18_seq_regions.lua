@@ -1039,11 +1039,11 @@ function render_seq_region_name_suggest_popup(edit_x, edit_y, edit_w)
     style_vars = style_vars + 1
   end
   if r.ImGui_Col_WindowBg then
-    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_WindowBg(), UI_THEME.popup_bg or 0x161C18F5)
+    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_WindowBg(), UI_THEME.popup_bg or 0x191A1DF5)
     style_cols = style_cols + 1
   end
   if r.ImGui_Col_Border then
-    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Border(), UI_THEME.border_hvr or 0x3D5446FF)
+    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Border(), UI_THEME.border_hvr or 0x4B4C4FFF)
     style_cols = style_cols + 1
   end
 
@@ -1065,7 +1065,7 @@ function render_seq_region_name_suggest_popup(edit_x, edit_y, edit_w)
         end
       end
       local tw, th = r.ImGui_CalcTextSize(ctx, name)
-      local text_col = selected and (UI_THEME.accent_hvr or 0x62FF8AFF) or (UI_THEME.text or 0xE8EEEAFF)
+      local text_col = selected and (UI_THEME.accent_hvr or 0x62FF8AFF) or (UI_THEME.text or 0xEBECF0FF)
       r.ImGui_DrawList_AddText(dl, x0 + 4, y0 + (row_h - th) * 0.5, text_col, name)
       if r.ImGui_IsItemClicked(ctx, 0) then
         chosen = name

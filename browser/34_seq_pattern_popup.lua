@@ -1320,7 +1320,7 @@ SEQ_PATTERN_ROLE_COLORS = {
   kick = 0xFF6B5AFF, ["808"] = 0xFF4F7AFF, bass = 0xE8A04AFF,
   snare = 0x5EC8FFFF, clap = 0x8FA8FFFF, rim = 0xB08CFFFF, tom = 0xD97BD0FF,
   hat = 0x6FE39AFF, ride = 0x4FD6C4FF, crash = 0xFFF2B0FF,
-  perc = 0xE6E06AFF, fx = 0xA9B4ADFF, vocal = 0xFF8FC8FF,
+  perc = 0xE6E06AFF, fx = 0xAFB0B4FF, vocal = 0xFF8FC8FF,
 }
 
 function seq_pattern_favorites()

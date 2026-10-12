@@ -24,7 +24,7 @@ SM_SCAN_CAUSES = {
     fix = "If it will not play in REAPER either, move it to the Trash.",
   },
   {
-    id = "missing", label = "Missing", color = 0x9AA5A0FF, remove = true,
+    id = "missing", label = "Missing", color = 0xA0A1A5FF, remove = true,
     title = "File not found",
     explain = "The file was moved, renamed or deleted after it was found, or its drive was disconnected.",
     fix = "Reconnect the drive and rescan, or remove these from the library.",

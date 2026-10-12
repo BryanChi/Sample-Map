@@ -978,14 +978,14 @@ function ref_seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hove
     local orig_a = (col % 256) / 255.0
     return change_color_alpha(col, orig_a * a * (mul or 1.0))
   end
-  local bg = is_active and (taken and 0x122016FF or UI_THEME.accent_fill) or (is_hovered and 0x161E1AFF or 0x0C1210FF)
+  local bg = is_active and (taken and 0x122016FF or UI_THEME.accent_fill) or (is_hovered and 0x1A1B1EFF or 0x0F1013FF)
   local edge = UI_THEME.border
   local edge_w = 1.0
   if is_active then
     edge = 0xFFFFFF80
     edge_w = 1.8
   elseif is_hovered then
-    edge = 0xE8EEEAFF
+    edge = 0xEBECF0FF
   elseif taken then
     edge = UI_THEME.border_hvr
   end
@@ -1047,7 +1047,7 @@ function ref_seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hove
     th = (th or 10) * (sz / math.max(1.0, base_sz))
     local tx = x + (w - tw) * 0.5
     local ty = y + (h - th) * 0.5
-    local num_col = ca(taken and 0xFFFFFF72 or 0xC8D0C850)
+    local num_col = ca(taken and 0xFFFFFF72 or 0xCCCDD150)
     local sh_col = ca(0x00000044)
     if r.ImGui_DrawList_AddTextEx then
       r.ImGui_DrawList_AddTextEx(dl, font, sz, tx + 0.5, ty + 0.5, sh_col, label)

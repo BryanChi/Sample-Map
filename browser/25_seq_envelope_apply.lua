@@ -576,7 +576,7 @@ function seq_draw_env_grid(dl, ix0, iy0, ix1, iy1, t0, t1, amp_max)
     return
   end
   local line_col = 0xFFFFFF0D
-  local text_col = 0x8FA396A0
+  local text_col = 0x9B9CA0A0
   for _, row in ipairs(SEQ_ENV_GRID_DB) do
     local y = iy1 - (row[1] / amp_max) * ih
     if y > iy0 + 8 and y < iy1 - 8 then
@@ -918,7 +918,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
   end
 
   local live = seq_env_is_active(env) or active or hovered
-  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, live and 0x15241AEE or 0x121814EE, 4.0)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, live and 0x15241AEE or 0x151619EE, 4.0)
   r.ImGui_DrawList_AddRect(dl, x, y, x + w, y + h, (active or hovered) and UI_THEME.accent or UI_THEME.border, 4.0, 0, 1.2)
   if r.ImGui_DrawList_PushClipRect then
     r.ImGui_DrawList_PushClipRect(dl, ix0, iy0, ix1, iy1, true)
@@ -1283,7 +1283,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     local bw, bh = tw + 10.0, th + 4.0
     local bx = math.max(ix0 + 2.0, math.min(ix1 - bw - 2.0, ax - bw * 0.5))
     local by = knob_y + 9.0
-    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, 0x0B0F0CE8, 4.0)
+    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, 0x0C0D10E8, 4.0)
     r.ImGui_DrawList_AddRect(dl, bx, by, bx + bw, by + bh, edge_hot == "fi" and fade_col or end_col, 4.0, 0, 1.0)
     r.ImGui_DrawList_AddText(dl, bx + 5.0, by + 2.0, UI_THEME.text, edge_label)
   end
@@ -1300,7 +1300,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     if by < iy0 + 2.0 then
       by = hy + 9.0
     end
-    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, 0x0B0F0CE8, 4.0)
+    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, 0x0C0D10E8, 4.0)
     r.ImGui_DrawList_AddRect(dl, bx, by, bx + bw, by + bh, UI_THEME.accent, 4.0, 0, 1.0)
     r.ImGui_DrawList_AddText(dl, bx + 5.0, by + 2.0, UI_THEME.text, label)
   end

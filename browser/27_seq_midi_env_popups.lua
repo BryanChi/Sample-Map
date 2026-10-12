@@ -36,11 +36,11 @@ function seq_midi_draw_keyboard(dl, x, y, w, h, slot, octave)
     local selected = in_range(note)
     local fill
     if black then
-      fill = selected and 0x1EFF5EFF or (hovered and 0x3A4A40FF or 0x121816FF)
+      fill = selected and 0x1EFF5EFF or (hovered and 0x434447FF or 0x151619FF)
     else
-      fill = selected and 0x174A24FF or (hovered and 0xE8EEEAFF or 0xD8DED8FF)
+      fill = selected and 0x174A24FF or (hovered and 0xEBECF0FF or 0xDBDCE0FF)
     end
-    local edge = selected and UI_THEME.accent or (black and 0x000000FF or 0x2A342EFF)
+    local edge = selected and UI_THEME.accent or (black and 0x000000FF or 0x2F3033FF)
     r.ImGui_DrawList_AddRectFilled(dl, kx0, ky0, kx1, ky1, fill, 2.0)
     r.ImGui_DrawList_AddRect(dl, kx0, ky0, kx1, ky1, edge, 2.0, 0, 1.0)
     if r.ImGui_IsItemClicked(ctx, 0) then

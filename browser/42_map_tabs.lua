@@ -1387,7 +1387,7 @@ function map_ui_edit_overlay(id, w, h)
     local dl = r.ImGui_GetWindowDrawList(ctx)
     local moving = state.map_ui_drag and state.map_ui_drag.id == id
     -- Scrim keeps the module's content faintly visible but out of the way.
-    r.ImGui_DrawList_AddRectFilled(dl, wx, wy, wx + ww, wy + wh, moving and 0x0B0E0CE6 or 0x0B0E0CB4, 5)
+    r.ImGui_DrawList_AddRectFilled(dl, wx, wy, wx + ww, wy + wh, moving and 0x0C0D10E6 or 0x0C0D10B4, 5)
 
     local t = MAP_UI_EDGE
     local edge_hot = false

@@ -668,8 +668,8 @@ local function draw_split_overlay(dl, ov)
   local line_col = hot and 0xFFFFFFFF or 0xE8FFF0E6
   r.ImGui_DrawList_AddLine(dl, sx, iy - 2.0, sx, iy + ih, line_col, hot and 2.4 or 1.6)
   r.ImGui_DrawList_AddRectFilled(dl, sx - 4.0, iy - 6.0, sx + 4.0, iy + 2.0, line_col, 2.0)
-  r.ImGui_DrawList_AddLine(dl, sx - 1.5, iy - 4.0, sx - 1.5, iy, 0x0B0E0CFF, 1.0)
-  r.ImGui_DrawList_AddLine(dl, sx + 1.5, iy - 4.0, sx + 1.5, iy, 0x0B0E0CFF, 1.0)
+  r.ImGui_DrawList_AddLine(dl, sx - 1.5, iy - 4.0, sx - 1.5, iy, 0x0C0D10FF, 1.0)
+  r.ImGui_DrawList_AddLine(dl, sx + 1.5, iy - 4.0, sx + 1.5, iy, 0x0C0D10FF, 1.0)
 
   -- Side names in the corners of their stretches, when there's room.
   local tag_y = iy + 2.0
@@ -686,7 +686,7 @@ local function draw_split_overlay(dl, ov)
         or string.format("Split %.0f ms", math.max(0.0, ov.split_t - ov.onset) * 1000.0)
     local lw = text_w(label)
     local lx = math.min(ix + iw - lw - 10.0, math.max(ix, (xf_hot and fx or sx) + 8.0))
-    r.ImGui_DrawList_AddRectFilled(dl, lx - 4.0, iy + 1.0, lx + lw + 4.0, iy + 17.0, 0x0B0E0CE8, 4.0)
+    r.ImGui_DrawList_AddRectFilled(dl, lx - 4.0, iy + 1.0, lx + lw + 4.0, iy + 17.0, 0x0C0D10E8, 4.0)
     r.ImGui_DrawList_AddText(dl, lx, iy + 2.0, 0xFFFFFFFF, label)
     if not (active or xf_active) then
       tooltip(xf_hot
@@ -747,11 +747,11 @@ local function draw_cut_overlay(dl, ix, iy, iw, ih, dur, end_t, fade, natural, c
   local fx = math.min(ex - 7.0, t2x(end_t - (fade or 0.0)))
   local cut = natural and end_t < natural - 0.0005
   if cut then
-    r.ImGui_DrawList_AddRectFilled(dl, ex, iy, math.min(ix + iw, t2x(natural)), iy + ih, 0x0A0D0BC8, 2.0)
+    r.ImGui_DrawList_AddRectFilled(dl, ex, iy, math.min(ix + iw, t2x(natural)), iy + ih, 0x0B0C0FC8, 2.0)
   end
   if fade and fade > 0 then
     local fx0 = t2x(end_t - fade)
-    r.ImGui_DrawList_AddTriangleFilled(dl, fx0, iy, ex, iy, ex, iy + ih, 0x0A0D0B90)
+    r.ImGui_DrawList_AddTriangleFilled(dl, fx0, iy, ex, iy, ex, iy + ih, 0x0B0C0F90)
     r.ImGui_DrawList_AddLine(dl, fx0, iy, ex, iy + ih, seq_layer_col_alpha(col, 0.9), 1.4)
   end
   local active = cut or (fade and fade > 0)
@@ -767,13 +767,13 @@ local function draw_cut_overlay(dl, ix, iy, iw, ih, dur, end_t, fade, natural, c
   r.ImGui_DrawList_AddTriangleFilled(dl, ex - 4.0, iy + ih, ex, iy + ih - 6.0, ex, iy + ih, line_col)
   local grip_col = hs.fade_hot and 0xFFFFFFFF or seq_layer_col_alpha(col, active and 0.95 or 0.45)
   r.ImGui_DrawList_AddRectFilled(dl, fx - 4.0, iy - 1.0, fx + 4.0, iy + 7.0, grip_col, 2.0)
-  r.ImGui_DrawList_AddLine(dl, fx - 2.5, iy + 5.0, fx + 2.5, iy + 1.0, 0x0B0E0CFF, 1.2)
+  r.ImGui_DrawList_AddLine(dl, fx - 2.5, iy + 5.0, fx + 2.5, iy + 1.0, 0x0C0D10FF, 1.2)
   if hs.hot then
     local label = hs.fade_hot and string.format("Fade %.0f ms", (fade or 0) * 1000.0)
         or string.format("End %.0f ms", end_t * 1000.0)
     local lw = text_w(label)
     local lx = math.max(ix, math.min(ix + iw - lw - 4.0, (hs.fade_hot and fx or ex) - lw - 10.0))
-    r.ImGui_DrawList_AddRectFilled(dl, lx - 4.0, iy + ih - 18.0, lx + lw + 4.0, iy + ih - 2.0, 0x0B0E0CE8, 4.0)
+    r.ImGui_DrawList_AddRectFilled(dl, lx - 4.0, iy + ih - 18.0, lx + lw + 4.0, iy + ih - 2.0, 0x0C0D10E8, 4.0)
     r.ImGui_DrawList_AddText(dl, lx, iy + ih - 17.0, 0xFFFFFFFF, label)
   end
 end
@@ -999,7 +999,7 @@ function seq_layering_vol_knob(id, dl, x, y, size, vert)
     local label = string.format("%.0f%%  %s", vol * 100.0, db_text)
     local lw = text_w(label)
     local lx, ly = cx - lw * 0.5, y - 21.0
-    r.ImGui_DrawList_AddRectFilled(dl, lx - 6.0, ly, lx + lw + 6.0, ly + 17.0, 0x0B0E0CF0, 5.0)
+    r.ImGui_DrawList_AddRectFilled(dl, lx - 6.0, ly, lx + lw + 6.0, ly + 17.0, 0x0C0D10F0, 5.0)
     r.ImGui_DrawList_AddRect(dl, lx - 6.0, ly, lx + lw + 6.0, ly + 17.0, vol > 1.001 and 0xFFC870AA or 0x1EFF5E88, 5.0, 0, 1.0)
     r.ImGui_DrawList_AddText(dl, lx, ly + 1.5, 0xFFFFFFFF, label)
     tooltip("Corner volume " .. label .. "\nShift: fine  ·  Double-click: 100%")
@@ -1909,7 +1909,7 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
   for i = 1, 3 do
     local vert = side.verts[i]
     samples[i] = vert.path and find_sample_by_path(vert.path) or nil
-    colors[i] = vert.path and get_sample_dot_color(samples[i] or { path = vert.path }) or 0x5A6660FF
+    colors[i] = vert.path and get_sample_dot_color(samples[i] or { path = vert.path }) or 0x616266FF
   end
   local bar_x1 = bx - 10.0
   local bar_w = math.min(112.0, bar_x1 - after_label)
@@ -1934,10 +1934,10 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
       mix_w = mix_w + wt
     end
   end
-  local body_col = 0x0D1611FF
+  local body_col = 0x121316FF
   if mix_w > 0.001 then
     local tint = math.floor(mix_r / mix_w) * 16777216 + math.floor(mix_g / mix_w) * 65536 + math.floor(mix_b / mix_w) * 256 + 255
-    body_col = seq_layer_col_mix(0x0D1611FF, tint, (hot_side or dragging) and 0.16 or 0.11)
+    body_col = seq_layer_col_mix(0x121316FF, tint, (hot_side or dragging) and 0.16 or 0.11)
   end
   seq_layering_convex_fill(dl, shapes.body, shapes.body_arr, body_col)
   for i = 1, 3 do
@@ -1985,7 +1985,7 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
     r.ImGui_DrawList_AddCircle(dl, snap[1], snap[2], 13.0, 0xFFFFFF66, 20, 1.2)
   end
   r.ImGui_DrawList_AddCircleFilled(dl, px, py, dragging and 17.0 or 13.0, seq_layer_col_alpha(side_col, dragging and 0.22 or 0.14), 24)
-  r.ImGui_DrawList_AddCircleFilled(dl, px, py, 7.5, 0x0B0E0CFF, 18)
+  r.ImGui_DrawList_AddCircleFilled(dl, px, py, 7.5, 0x0C0D10FF, 18)
   r.ImGui_DrawList_AddCircle(dl, px, py, 7.5, 0xFFFFFFFF, 18, 2.0)
   r.ImGui_DrawList_AddCircleFilled(dl, px, py, 3.2, side_col, 12)
 
@@ -2255,7 +2255,7 @@ function seq_layering_draw_bias(dl, slot, x, y, w, h, linked)
   local u = ((slot.layers.bias or 0.0) + 1.0) * 0.5
   local thumb_x = x + 5.0 + u * math.max(1.0, w - 10.0)
   local t_col = SEQ_LAYER_SIDE_COLORS.transient
-  local fill_col = disabled and 0x3A4A40FF or t_col
+  local fill_col = disabled and 0x434447FF or t_col
   local bg = (hovered or active) and not disabled and UI_THEME.surface_hvr or UI_THEME.surface
   local edge = (hovered or active) and not disabled and seq_layer_col_alpha(t_col, 0.8) or UI_THEME.border
   ui_draw_panel(dl, x, y, x + w, y + h, h * 0.5, bg, edge, hovered and not disabled, active and not disabled)
@@ -2264,7 +2264,7 @@ function seq_layering_draw_bias(dl, slot, x, y, w, h, linked)
     r.ImGui_DrawList_AddRectFilled(dl, math.min(thumb_x, mid_x), y + h * 0.5 - 1.5, math.max(thumb_x, mid_x), y + h * 0.5 + 1.5,
       seq_layer_col_alpha(fill_col, 0.75), 1.5)
   end
-  r.ImGui_DrawList_AddCircleFilled(dl, thumb_x, y + h * 0.5, h * 0.36, disabled and 0x3A4A40FF or 0xFFFFFFFF, 14)
+  r.ImGui_DrawList_AddCircleFilled(dl, thumb_x, y + h * 0.5, h * 0.36, disabled and 0x434447FF or 0xFFFFFFFF, 14)
   r.ImGui_DrawList_AddCircle(dl, thumb_x, y + h * 0.5, h * 0.36, fill_col, 14, 1.5)
 
   local caption = "SPLIT"
@@ -2324,7 +2324,7 @@ function seq_layering_draw_xfade(dl, slot, x, y, w, h, linked)
   u = seq_layering_xfade_to_u(slot.layers.xfade)
   local thumb_x = x + 5.0 + u * math.max(1.0, w - 10.0)
   local s_col = SEQ_LAYER_SIDE_COLORS.sustain
-  local fill_col = disabled and 0x3A4A40FF or s_col
+  local fill_col = disabled and 0x434447FF or s_col
   local hot = (hovered or active) and not disabled
   ui_draw_panel(dl, x, y, x + w, y + h, h * 0.5, hot and UI_THEME.surface_hvr or UI_THEME.surface,
     hot and seq_layer_col_alpha(s_col, 0.8) or UI_THEME.border, hovered and not disabled, active and not disabled)
@@ -2332,7 +2332,7 @@ function seq_layering_draw_xfade(dl, slot, x, y, w, h, linked)
     r.ImGui_DrawList_AddRectFilled(dl, x + 5.0, y + h * 0.5 - 1.5, thumb_x, y + h * 0.5 + 1.5,
       seq_layer_col_alpha(fill_col, 0.75), 1.5)
   end
-  r.ImGui_DrawList_AddCircleFilled(dl, thumb_x, y + h * 0.5, h * 0.36, disabled and 0x3A4A40FF or 0xFFFFFFFF, 14)
+  r.ImGui_DrawList_AddCircleFilled(dl, thumb_x, y + h * 0.5, h * 0.36, disabled and 0x434447FF or 0xFFFFFFFF, 14)
   r.ImGui_DrawList_AddCircle(dl, thumb_x, y + h * 0.5, h * 0.36, fill_col, 14, 1.5)
 
   local caption = "XFADE"

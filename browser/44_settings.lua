@@ -1021,7 +1021,7 @@ function draw_map_status_overlay(dl, x0, y0, width, height)
   if r.ImGui_DrawList_PushClipRect then
     r.ImGui_DrawList_PushClipRect(dl, x0, y0, x0 + width, y0 + height, true)
   end
-  r.ImGui_DrawList_AddRectFilled(dl, cx0, cy0, cx0 + card_w, cy1, 0x090C0AE0, UI_METRICS.radius_ctrl)
+  r.ImGui_DrawList_AddRectFilled(dl, cx0, cy0, cx0 + card_w, cy1, 0x0A0B0EE0, UI_METRICS.radius_ctrl)
   r.ImGui_DrawList_AddRect(dl, cx0 + 0.5, cy0 + 0.5, cx0 + card_w - 0.5, cy1 - 0.5, UI_THEME.border, UI_METRICS.radius_ctrl, 0, 1.0)
   for i, line in ipairs(lines) do
     local ty = cy0 + pad_y + (i - 1) * line_h
@@ -1042,7 +1042,7 @@ function draw_map_status_overlay(dl, x0, y0, width, height)
     local zx1 = x0 + width - margin
     local zx0 = zx1 - zw - 16
     local zy0 = cy1 - zh - 8
-    r.ImGui_DrawList_AddRectFilled(dl, zx0, zy0, zx1, cy1, 0x090C0AE0, (cy1 - zy0) * 0.5)
+    r.ImGui_DrawList_AddRectFilled(dl, zx0, zy0, zx1, cy1, 0x0A0B0EE0, (cy1 - zy0) * 0.5)
     r.ImGui_DrawList_AddRect(dl, zx0 + 0.5, zy0 + 0.5, zx1 - 0.5, cy1 - 0.5, UI_THEME.border, (cy1 - zy0) * 0.5, 0, 1.0)
     r.ImGui_DrawList_AddText(dl, zx0 + 8, zy0 + 4, UI_THEME.text_dim, zoom_text)
     if (state.zoom or 1.0) > 1.01 and state.map_overlay_hits then
