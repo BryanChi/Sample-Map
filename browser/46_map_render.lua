@@ -36,8 +36,22 @@ MAP_CANVAS = {
   readout_bg   = 0x161C3CF0,
   readout_text = 0xE6EBFFFF,
 }
-MAP_GUTTER_LEFT = 70
+-- The left gutter is only as wide as its labels: the Y tick labels and the
+-- hover pill are short ("12.5k", "840", "100%") and the corner names the
+-- unit, so the rest of the width goes to the plot. Sized from the current
+-- font by map_update_gutter_left() each frame.
+MAP_GUTTER_LEFT = 48
 MAP_GUTTER_TOP = 25
+
+function map_update_gutter_left()
+  local tw = 0
+  for _, sample_text in ipairs({ "88.8k", "100%" }) do
+    tw = math.max(tw, (r.ImGui_CalcTextSize(ctx, sample_text)) or 0)
+  end
+  -- pill padding (10) + gap to the plot edge (4) + a little air on the left
+  MAP_GUTTER_LEFT = math.max(36, math.floor(tw + 18 + 0.5))
+  return MAP_GUTTER_LEFT
+end
 
 function map_format_hz(hz)
   if type(hz) ~= "number" then
@@ -105,7 +119,8 @@ function draw_map_gutters(dl, x0, y0, width, height, padded_x0, padded_y0)
   r.ImGui_DrawList_AddLine(dl, padded_x0 - 0.5, padded_y0, padded_x0 - 0.5, y0 + height, C.gutter_edge, 1.0)
   r.ImGui_DrawList_AddLine(dl, padded_x0, padded_y0 - 0.5, x0 + width, padded_y0 - 0.5, C.gutter_edge, 1.0)
 
-  -- Corner: Y axis name over X axis name, each with a small direction arrow.
+  -- Corner: the Y axis unit with a small up arrow. The X labels carry their
+  -- own units (ms / s), so they need no caption.
   local y_name = map_y_axis_id() == "weight" and "Wt" or "Hz"
   local _, th = r.ImGui_CalcTextSize(ctx, "Hz")
   local cx = x0 + 8
@@ -113,13 +128,6 @@ function draw_map_gutters(dl, x0, y0, width, height, padded_x0, padded_y0)
   local ax = cx + 3
   r.ImGui_DrawList_AddTriangleFilled(dl, ax, cy + 2, ax - 3, cy + 7, ax + 3, cy + 7, C.axis_caption)
   r.ImGui_DrawList_AddText(dl, cx + 9, cy, C.axis_caption, y_name)
-  local s_label = "s"
-  local sw = select(1, r.ImGui_CalcTextSize(ctx, s_label)) or 6
-  local sx = padded_x0 - 8 - sw - 8
-  r.ImGui_DrawList_AddText(dl, sx, cy, C.axis_caption, s_label)
-  local tx = sx + sw + 3
-  local ty = cy + th * 0.5
-  r.ImGui_DrawList_AddTriangleFilled(dl, tx + 5, ty, tx, ty - 3, tx, ty + 3, C.axis_caption)
 end
 
 function draw_map_grid(dl, x0, y0, width, height, padded_x0, padded_y0, padded_width, padded_height, padded_center_x, padded_center_y)
@@ -167,10 +175,10 @@ function draw_map_hover_guides(dl, sample, px, py, x0, y0, padded_x0, padded_y0,
   if axis == "weight" then
     local w = type(sample.sub_weight) == "number" and sample.sub_weight or 0.0
     y_text = string.format("%.0f%%", w * 100.0)
-  elseif axis == "dominant_freq" then
-    y_text = map_format_hz(sample.dominant_freq)
   else
-    y_text = map_format_hz(sample.brightness or sample.dominant_freq)
+    -- Compact like the tick labels ("1.25k"), so it fits the narrow gutter
+    local hz = axis == "dominant_freq" and sample.dominant_freq or (sample.brightness or sample.dominant_freq)
+    y_text = type(hz) == "number" and map_tick_hz_text(math.floor(hz + 0.5)) or "?"
   end
   local x_text = map_format_seconds(sample_map_duration(sample))
 
@@ -912,7 +920,7 @@ end
 -- Slim progress bar; an indeterminate bar shows a sliding segment.
 function sm_draw_progress_bar(dl, x0, y0, x1, y1, fraction, indeterminate, track_col, fill_col)
   local h = y1 - y0
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, track_col or 0x1E2621FF, h * 0.5)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, track_col or 0x222326FF, h * 0.5)
   local w = x1 - x0
   if indeterminate then
     local seg = math.max(h * 2, w * 0.28)
@@ -966,7 +974,7 @@ function draw_map_scan_progress_overlay(dl, x0, y0, width, height)
   local card_y0 = y0 + 6.0
   local card_y1 = y0 + overlay_height - 4.0
   r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + overlay_height, 0x00000066, UI_METRICS.radius_panel)
-  r.ImGui_DrawList_AddRectFilled(dl, card_x0, card_y0, card_x1, card_y1, 0x111612F4, UI_METRICS.radius_panel)
+  r.ImGui_DrawList_AddRectFilled(dl, card_x0, card_y0, card_x1, card_y1, 0x131417F4, UI_METRICS.radius_panel)
   r.ImGui_DrawList_AddRect(dl, card_x0 + 0.5, card_y0 + 0.5, card_x1 - 0.5, card_y1 - 0.5, UI_THEME.border, UI_METRICS.radius_panel, 0, 1.0)
 
   local pad = 26.0
@@ -1028,7 +1036,7 @@ function draw_scan_progress_chip()
   r.ImGui_InvisibleButton(ctx, "##scan_chip", w, h)
   local hovered = r.ImGui_IsItemHovered(ctx)
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, hovered and 0x1A221DFF or 0x141A16FF, h * 0.5)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, hovered and 0x1E1F22FF or 0x17181BFF, h * 0.5)
   r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, UI_THEME.border, h * 0.5, 0, 1.0)
 
   local pulse = 0.55 + 0.45 * math.sin(r.time_precise() * 4.0)
@@ -1096,6 +1104,7 @@ function render_map()
   if width <= 0 or height <= 0 then
     return
   end
+  map_update_gutter_left()
 
   if state.map_restore_view_cx and state.map_restore_view_cy then
     state.pan_x, state.pan_y = map_pan_from_view_center(

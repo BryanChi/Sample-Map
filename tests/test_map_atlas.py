@@ -202,3 +202,12 @@ def test_overview_click_centres_view():
     pw, ph = 1070 - L.eval("MAP_GUTTER_LEFT"), 600 - L.eval("MAP_GUTTER_TOP")
     assert math.isclose(L.eval("state.pan_x"), 0.25 * pw * 4)
     assert math.isclose(L.eval("state.pan_y"), -0.25 * ph * 4)
+
+
+def test_left_gutter_fits_its_labels():
+    L = _rt()
+    w = L.eval("map_update_gutter_left()")
+    assert w == L.eval("MAP_GUTTER_LEFT")
+    widest = max(L.eval('(reaper.ImGui_CalcTextSize(ctx, "88.8k"))'), L.eval('(reaper.ImGui_CalcTextSize(ctx, "100%"))'))
+    assert widest + 16 <= w < 70
+    assert L.eval("map_tick_hz_text(12500)") == "12.5k"
