@@ -37,7 +37,7 @@ F.API_VERSION = 1
 -- Where reports go. Set this once the relay is deployed (see
 -- feedback/README.md). An ExtState override lets testers point at a dev relay:
 -- reaper.SetExtState("CRS_Feedback", "endpoint", "https://...", true)
-F.ENDPOINT = "https://crs-feedback.REPLACE-ME.workers.dev/report"
+F.ENDPOINT = "https://crs-feedback.brwchi.workers.dev/report"
 
 F.MAX_IMAGES = 5
 F.MAX_IMAGE_BYTES = 5 * 1024 * 1024
