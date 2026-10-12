@@ -266,6 +266,7 @@ function map_toolbar_right_cluster_width()
   w = w + 3
   if state.map_ui_edit then
     w = w + UI_METRICS.toolbar_gap + map_layout_reset_button_width()
+      + 4 + UI_METRICS.toolbar_h
   end
   return w + UI_METRICS.toolbar_gap + UI_METRICS.toolbar_h
 end
@@ -276,7 +277,9 @@ end
 
 function reset_map_ui_layout()
   -- No undo for layouts, so ask first.
-  if r.ShowMessageBox("Reset the map layout to the default arrangement?", "Reset layout", 4) == 6 then
+  if r.ShowMessageBox("Reset the map layout to the default arrangement?\nYou can undo this while editing.", "Reset layout", 4) == 6 then
+    map_ui_push_undo()
+    state.seq_panel_width = 240
     state.map_ui_layout = default_map_ui_layout()
     state.map_ui_drag = nil
     state.map_ui_drop = nil
@@ -346,6 +349,14 @@ end
 function render_map_layout_toggle()
   local h = UI_METRICS.toolbar_h
   if state.map_ui_edit then
+    local can_undo = state.map_ui_undo and #state.map_ui_undo > 0
+    if draw_ui_button("map_layout_undo", nil, h, h, { icon = "undo", compact = true, disabled = not can_undo }) and can_undo then
+      map_ui_undo()
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      r.ImGui_SetTooltip(ctx, can_undo and "Undo the last layout change (Cmd/Ctrl+Z).\nShift+Cmd/Ctrl+Z redoes." or "Nothing to undo yet.")
+    end
+    r.ImGui_SameLine(ctx, 0, 4)
     if draw_ui_button("map_layout_reset", "Reset layout", map_layout_reset_button_width(), h, { compact = true }) then
       reset_map_ui_layout()
     end
@@ -741,8 +752,41 @@ function map_ui_sync_tracks_width(node)
   end
 end
 
+-- Exchange two modules' places; each keeps its own size settings.
+function map_ui_swap(id_a, id_b)
+  local root = map_ui_clone(state.map_ui_layout)
+  local slot_a, slot_b
+  local function find(node)
+    for i, child in ipairs(node.children or {}) do
+      if child.type == "leaf" and child.id == id_a then
+        slot_a = { node = node, index = i }
+      elseif child.type == "leaf" and child.id == id_b then
+        slot_b = { node = node, index = i }
+      else
+        find(child)
+      end
+    end
+  end
+  find(root)
+  if not slot_a or not slot_b then
+    return
+  end
+  local a = slot_a.node.children[slot_a.index]
+  slot_a.node.children[slot_a.index] = slot_b.node.children[slot_b.index]
+  slot_b.node.children[slot_b.index] = a
+  if map_ui_validate(root) then
+    map_ui_push_undo()
+    state.map_ui_layout = root
+    map_ui_sync_tracks_width(root)
+  end
+end
+
 function map_ui_dock(source_id, target_id, edge)
   if not source_id or not target_id or source_id == target_id then
+    return
+  end
+  if edge == "center" then
+    map_ui_swap(source_id, target_id)
     return
   end
   local root = map_ui_clone(state.map_ui_layout)
@@ -760,6 +804,7 @@ function map_ui_dock(source_id, target_id, edge)
   end
   inserted = map_ui_flatten(inserted)
   if map_ui_validate(inserted) then
+    map_ui_push_undo()
     state.map_ui_layout = inserted
     map_ui_sync_tracks_width(inserted)
   end
@@ -1052,6 +1097,150 @@ function map_ui_edge_target(id, edge)
   return { node = node, index = i, axis = "h", sign = -1, size0 = child._alloc_h or info.h }
 end
 
+-- Layout undo / redo (edit mode only; Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z go
+-- here instead of the sequencer while editing). Snapshots are clones.
+MAP_UI_UNDO_MAX = 30
+
+function map_ui_push_undo()
+  state.map_ui_undo = state.map_ui_undo or {}
+  local stack = state.map_ui_undo
+  stack[#stack + 1] = map_ui_clone(state.map_ui_layout)
+  if #stack > MAP_UI_UNDO_MAX then
+    table.remove(stack, 1)
+  end
+  state.map_ui_redo = {}
+end
+
+local function map_ui_restore(snapshot)
+  if snapshot and map_ui_validate(snapshot) then
+    state.map_ui_layout = snapshot
+    map_ui_sync_tracks_width(snapshot)
+    state.map_ui_drag = nil
+    state.map_ui_drop = nil
+    state.map_ui_split_drag = nil
+    save_config()
+    return true
+  end
+  return false
+end
+
+function map_ui_undo()
+  local stack = state.map_ui_undo
+  if not stack or #stack == 0 then
+    return false
+  end
+  state.map_ui_redo = state.map_ui_redo or {}
+  state.map_ui_redo[#state.map_ui_redo + 1] = map_ui_clone(state.map_ui_layout)
+  return map_ui_restore(table.remove(stack))
+end
+
+function map_ui_redo()
+  local stack = state.map_ui_redo
+  if not stack or #stack == 0 then
+    return false
+  end
+  state.map_ui_undo = state.map_ui_undo or {}
+  state.map_ui_undo[#state.map_ui_undo + 1] = map_ui_clone(state.map_ui_layout)
+  return map_ui_restore(table.remove(stack))
+end
+
+-- Size along the drag axis that has been set explicitly (nil = flexible).
+local function map_ui_axis_size(node, axis)
+  if axis == "w" then
+    return map_ui_get_w(node)
+  end
+  return map_ui_get_h(node)
+end
+
+local function map_ui_axis_flex(node, axis)
+  if map_ui_axis_size(node, axis) then
+    return false
+  end
+  if axis == "w" then
+    return not (node.type == "leaf" and node.id == "tracks")
+  end
+  return map_ui_is_flex_h(node)
+end
+
+local function map_ui_set_axis(node, axis, v)
+  if axis == "w" then
+    node.w = v
+    node.size = nil
+    if node.type == "leaf" and node.id == "tracks" then
+      state.seq_panel_width = v
+    end
+  else
+    node.h = v
+  end
+end
+
+local function map_ui_clear_axis(node, axis)
+  if axis == "w" then
+    node.w = nil
+    node.size = nil
+  else
+    node.h = nil
+  end
+end
+
+-- Default size of a module along an axis (snap target), or nil.
+local function map_ui_default_size(node, axis)
+  if type(node) ~= "table" or node.type ~= "leaf" then
+    return nil
+  end
+  if axis == "w" then
+    return node.id == "tracks" and 240 or nil
+  end
+  local spec = MAP_UI_SPEC[node.id]
+  if spec and not spec.flex_h then
+    return spec.h
+  end
+  return nil
+end
+
+-- Screen position of the dragged edge (end of child A) from last frame's
+-- module rects, so snapping can line it up with other modules.
+local function map_ui_edge_screen_pos(id, edge)
+  local rect = state.map_ui_rects and state.map_ui_rects[id]
+  if not rect then
+    return nil
+  end
+  if edge == "right" then
+    return rect.x1
+  elseif edge == "left" then
+    return rect.x0 - MAP_UI_GAP
+  elseif edge == "bottom" then
+    return rect.y1
+  end
+  return rect.y0 - MAP_UI_GAP
+end
+
+-- Other modules' edges along the drag axis (where A's end would line up).
+local function map_ui_snap_lines(axis, pos0)
+  local out = {}
+  for _, rect in pairs(state.map_ui_rects or {}) do
+    local lo, hi
+    if axis == "w" then
+      lo, hi = rect.x0 - MAP_UI_GAP, rect.x1
+    else
+      lo, hi = rect.y0 - MAP_UI_GAP, rect.y1
+    end
+    for _, v in ipairs({ lo, hi }) do
+      -- Edges already on the dragged line move with it; skip them.
+      if math.abs(v - pos0) > 1.5 then
+        out[#out + 1] = v
+      end
+    end
+  end
+  return out
+end
+
+MAP_UI_SNAP_PX = 6
+
+-- Dragging the grip between children A (index) and B (index + 1) trades
+-- space between those two only; every other module keeps its size.
+-- Snaps to either module's default size and to other modules' edges;
+-- hold Shift to drag freely.
 function map_ui_handle_edge(id, edge)
   if not state.map_ui_edit or state.map_ui_drag then
     return
@@ -1067,51 +1256,131 @@ function map_ui_handle_edge(id, edge)
       r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_ResizeNS())
     end
   end
+  if hovered and not active and r.ImGui_SetTooltip then
+    r.ImGui_SetTooltip(ctx, "Drag to resize the two modules beside this grip.\nSnaps to default sizes and other edges; hold Shift to drag freely.")
+  end
   local key = tostring(id) .. "_" .. edge
   local mx, my = r.ImGui_GetMousePos(ctx)
   if active then
     if not state.map_ui_split_drag or state.map_ui_split_drag.key ~= key then
       local target = map_ui_edge_target(id, edge)
-      if not target then
+      if not target or target.sign ~= 1 then
         return
       end
+      local node, i = target.node, target.index
+      local a, b = node.children[i], node.children[i + 1]
+      if not a or not b then
+        return
+      end
+      local axis = target.axis
+      local a0 = (axis == "w" and a._alloc_w or a._alloc_h) or target.size0
+      local b0 = (axis == "w" and b._alloc_w or b._alloc_h) or 0
+      local others_flex = false
+      for j, c in ipairs(node.children) do
+        if j ~= i and j ~= i + 1 and map_ui_axis_flex(c, axis) then
+          others_flex = true
+        end
+      end
+      local pos0 = map_ui_edge_screen_pos(id, edge)
+      map_ui_push_undo()
       state.map_ui_split_drag = {
         key = key,
-        node = target.node,
-        index = target.index,
-        axis = target.axis,
-        sign = target.sign,
-        start = target.axis == "w" and mx or my,
-        size0 = target.size0,
+        node = node,
+        index = i,
+        axis = axis,
+        start = axis == "w" and mx or my,
+        a0 = a0,
+        b0 = b0,
+        a_flex = map_ui_axis_flex(a, axis),
+        b_flex = map_ui_axis_flex(b, axis),
+        others_flex = others_flex,
+        pos0 = pos0,
+        lines = pos0 and map_ui_snap_lines(axis, pos0) or {},
+        moved = false,
       }
     else
       local drag = state.map_ui_split_drag
-      local child = drag.node.children[drag.index]
-      if not child then
+      local a = drag.node.children[drag.index]
+      local b = drag.node.children[drag.index + 1]
+      if not a or not b then
         return
       end
-      local pos = drag.axis == "w" and mx or my
-      local minv = drag.axis == "w" and map_ui_min_w(child) or map_ui_min_h(child)
-      local newv = math.max(minv, drag.size0 + drag.sign * (pos - drag.start))
-      local host = state.sample_map_window_rect or state.main_window_rect
-      if drag.axis == "w" then
-        local maxv = math.max(minv + 40, ((host and host.w) or 900) - 120)
-        newv = math.min(maxv, newv)
-        child.w = newv
-        child.size = nil
-        if child.type == "leaf" and child.id == "tracks" then
-          state.seq_panel_width = newv
+      local axis = drag.axis
+      local min_a = axis == "w" and map_ui_min_w(a) or map_ui_min_h(a)
+      local min_b = axis == "w" and map_ui_min_w(b) or map_ui_min_h(b)
+      local d = (axis == "w" and mx or my) - drag.start
+      if math.abs(d) >= 1 then
+        drag.moved = true
+      end
+      local total = drag.a0 + drag.b0
+      local new_a = drag.a0 + d
+      drag.snap_pos = nil
+      local shift = false
+      if r.ImGui_GetKeyMods and r.ImGui_Mod_Shift then
+        shift = (r.ImGui_GetKeyMods(ctx) & r.ImGui_Mod_Shift()) ~= 0
+      end
+      if not shift then
+        local best, best_dist = nil, MAP_UI_SNAP_PX + 0.01
+        local def_a = map_ui_default_size(a, axis)
+        if def_a and math.abs(new_a - def_a) < best_dist then
+          best, best_dist = def_a, math.abs(new_a - def_a)
         end
-      else
-        local maxv = math.max(minv + 24, ((host and host.h) or 700) - 80)
-        newv = math.min(maxv, newv)
-        child.h = newv
+        local def_b = map_ui_default_size(b, axis)
+        if def_b and math.abs((total - new_a) - def_b) < best_dist then
+          best, best_dist = total - def_b, math.abs((total - new_a) - def_b)
+        end
+        if drag.pos0 then
+          for _, line in ipairs(drag.lines) do
+            local cand = drag.a0 + (line - drag.pos0)
+            if math.abs(new_a - cand) < best_dist then
+              best, best_dist = cand, math.abs(new_a - cand)
+              drag.snap_pos = line
+            end
+          end
+        end
+        if best then
+          if drag.snap_pos and best ~= drag.a0 + (drag.snap_pos - drag.pos0) then
+            drag.snap_pos = nil
+          end
+          new_a = best
+        end
+      end
+      new_a = math.max(min_a, math.min(total - min_b, new_a))
+      local new_b = total - new_a
+      if drag.moved then
+        -- Keep one flexible module in the container so it still fills the
+        -- window: if nothing else flexes, the flexible one of A / B stays so.
+        local keep_flex = nil
+        if not drag.others_flex then
+          if drag.b_flex then
+            keep_flex = "b"
+          elseif drag.a_flex then
+            keep_flex = "a"
+          end
+        end
+        if keep_flex == "a" then
+          map_ui_clear_axis(a, axis)
+        else
+          map_ui_set_axis(a, axis, new_a)
+        end
+        if keep_flex == "b" then
+          map_ui_clear_axis(b, axis)
+        else
+          map_ui_set_axis(b, axis, new_b)
+        end
+        drag.cur_a, drag.cur_b = new_a, new_b
       end
     end
   elseif state.map_ui_split_drag and state.map_ui_split_drag.key == key
       and r.ImGui_IsMouseReleased and r.ImGui_IsMouseReleased(ctx, 0) then
+    local drag = state.map_ui_split_drag
     state.map_ui_split_drag = nil
-    save_config()
+    if drag.moved then
+      save_config()
+    elseif state.map_ui_undo and #state.map_ui_undo > 0 then
+      -- A click without a drag changed nothing.
+      table.remove(state.map_ui_undo)
+    end
   end
 end
 
@@ -1309,15 +1578,26 @@ function map_ui_draw_edit_chrome()
       end
     end
   end
-  -- Live size while resizing.
+  -- Live sizes of the two modules while resizing, and the edge it snapped to.
   local drag = state.map_ui_split_drag
-  if drag and drag.node and drag.node.children then
-    local child = drag.node.children[drag.index]
-    local v = child and (drag.axis == "w" and child.w or child.h)
-    if v then
-      local mx, my = r.ImGui_GetMousePos(ctx)
-      map_ui_draw_badge(dl, mx + 18, my + 18, string.format("%d px", math.floor(v + 0.5)),
-        T.text, T.popup_bg, T.accent)
+  if drag and drag.cur_a then
+    if drag.snap_pos then
+      local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
+      for _, rect in pairs(state.map_ui_rects or {}) do
+        x0, y0 = math.min(x0, rect.x0), math.min(y0, rect.y0)
+        x1, y1 = math.max(x1, rect.x1), math.max(y1, rect.y1)
+      end
+      local p = drag.snap_pos + MAP_UI_GAP * 0.5
+      if drag.axis == "w" then
+        r.ImGui_DrawList_AddLine(dl, p, y0, p, y1, T.accent_hvr, 1.0)
+      else
+        r.ImGui_DrawList_AddLine(dl, x0, p, x1, p, T.accent_hvr, 1.0)
+      end
     end
+    local mx, my = r.ImGui_GetMousePos(ctx)
+    local sep = drag.axis == "w" and "  |  " or "  /  "
+    map_ui_draw_badge(dl, mx + 60, my + 18,
+      string.format("%d%s%d px", math.floor(drag.cur_a + 0.5), sep, math.floor(drag.cur_b + 0.5)),
+      T.text, T.popup_bg, T.accent)
   end
 end

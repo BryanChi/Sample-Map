@@ -96,7 +96,10 @@ function map_ui_update_drop()
       local rel_x = (mx - rect.x0) / rw
       local rel_y = (my - rect.y0) / rh
       local edge
-      if math.min(rel_x, 1 - rel_x) < math.min(rel_y, 1 - rel_y) then
+      -- Middle of a module swaps the two; near an edge docks beside it.
+      if math.abs(rel_x - 0.5) < 0.2 and math.abs(rel_y - 0.5) < 0.2 then
+        edge = "center"
+      elseif math.min(rel_x, 1 - rel_x) < math.min(rel_y, 1 - rel_y) then
         edge = rel_x < 0.5 and "left" or "right"
       else
         edge = rel_y < 0.5 and "top" or "bottom"
@@ -122,7 +125,9 @@ function map_ui_draw_drop_preview()
   local x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
   local t = 0.38
   local hx0, hy0, hx1, hy1 = x0, y0, x1, y1
-  if drop.edge == "left" then
+  if drop.edge == "center" then
+    hx0, hy0, hx1, hy1 = x0 + 6, y0 + 6, x1 - 6, y1 - 6
+  elseif drop.edge == "left" then
     hx1 = x0 + (x1 - x0) * t
   elseif drop.edge == "right" then
     hx0 = x1 - (x1 - x0) * t
@@ -146,10 +151,10 @@ function map_ui_draw_drag_ghost()
   local label = MAP_UI_LABELS[drag.id] or drag.id
   local drop = state.map_ui_drop
   if drop then
-    local where = ({ left = "left of", right = "right of", top = "above", bottom = "below" })[drop.edge] or ""
+    local where = ({ left = "left of", right = "right of", top = "above", bottom = "below", center = "swap with" })[drop.edge] or ""
     label = label .. " \u{2192} " .. where .. " " .. (MAP_UI_LABELS[drop.id] or drop.id)
   else
-    label = label .. "  \u{00B7}  drop it on a module edge"
+    label = label .. "  \u{00B7}  drop on an edge to dock, the middle to swap"
   end
   map_ui_draw_badge(dl, mx + 16 + select(1, r.ImGui_CalcTextSize(ctx, label)) * 0.5, my + 20, label,
     UI_THEME.text, UI_THEME.popup_bg, UI_THEME.border_hvr)

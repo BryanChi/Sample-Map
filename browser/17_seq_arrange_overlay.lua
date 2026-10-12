@@ -1151,6 +1151,15 @@ function handle_seq_undo_keys()
   if r.ImGui_SetNextFrameWantCaptureKeyboard then
     r.ImGui_SetNextFrameWantCaptureKeyboard(ctx, true)
   end
+  -- While editing the Sample Map layout, undo / redo the layout instead.
+  if state.map_ui_edit and state.active_view == "sample_map" then
+    if redo then
+      map_ui_redo()
+    else
+      map_ui_undo()
+    end
+    return true
+  end
   if redo then
     seq_redo()
   else

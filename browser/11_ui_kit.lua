@@ -498,6 +498,23 @@ function ui_button_draw_icon(dl, icon, cx, cy, size, color)
     r.ImGui_DrawList_AddLine(dl, cx - hw * 0.02, cy - hh * 0.08, cx + hw * 0.88, cy - hh * 0.88, color, stroke)
     r.ImGui_DrawList_AddLine(dl, cx + hw * 0.22, cy - hh * 0.88, cx + hw * 0.88, cy - hh * 0.88, color, stroke)
     r.ImGui_DrawList_AddLine(dl, cx + hw * 0.88, cy - hh * 0.88, cx + hw * 0.88, cy - hh * 0.22, color, stroke)
+  elseif icon == "undo" then
+    -- Arrow curling back to the left.
+    local rad = size * 0.24
+    local acx, acy = cx + size * 0.04, cy + size * 0.04
+    local prev
+    for i = 0, 8 do
+      local a = math.pi * (1.0 + i / 8 * 1.25)
+      local px, py = acx + math.cos(a) * rad, acy + math.sin(a) * rad
+      if prev then
+        r.ImGui_DrawList_AddLine(dl, prev[1], prev[2], px, py, color, stroke)
+      end
+      prev = { px, py }
+    end
+    local tx, ty = acx - rad, acy
+    local head = size * 0.14
+    r.ImGui_DrawList_AddLine(dl, tx, ty, tx - head * 0.8, ty - head, color, stroke)
+    r.ImGui_DrawList_AddLine(dl, tx, ty, tx + head * 0.9, ty - head * 0.7, color, stroke)
   elseif icon == "layout" then
     local hw, hh = size * 0.30, size * 0.28
     local gap = math.max(1.2, size * 0.06)
@@ -704,6 +721,10 @@ function draw_ui_button(id, label, w, h, opts)
     bg, glow, text_col, border, border_w = ui_button_colors_from_accent(tint, hovered, active)
   else
     bg, glow, text_col, border, border_w = ui_button_colors(style, hovered, active, opts.selected)
+  end
+  if opts.disabled then
+    bg, glow, text_col, border, border_w = ui_button_colors(style, false, false, false)
+    text_col = UI_THEME.text_mute
   end
   local is_ghost_arrow = style == "ghost_arrow"
 
