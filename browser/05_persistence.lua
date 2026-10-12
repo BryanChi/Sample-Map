@@ -564,6 +564,9 @@ function load_config()
             or cfg.collapse_children_tags == "dynamic" then
           state.collapse_children_tags = cfg.collapse_children_tags
         end
+        if type(cfg.tags_hide_until_search) == "boolean" then
+          state.tags_hide_until_search = cfg.tags_hide_until_search
+        end
         if type(cfg.collapse_children_tags_width) == "number" then
           state.collapse_children_tags_width = math.max(400, math.min(4000, cfg.collapse_children_tags_width))
         end
@@ -823,6 +826,7 @@ function save_config_file()
     keyboard_shortcuts = state.keyboard_shortcuts,
     collapse_children_tags = state.collapse_children_tags,
     collapse_children_tags_width = state.collapse_children_tags_width,
+    tags_hide_until_search = state.tags_hide_until_search == true,
     custom_tags = state.custom_tags,
     deleted_tags = state.deleted_tags,
     explorer_open = state.explorer_open and true or false,

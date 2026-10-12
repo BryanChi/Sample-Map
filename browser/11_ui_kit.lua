@@ -1243,15 +1243,45 @@ function render_library_tag_path_menu()
 end
 
 -- --- Tag chips ---------------------------------------------------------------
--- Pill with a leading dot in the tag's colour. Idle chips are a dark surface
--- faintly tinted by that colour, so a long row stays calm and the dot carries
--- the identity. Active chips fill with the colour and the dot lights up.
+-- Each tag level has its own chip shape, so a row reads at a glance:
+--   group  (Drum, Melodic, Library...)  small-caps label tab, see draw_category_tag
+--   tag    (Kick, Pad...)               pill with a leading dot in the tag colour
+--   library (packs / genres)            squarer label chip with a colour bar
+--   attr   (Loop, One shot)             outline pill with a hollow ring
+-- Idle chips are a dark surface faintly tinted by the tag colour, so a long
+-- row stays calm and the marker carries the identity. Active chips fill with
+-- the colour and the marker lights up.
 -- Geometry follows the frame padding at draw time; measure with
--- tag_chip_width() under the same style vars.
+-- tag_chip_width() under the same style vars (tag_chips_compact_push()).
 
--- Internal "__" tags (the "+N" overflow chip) get no dot.
+-- Internal "__" tags (the "+N" overflow chip) get no marker.
 function tag_chip_has_dot(tag)
   return type(tag) == "string" and tag ~= "" and tag:sub(1, 2) ~= "__"
+end
+
+function tag_chip_kind(tag)
+  if not tag_chip_has_dot(tag) then
+    return "internal"
+  end
+  local cat = categorize_tags(tag)
+  if cat == "genre" then
+    return "library"
+  elseif cat == "loop" then
+    return "attr"
+  end
+  return "tag"
+end
+
+-- Tighter padding for the Sample Map tag band and the search field pills.
+-- Every push must be matched by tag_chips_compact_pop().
+TAG_CHIP_COMPACT_PAD_Y = 1
+function tag_chips_compact_push()
+  local fpx = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
+  r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FramePadding(), math.max(4, (fpx or 5) - 1), TAG_CHIP_COMPACT_PAD_Y)
+end
+
+function tag_chips_compact_pop()
+  r.ImGui_PopStyleVar(ctx)
 end
 
 function tag_chip_metrics(label, tag)
@@ -1259,8 +1289,13 @@ function tag_chip_metrics(label, tag)
   local fpx, fpy = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   fpx, fpy = fpx or 4, fpy or 2
   local h = th + fpy * 2
-  local m = { tw = tw, th = th, h = h, fpy = fpy }
-  if tag_chip_has_dot(tag == nil and label or tag) then
+  local kind = tag_chip_kind(tag == nil and label or tag)
+  local m = { tw = tw, th = th, h = h, fpy = fpy, kind = kind }
+  if kind == "library" then
+    m.bar_w = 2.0
+    m.pad_l = math.max(3.0, fpx - 2.0)
+    m.text_x = m.pad_l + m.bar_w + math.max(3.0, fpx * 0.6)
+  elseif kind ~= "internal" then
     m.dot_r = math.max(2.0, math.min(3.0, h * 0.14))
     m.pad_l = math.max(3.0, fpx - 3.0)
     m.text_x = m.pad_l + m.dot_r * 2 + math.max(3.0, fpx * 0.5)
@@ -1290,11 +1325,11 @@ local function chip_dot_color(base)
   return base
 end
 
--- Fill, border, text, dot colours for one chip state.
-local function tag_chip_colors(base, has_dot, active, hovered, pressed)
+-- Fill, border, text, marker colours for one chip state.
+local function tag_chip_colors(base, kind, active, hovered, pressed)
   local T = UI_THEME
   local fill, border, text, dot
-  if not has_dot then
+  if kind == "internal" then
     if active then
       fill, border, text = hovered and T.accent_fill_h or T.accent_fill, T.accent, 0xFFFFFFFF
     elseif hovered then
@@ -1307,6 +1342,18 @@ local function tag_chip_colors(base, has_dot, active, hovered, pressed)
     border = blend_colors(base, 0xFFFFFFFF, 0.35)
     text = chip_luma(fill) > 0.55 and 0x0E120FFF or 0xFFFFFFFF
     dot = text
+  elseif kind == "library" then
+    -- Library chips sit back: barely tinted, the colour bar carries them.
+    fill = hovered and blend_colors(T.surface_hvr, base, 0.16) or blend_colors(T.bg_panel, base, 0.05)
+    border = hovered and blend_colors(T.surface_hvr, base, 0.50) or blend_colors(T.bg_panel, base, 0.22)
+    text = hovered and T.text or 0xAEB8B1FF
+    dot = chip_dot_color(base)
+  elseif kind == "attr" then
+    -- Attribute chips are outlines only.
+    fill = hovered and blend_colors(T.surface_hvr, base, 0.14) or 0x00000000
+    border = hovered and blend_colors(T.surface_hvr, base, 0.70) or blend_colors(T.surface, base, 0.45)
+    text = hovered and T.text or 0xC3CCC6FF
+    dot = chip_dot_color(base)
   elseif hovered then
     fill = blend_colors(T.surface_hvr, base, 0.24)
     border = blend_colors(T.surface_hvr, base, 0.60)
@@ -1328,7 +1375,8 @@ function draw_tag_button(ctx, label, active, tag, id_prefix, opts)
   id_prefix = id_prefix or ""
   opts = opts or {}
   local m = tag_chip_metrics(label, tag)
-  local has_dot = m.dot_r ~= nil
+  local kind = m.kind
+  local has_dot = kind ~= "internal"
   local tr, tg, tb = extract_rgb(state.tag_colors[tag] or 0x336699)
   local base = build_color_rrgbbaa(tr, tg, tb, 255)
   local allow_delete = opts.allow_delete ~= false
@@ -1343,7 +1391,7 @@ function draw_tag_button(ctx, label, active, tag, id_prefix, opts)
   local alt_delete = allow_delete and hovered and tag_delete_modifier_down()
     and type(tag) == "string" and tag ~= "" and tag:sub(1, 2) ~= "__"
 
-  local fill, border, text, dot = tag_chip_colors(base, has_dot, active, hovered, pressed)
+  local fill, border, text, dot = tag_chip_colors(base, kind, active, hovered, pressed)
   if alt_delete then
     fill = build_color_rrgbbaa(110, 26, 26, 255)
     border = build_color_rrgbbaa(255, 92, 92, 230)
@@ -1351,7 +1399,7 @@ function draw_tag_button(ctx, label, active, tag, id_prefix, opts)
   end
 
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  local rounding = m.h * 0.5
+  local rounding = kind == "library" and math.min(4.0, m.h * 0.25) or m.h * 0.5
   local press = pressed and 1.0 or 0.0
   -- Soft halo marks the "on" chips even where the fill colour is muted.
   if active and has_dot and not alt_delete then
@@ -1363,9 +1411,15 @@ function draw_tag_button(ctx, label, active, tag, id_prefix, opts)
 
   local cy = (y0 + y1) * 0.5 + press
   if has_dot then
-    local dcx = x0 + m.pad_l + m.dot_r
+    local mw = m.bar_w or (m.dot_r * 2)
+    local dcx = x0 + m.pad_l + mw * 0.5
     if alt_delete then
-      ui_button_draw_icon(dl, "close", dcx, cy, m.dot_r * 2 + 6, 0xFF5C5CFF)
+      ui_button_draw_icon(dl, "close", dcx, cy, math.max(mw, 6) + 6, 0xFF5C5CFF)
+    elseif kind == "library" then
+      local inset = math.max(2.0, m.h * 0.22)
+      r.ImGui_DrawList_AddRectFilled(dl, x0 + m.pad_l, y0 + inset, x0 + m.pad_l + m.bar_w, y1 - inset, dot, 1.0)
+    elseif kind == "attr" and not active then
+      r.ImGui_DrawList_AddCircle(dl, dcx, cy, m.dot_r, dot, 12, 1.2)
     else
       local dr = m.dot_r + ((hovered and not active) and 0.4 or 0.0)
       r.ImGui_DrawList_AddCircleFilled(dl, dcx, cy, dr, dot, 12)
@@ -1994,12 +2048,18 @@ function toggle_sample_map_tag_filter(tag)
 end
 
 -- Group header chip (Drum, Melodic, Library...). Same height as the tag chips
--- so a row lines up; bold label, accent when any of its tags is on.
+-- so a row lines up, but drawn as the group's title: an upper-case label tab
+-- with no pill outline, so it never reads as one of the tags it heads.
+-- Accent text and an underline when any of its tags is on.
 -- opts.chevron = "right" | "down" adds a disclosure arrow for accordion groups.
 CATEGORY_CHIP_CHEVRON_W = 9
 
+function category_chip_label(label)
+  return string.upper(tostring(label or ""))
+end
+
 function calc_category_chip_width(label, chevron)
-  local text_w = r.ImGui_CalcTextSize(ctx, label)
+  local text_w = r.ImGui_CalcTextSize(ctx, category_chip_label(label))
   local pad_x = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   return text_w + pad_x * 2 + (chevron and CATEGORY_CHIP_CHEVRON_W or 0)
 end
@@ -2007,7 +2067,8 @@ end
 function draw_category_tag(ctx, label, id_prefix, active, opts)
   id_prefix = id_prefix or ""
   opts = opts or {}
-  local tw, th = r.ImGui_CalcTextSize(ctx, label)
+  local shown = category_chip_label(label)
+  local tw, th = r.ImGui_CalcTextSize(ctx, shown)
   local fpx, fpy = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   local button_width = calc_category_chip_width(label, opts.chevron)
   local button_height = th + fpy * 2
@@ -2018,35 +2079,36 @@ function draw_category_tag(ctx, label, id_prefix, active, opts)
   local hovered = r.ImGui_IsItemHovered(ctx)
   local pressed = r.ImGui_IsItemActive(ctx)
   local T = UI_THEME
-  local bg, border, text, chev
+  local bg, text, chev
   if active then
     bg = hovered and T.accent_fill_h or T.accent_fill
-    border = 0x1EFF5E99
-    text = 0xFFFFFFFF
+    text = T.accent_hvr
     chev = T.accent
   elseif hovered then
     bg = T.surface_hvr
-    border = T.border_hvr
     text = T.text
     chev = T.text_dim
   else
-    bg = T.elevated
-    border = T.border_soft
-    text = T.text
+    bg = nil
+    text = T.text_dim
     chev = T.text_mute
   end
   if pressed then
-    bg = blend_colors(bg, 0x000000FF, 0.18)
+    bg = blend_colors(bg or T.surface, 0x000000FF, 0.18)
   end
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  local rounding = button_height * 0.5
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, bg, rounding)
-  r.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, border, rounding, 0, 1.0)
+  local rounding = math.min(4.0, button_height * 0.25)
+  if bg then
+    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, bg, rounding)
+  end
+  if active then
+    r.ImGui_DrawList_AddLine(dl, x0 + fpx, y1 - 1.0, x0 + fpx + tw, y1 - 1.0, T.accent, 1.5)
+  end
   local press = pressed and 1.0 or 0.0
   local text_x = x0 + fpx
   local text_y = y0 + fpy + press
-  r.ImGui_DrawList_AddText(dl, text_x, text_y, text, label)
-  r.ImGui_DrawList_AddText(dl, text_x + 0.4, text_y, text, label)
+  r.ImGui_DrawList_AddText(dl, text_x, text_y, text, shown)
+  r.ImGui_DrawList_AddText(dl, text_x + 0.4, text_y, text, shown)
   if opts.chevron then
     local cx = text_x + tw + 6.5
     local icon = opts.chevron == "down" and "chev_down" or "chev_right"
@@ -2227,8 +2289,8 @@ function tag_group_paint_bg(minx, miny, maxx, maxy)
     return
   end
   local dl = r.ImGui_GetWindowDrawList(ctx)
-  local pad_x, pad_y = 4.0, 3.0
-  local rounding = math.min(14.0, (maxy - miny) * 0.5 + pad_y)
+  local pad_x, pad_y = 3.0, 2.0
+  local rounding = math.min(6.0, (maxy - miny) * 0.5 + pad_y)
   r.ImGui_DrawList_AddRectFilled(
     dl, minx - pad_x, miny - pad_y, maxx + pad_x, maxy + pad_y,
     UI_THEME.bg_panel, rounding)
@@ -2411,6 +2473,8 @@ function render_tag_filters()
 
   -- Reset hovered tag at start of frame
   state.hovered_tag = nil
+  tag_chips_compact_push()
+  r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 3, 5)
 
   -- Categorize tags
   local drum_tags = {}
@@ -2492,6 +2556,9 @@ function render_tag_filters()
       end
     end
   end
+
+  r.ImGui_PopStyleVar(ctx)
+  tag_chips_compact_pop()
 
   -- Check for shortcut when hovering over a tag
   if state.hovered_tag and shortcut_pressed("tag_color") then

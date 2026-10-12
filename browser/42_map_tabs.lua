@@ -368,7 +368,8 @@ function render_sample_map_toolbar()
   render_map_layout_toggle()
 
   -- Tag filters get their own band under a hairline.
-  if state.tag_list and #state.tag_list > 0 then
+  local show_tags = sample_map_tag_band_visible()
+  if show_tags and state.tag_list and #state.tag_list > 0 then
     r.ImGui_Dummy(ctx, 1, 1)
     local lx, ly = r.ImGui_GetCursorScreenPos(ctx)
     local dl = r.ImGui_GetWindowDrawList(ctx)
@@ -376,9 +377,65 @@ function render_sample_map_toolbar()
     r.ImGui_Dummy(ctx, 1, 3)
   end
   r.ImGui_Dummy(ctx, 0, 0)
-  render_tag_filters()
+  if show_tags then
+    render_tag_filters()
+    -- Search row + band, so moving from the search field to a tag (and the
+    -- click on it, which takes focus from the field) keeps the band open.
+    local by1 = select(2, r.ImGui_GetCursorScreenPos(ctx))
+    state.tag_band_rect = { x0 = row_x0, y0 = row_y0, x1 = right_x, y1 = by1 }
+  else
+    state.hovered_tag = nil
+    state.tag_band_rect = nil
+  end
   render_tag_delete_popup()
   render_library_tag_path_menu()
+end
+
+-- "Hide tags until search is clicked" (Settings, View menu). Off by default.
+-- Clicking the search field opens the tag band; it stays open while the
+-- field is focused, the mouse is over the search row or the band, a tag is
+-- being clicked, or a popup is open, and closes once none of those hold.
+function sample_map_tag_band_visible()
+  if not state.tags_hide_until_search then
+    state.tag_band_open = nil
+    return true
+  end
+  if state.sample_filter_focused then
+    state.tag_band_open = true
+    return true
+  end
+  if not state.tag_band_open then
+    return false
+  end
+  local keep = false
+  local rect = state.tag_band_rect
+  if rect and r.ImGui_GetMousePos then
+    local mx, my = r.ImGui_GetMousePos(ctx)
+    local m = 6
+    if mx and my and mx >= rect.x0 - m and mx <= rect.x1 + m and my >= rect.y0 - m and my <= rect.y1 + m then
+      keep = true
+    end
+  end
+  if not keep and r.ImGui_IsAnyItemActive and r.ImGui_IsAnyItemActive(ctx) and rect then
+    keep = true
+  end
+  if not keep and r.ImGui_IsPopupOpen and r.ImGui_PopupFlags_AnyPopupId then
+    local ok, open = pcall(r.ImGui_IsPopupOpen, ctx, "", r.ImGui_PopupFlags_AnyPopupId())
+    keep = ok and open == true
+  end
+  if not keep then
+    state.tag_band_open = false
+  end
+  return keep
+end
+
+function set_tags_hide_until_search(on)
+  on = on == true
+  if (state.tags_hide_until_search == true) ~= on then
+    state.tags_hide_until_search = on
+    state.tag_band_open = nil
+    save_config()
+  end
 end
 
 MAP_UI_GAP = 4

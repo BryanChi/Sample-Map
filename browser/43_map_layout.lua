@@ -356,8 +356,12 @@ function render_filter_input(reserve_right)
   end
 
   -- "+N" overflow labels draw as the dotless "__hidden_tags__" chip.
+  -- Measured with the same compact padding they are drawn with.
   local function calc_tag_button_width(label)
-    return tag_chip_width(label, label:sub(1, 1) == "+" and "__hidden_tags__" or label)
+    tag_chips_compact_push()
+    local w = tag_chip_width(label, label:sub(1, 1) == "+" and "__hidden_tags__" or label)
+    tag_chips_compact_pop()
+    return w
   end
 
   local function calc_compact_button_width(label)
@@ -492,9 +496,15 @@ function render_filter_input(reserve_right)
 
     local ret, input
     if r.ImGui_InputTextWithHint then
+      local hint = "Search samples..."
+      if has_active_tags then
+        hint = "Type to refine..."
+      elseif state.tags_hide_until_search and not state.tag_band_open then
+        hint = "Search or pick tags..."
+      end
       ret, input = r.ImGui_InputTextWithHint(
         ctx, "##sample_filter",
-        has_active_tags and "Type to refine..." or "Search samples...",
+        hint,
         state.filter or ""
       )
     else
@@ -510,9 +520,19 @@ function render_filter_input(reserve_right)
       or (r.ImGui_IsItemDeactivated and r.ImGui_IsItemDeactivated(ctx))
       or (r.ImGui_IsItemFocused and r.ImGui_IsItemFocused(ctx))
     local input_hovered = r.ImGui_IsItemHovered(ctx)
+    -- Only while typing: focus can linger on the field after a click elsewhere.
+    state.sample_filter_focused = (r.ImGui_IsItemActive and r.ImGui_IsItemActive(ctx)) and true or false
+    local _, input_y1 = r.ImGui_GetItemRectMax(ctx)
+    local _, input_y0 = r.ImGui_GetItemRectMin(ctx)
 
+    tag_chips_compact_push()
     for _, tag in ipairs(visible_tags) do
       r.ImGui_SameLine(ctx, 0, spacing)
+      -- Compact pills are shorter than the field; centre them on it.
+      local _, th = r.ImGui_CalcTextSize(ctx, tag)
+      local chip_h = th + TAG_CHIP_COMPACT_PAD_Y * 2
+      local _, wy = r.ImGui_GetWindowPos(ctx)
+      r.ImGui_SetCursorPosY(ctx, (input_y0 + input_y1) * 0.5 - chip_h * 0.5 - wy)
       if tag:sub(1, 1) == "+" then
         draw_tag_button(ctx, tag, false, "__hidden_tags__", "filter_active_", { allow_delete = false })
       else
@@ -521,9 +541,11 @@ function render_filter_input(reserve_right)
         end
       end
     end
+    tag_chips_compact_pop()
 
     if has_active_tags then
       r.ImGui_SameLine(ctx, 0, spacing)
+      r.ImGui_SetCursorPosY(ctx, 4)
       if draw_ui_button("filter_clear_active_tags", clear_label, nil, nil, { compact = true, style = "danger" }) then
         state.active_tags = {}
         state.selected_tag_parents = {}
@@ -725,6 +747,10 @@ function render_header()
       if seq_floating then dock_floating_view("sequencer") else pop_out_view("sequencer") end
     end
     r.ImGui_Separator(ctx)
+    if r.ImGui_MenuItem(ctx, "Hide Tags Until Search Is Clicked", nil, state.tags_hide_until_search == true) then
+      set_tags_hide_until_search(not state.tags_hide_until_search)
+    end
+    menu_item_tooltip("Keep the Sample Map tag rows hidden.\nClick the search field to show them.")
     if r.ImGui_BeginMenu(ctx, "Collapse Children Tags") then
       local mode = state.collapse_children_tags or "off"
       if r.ImGui_MenuItem(ctx, "Off", nil, mode == "off") then
