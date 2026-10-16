@@ -575,6 +575,10 @@ end
 -- --- ImGui widgets ---
 
 local function widget_kind(n)
+  -- Enum constants (InputTextFlags_CharsScientific, Col_Text...) aren't widgets.
+  if n:find("_", 1, true) then
+    return nil
+  end
   if n == "Button" or n == "SmallButton" or n == "ArrowButton" or n == "ImageButton" then
     return "click"
   elseif n == "InvisibleButton" then
@@ -698,14 +702,16 @@ local function wrap_widget(kind, name, orig, api, prefix)
     extra.activated = rawget(api, prefix .. "IsItemActivated")
     extra.deactivated = rawget(api, prefix .. "IsItemDeactivated")
   end
-  local w = function(c, a1, a2, ...)
+  -- Forward exactly the arguments given: ReaImGui rejects extra nils.
+  local w = function(...)
+    local c, a1, a2 = ...
     if not T.on or T.busy or c == ctx then
-      return orig(c, a1, a2, ...)
+      return orig(...)
     end
     -- busy while the original runs, so a shim function that calls a wrapped
     -- reaper.ImGui_* function isn't logged twice.
     T.busy = true
-    local r1, r2, r3, r4, r5, r6 = orig(c, a1, a2, ...)
+    local r1, r2, r3, r4, r5, r6 = orig(...)
     extra.c = c
     pcall(log_widget, kind, name, api, prefix, extra, a1, a2, r1, r2, r3, r4)
     T.busy = false
