@@ -105,6 +105,7 @@ function sm_draw_toast()
 end
 
 function sm_report_error(site, err)
+  if CRSFeedback and CRSFeedback.Trace then CRSFeedback.Trace("ERROR in " .. tostring(site) .. ": " .. tostring(err)) end
   site = tostring(site or "?")
   log("[error] " .. site .. ": " .. tostring(err))
   state.sm_error_sites = state.sm_error_sites or {}

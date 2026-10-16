@@ -120,3 +120,6 @@ function sm_open_feedback(opts)
     sm_notify("The feedback window is missing; update Sample Map to get it.", "warn")
   end
 end
+
+-- Load the module at startup so a bug recording left on resumes with Sample Map.
+pcall(sm_feedback_module)
