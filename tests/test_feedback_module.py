@@ -133,6 +133,8 @@ def _rec_runtime(**kw):
             MenuItem = function(c, label) return true end,
             Text = function() end,
           }
+          -- Like the builtin shim: unknown fields raise an error.
+          setmetatable(IM, { __index = function(_, k) error("no field " .. tostring(k)) end })
         """)
         opts.imgui = L.eval("IM")
 

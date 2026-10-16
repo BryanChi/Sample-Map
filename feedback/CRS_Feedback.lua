@@ -852,7 +852,8 @@ end
 local function host_imgui_tables()
   local list = {}
   local h = cfg.imgui
-  if type(h) == "table" and h[1] then
+  -- rawget: the builtin shim raises an error for missing fields.
+  if type(h) == "table" and rawget(h, 1) then
     for _, t in ipairs(h) do list[#list + 1] = t end
   elseif type(h) == "table" then
     list[1] = h
