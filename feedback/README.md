@@ -77,6 +77,24 @@ A new script needs a line in `DEFAULT_SCRIPTS` in `relay/src/index.js` (id → r
 - Usage log, only when the box is ticked: lines from `CRSFeedback.Log` (kept in `<REAPER>/Data/CRS_Feedback/<script>.log`, so the last session's lines survive a crash) and the script's own `get_log` lines. "Show what's sent" displays exactly this text. The REAPER folder becomes `<REAPER>`, the home folder `~`, and user names in `/Users/…`, `/home/…` and `C:\Users\…` become `<user>`.
 - Pictures are copied to a temp name before upload, so original file names don't leak.
 
+## Bug recording
+
+For bugs that are hard to pin down. On the window's **Bug** tab, users press **Start bug recording**; the window closes and a small red "Recording bug details" badge stays on top. They repeat the problem, then press **Stop and send** on the badge: the window opens again with the recording attached (a checkbox, plus "Show what's sent" to read it). **Stop** keeps the recording for later; **Discard recording** in the window throws it away.
+
+While it's on, the script runs a little slower and the module writes down:
+
+- every REAPER call the script makes that changes something (`Set…`, `Add…`, `Delete…`, `Insert…`, `Main_OnCommand`, `Undo_…`, `GetSet…` when setting, and so on), with its arguments and result; tracks are shown as `<track 3 "Bass">`;
+- every button, menu item, checkbox, slider, drag, combo and text field the user changes, plus shortcut keys and mouse clicks the script reacts to (through the host's ImGui table and `reaper.ImGui_*`);
+- errors with a traceback (from `reaper.defer` callbacks), frames slower than 50 ms, and every 10 s the frame count, slowest frame and Lua memory;
+- REAPER undo points and transport changes;
+- the host's own lines: `CRSFeedback.Trace("...")`, and `get_state()` at start and stop if the host gives one.
+
+Repeats in a row collapse into one line with a count (a slider dragged, a parameter set every frame). It's kept in memory (last 6,000 lines) and in `<REAPER>/Data/CRS_Feedback/<script>.recording.log`. Recording stays on across a restart, so startup bugs are caught; if the host's window closes, the badge closes with it. A report includes at most the last 420 KB of it, which fits the relay's 512 KB log limit (the issue shows the last 30,000 characters and links the rest).
+
+Privacy: typed text is never recorded, only its length. ExtState values and shell commands are hidden, e-mail addresses and long tokens (license keys, hashes) are masked, and personal folder names are scrubbed as in the usage log.
+
+Optional `Setup` fields: `imgui` (the script's ImGui API table; globals `ImGui` and `im` are found on their own), `get_state` (returns lines describing the script's state), `on_recording(on)` (switch the script's own debug output). Call `Setup` at startup so a recording left on resumes.
+
 ## Spam and limits
 
 - Per IP: 5 reports per 10 minutes, 20 per day (plus a 5-per-minute burst limit). All users together: 300 per day. IPs are only stored as salted hashes.
