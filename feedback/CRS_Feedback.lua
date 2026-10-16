@@ -575,7 +575,8 @@ end
 -- --- ImGui widgets ---
 
 local function widget_kind(n)
-  -- Enum constants (InputTextFlags_CharsScientific, Col_Text...) aren't widgets.
+  -- Constants (InputTextFlags_CharsScientific, Key_A...) have an underscore;
+  -- widget functions don't.
   if n:find("_", 1, true) then
     return nil
   end
@@ -702,20 +703,21 @@ local function wrap_widget(kind, name, orig, api, prefix)
     extra.activated = rawget(api, prefix .. "IsItemActivated")
     extra.deactivated = rawget(api, prefix .. "IsItemDeactivated")
   end
-  -- Forward exactly the arguments given: ReaImGui rejects extra nils.
-  local w = function(...)
-    local c, a1, a2 = ...
+  -- Arguments and results pass through with their exact count: ReaImGui
+  -- rejects extra (even nil) arguments.
+  local w = function(c, ...)
     if not T.on or T.busy or c == ctx then
-      return orig(...)
+      return orig(c, ...)
     end
     -- busy while the original runs, so a shim function that calls a wrapped
     -- reaper.ImGui_* function isn't logged twice.
     T.busy = true
-    local r1, r2, r3, r4, r5, r6 = orig(...)
+    local res = table.pack(orig(c, ...))
     extra.c = c
-    pcall(log_widget, kind, name, api, prefix, extra, a1, a2, r1, r2, r3, r4)
+    local a1, a2 = ...
+    pcall(log_widget, kind, name, api, prefix, extra, a1, a2, res[1], res[2], res[3], res[4])
     T.busy = false
-    return r1, r2, r3, r4, r5, r6
+    return table.unpack(res, 1, res.n)
   end
   T.is_wrapper[w] = true
   return w

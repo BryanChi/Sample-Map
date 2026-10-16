@@ -132,6 +132,9 @@ def _rec_runtime(**kw):
             InputText = function(c, label, t) return true, "my secret licence" end,
             MenuItem = function(c, label) return true end,
             Text = function() end,
+            -- Like ReaImGui: constants take no arguments, functions reject extra ones.
+            InputTextFlags_CharsScientific = function(...) assert(select("#", ...) == 0, "expected 0 arguments") return 4 end,
+            Checkbox = function(c, label, v, ...) assert(select("#", ...) == 0, "too many arguments") return true, not v end,
           }
           -- Like the builtin shim: unknown fields raise an error.
           setmetatable(IM, { __index = function(_, k) error("no field " .. tostring(k)) end })
@@ -165,6 +168,8 @@ def test_recording_logs_changes_and_ui_and_restores_functions():
       IM.SliderDouble("ctx", "Gain", 0.25)
       IM.InputText("ctx", "License key", "")
       IM.MenuItem("ctx", "Open settings...")
+      assert(IM.InputTextFlags_CharsScientific() == 4)
+      assert(select("#", IM.Checkbox("ctx", "Loop", false)) == 2)
       reaper.SetExtState("FXD", "license", "ABCD-1234-SECRET", true)
       reaper.ExecProcess("/usr/bin/curl -d key=ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 https://x")
     """)
