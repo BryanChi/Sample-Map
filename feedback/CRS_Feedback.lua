@@ -1240,8 +1240,7 @@ local function new_state(opts)
     contact = r.GetExtState and r.GetExtState("CRS_Feedback", "contact") or "",
     include_log = opts.include_log ~= false,
     include_trace = opts.include_trace ~= false,
-    show_log = false,
-    log_text = nil,
+    viewer = nil, -- { kind = "trace"|"sent", text, lines }: the separate viewer window
     images = {}, -- { path, name, bytes, img }
     status = nil, -- { kind = "info"|"error"|"ok", text }
     phase = "edit", -- edit | sending | sent
@@ -2093,6 +2092,183 @@ local function stop_hint()
   return "Press Stop and send on the recording badge" .. (cfg.record_hint and (" " .. cfg.record_hint) or "") .. "."
 end
 
+-- Window styles shared by the feedback window and the recording badge.
+local function push_style()
+  local n_col, n_var = 0, 0
+  local function col(id, v)
+    if id then
+      ImGui.PushStyleColor(ctx, id, v)
+      n_col = n_col + 1
+    end
+  end
+  local function var(id, a, b)
+    if id then
+      if b then
+        ImGui.PushStyleVar(ctx, id, a, b)
+      else
+        ImGui.PushStyleVar(ctx, id, a)
+      end
+      n_var = n_var + 1
+    end
+  end
+  col(im_opt("Col_WindowBg"), P.page)
+  col(im_opt("Col_ChildBg"), 0x00000000)
+  col(im_opt("Col_PopupBg"), P.page)
+  col(im_opt("Col_Border"), P.line2)
+  col(im_opt("Col_Text"), P.ink)
+  col(im_opt("Col_TextDisabled"), P.ink3)
+  col(im_opt("Col_TextSelectedBg"), A(P.acc, 0x55))
+  col(im_opt("Col_FrameBg"), P.page)
+  col(im_opt("Col_FrameBgHovered"), P.page)
+  col(im_opt("Col_FrameBgActive"), P.page)
+  col(im_opt("Col_ScrollbarBg"), 0x00000000)
+  col(im_opt("Col_ScrollbarGrab"), 0xFFFFFF1F)
+  col(im_opt("Col_ScrollbarGrabHovered"), 0xFFFFFF38)
+  col(im_opt("Col_ScrollbarGrabActive"), P.acc)
+  col(im_opt("Col_NavHighlight"), A(P.acc, 0x80))
+  var(im_opt("StyleVar_WindowPadding"), 0, 0)
+  var(im_opt("StyleVar_WindowRounding"), 0)
+  var(im_opt("StyleVar_WindowBorderSize"), 1)
+  var(im_opt("StyleVar_ChildRounding"), 0)
+  var(im_opt("StyleVar_FrameRounding"), 0)
+  var(im_opt("StyleVar_PopupRounding"), 0)
+  var(im_opt("StyleVar_ItemSpacing"), 0, 0)
+  var(im_opt("StyleVar_ScrollbarSize"), 8)
+  var(im_opt("StyleVar_ScrollbarRounding"), 0)
+  return n_col, n_var
+end
+
+local WIN_W = 620
+local HEADER_H = 56
+local PAD = 26
+
+-- --- Viewer: a separate window with the bug recording or what a report sends ---
+-- Its text is built when it opens (and on Refresh or an option change), not every frame.
+
+local function viewer_text(kind)
+  if kind == "trace" then
+    local lines = recording_lines()
+    if #lines == 0 then
+      return "(Nothing recorded yet.)"
+    end
+    return F.ScrubPaths(table.concat(lines, "\n"))
+  end
+  local trace = S.include_trace and (T.on or F.HasRecording())
+  if not (S.include_log or trace) then
+    return "(No log will be sent with this report: the usage log is off and no bug recording is attached.)"
+  end
+  return F.BuildLogText({ usage = S.include_log, trace = trace })
+end
+
+local function open_viewer(kind)
+  local text = viewer_text(kind)
+  local _, n = text:gsub("\n", "")
+  S.viewer = { kind = kind, text = text, lines = n + 1, built = os.time() }
+end
+
+-- Rebuild an open viewer after something it shows changed.
+local function refresh_viewer()
+  if not (S and S.viewer) then
+    return
+  end
+  if S.viewer.kind == "trace" and not (T.on or F.HasRecording()) then
+    S.viewer = nil
+  else
+    open_viewer(S.viewer.kind)
+  end
+end
+
+local function draw_viewer()
+  local v = S.viewer
+  local n_col, n_var = push_style()
+  local cond_first, cond_appear = im_opt("Cond_FirstUseEver"), im_opt("Cond_Appearing")
+  if cond_first then
+    ImGui.SetNextWindowSize(ctx, 720, 520, cond_first)
+  end
+  if cond_appear and S.win_x and not v.placed then
+    ImGui.SetNextWindowPos(ctx, S.win_x + WIN_W + 12, S.win_y, cond_appear)
+    v.placed = true
+  end
+  if im_opt("SetNextWindowSizeConstraints") then
+    ImGui.SetNextWindowSizeConstraints(ctx, 440, 260, 4000, 4000)
+  end
+  local flags = (im_opt("WindowFlags_NoCollapse") or 0) | (im_opt("WindowFlags_NoDocking") or 0)
+    | (im_opt("WindowFlags_NoTitleBar") or 0) | (im_opt("WindowFlags_NoScrollbar") or 0)
+    | (im_opt("WindowFlags_NoScrollWithMouse") or 0)
+  local trace = v.kind == "trace"
+  local visible, open = ImGui.Begin(ctx, "Feedback viewer - " .. cfg.script_name .. "###CRS_Viewer", true, flags)
+  local close = open == false
+  if visible then
+    local x, y = ImGui.GetWindowPos(ctx)
+    local w, h = ImGui.GetWindowSize(ctx)
+    local dl = ImGui.GetWindowDrawList(ctx)
+    local hh = 52
+    ImGui.DrawList_AddLine(dl, x, y + hh, x + w, y + hh, P.line, 1)
+    if trace then
+      ImGui.DrawList_AddRectFilled(dl, x, y, x + 2, y + hh, P.red)
+      if T.on then
+        local a = math.floor((0.35 + 0.65 * pulse()) * 255)
+        ImGui.DrawList_AddCircleFilled(dl, x + 24, y + hh / 2, 5, A(P.red, a))
+      else
+        ImGui.DrawList_AddCircleFilled(dl, x + 24, y + hh / 2, 5, P.red)
+      end
+    else
+      ImGui.DrawList_AddRect(dl, x + 19, y + hh / 2 - 5, x + 29, y + hh / 2 + 5, P.acc)
+    end
+    local tx = caps(dl, 11, x + 40, y + (hh - 11) / 2 - 1, trace and P.red or P.ink, trace and "Bug recording" or "What's sent", true)
+    local sub = string.format("%d lines  /  %s", v.lines, fmt_bytes(#v.text))
+    if trace then
+      sub = string.format("%d events  /  %s  /  ", T.events, F.RecordingDuration()) .. sub
+    end
+    caps(dl, 10, tx + 16, y + (hh - 10) / 2 - 1, P.ink3, sub)
+
+    local cs = 28
+    local cx, cy = x + w - 14 - cs, y + (hh - cs) / 2
+    local cclick, chov = hit("##viewer_close", cx, cy, cs, cs)
+    ImGui.DrawList_AddRect(dl, cx, cy, cx + cs, cy + cs, chov and 0xFFFFFF80 or P.line2)
+    local cc, k = chov and P.ink or P.ink2, 4.5
+    ImGui.DrawList_AddLine(dl, cx + cs / 2 - k, cy + cs / 2 - k, cx + cs / 2 + k, cy + cs / 2 + k, cc, 1.4)
+    ImGui.DrawList_AddLine(dl, cx + cs / 2 + k, cy + cs / 2 - k, cx + cs / 2 - k, cy + cs / 2 + k, cc, 1.4)
+    if cclick then
+      close = true
+    end
+    local copied = v.copied_t and now_s() - v.copied_t < 1.5
+    local cw = btn_w("Copied")
+    local bx = cx - 10 - cw
+    if btn("##viewer_copy", copied and "Copied" or "Copy", bx, y + (hh - BTN_H) / 2, nil, cw) then
+      ImGui.SetClipboardText(ctx, v.text)
+      v.copied_t = now_s()
+    end
+    local rw = btn_w("Refresh")
+    bx = bx - 8 - rw
+    if btn("##viewer_refresh", "Refresh", bx, y + (hh - BTN_H) / 2, nil, rw) then
+      open_viewer(v.kind)
+      S.viewer.placed = true
+      v = S.viewer
+    end
+    tip(trace and "Read the recording again (it keeps growing while recording is on)." or "Build the text again.")
+
+    ImGui.SetCursorScreenPos(ctx, x + 12, y + hh + 12)
+    ImGui.PushStyleColor(ctx, ImGui.Col_FrameBg, P.page)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Border, P.line)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, P.ink2)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameBorderSize, 1)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, 10, 8)
+    if FONTS.mono11 then ImGui.PushFont(ctx, FONTS.mono11) end
+    ImGui.InputTextMultiline(ctx, "##viewer_text", v.text, math.max(1, w - 24), math.max(1, h - hh - 24),
+      ImGui.InputTextFlags_ReadOnly)
+    if FONTS.mono11 then ImGui.PopFont(ctx) end
+    ImGui.PopStyleVar(ctx, 2)
+    ImGui.PopStyleColor(ctx, 3)
+    ImGui.End(ctx)
+  end
+  ImGui.PopStyleVar(ctx, n_var)
+  ImGui.PopStyleColor(ctx, n_col)
+  if close then
+    S.viewer = nil
+  end
+end
+
 local STEPS = {
   "Press Start bug recording. This window hides and a small recording badge appears.",
   "Do what causes the problem again.",
@@ -2110,20 +2286,28 @@ local function draw_recording_card(dl, x, y, w)
     if btn("##recstop", "Stop and attach", x, y + 10, "go") then
       F.StopRecording()
       S.include_trace = true
-      S.log_text = nil
+      refresh_viewer()
     end
+    if btn("##recview", "View", x + btn_w("Stop and attach") + 8, y + 10) then
+      open_viewer("trace")
+    end
+    tip("Open what's been recorded so far in a separate window.")
     return y + 10 + BTN_H
   elseif F.HasRecording() then
-    local dw = btn_w("Discard")
-    local v, changed, by = switch_row("##rectoggle", x, y, w - dw - 16, S.include_trace, "Attach the bug recording",
+    local dw, vw = btn_w("Discard"), btn_w("View")
+    local v, changed, by = switch_row("##rectoggle", x, y, w - dw - vw - 24, S.include_trace, "Attach the bug recording",
       string.format("%d events, %s long.", T.events, F.RecordingDuration()))
     S.include_trace = v
     if changed then
-      S.log_text = nil
+      refresh_viewer()
     end
+    if btn("##recview", "View", x + w - dw - 8 - vw, y - 4, nil, vw) then
+      open_viewer("trace")
+    end
+    tip("Open the recording in a separate window.")
     if btn("##recdiscard", "Discard", x + w - dw, y - 4, nil, dw) then
       F.DiscardRecording()
-      S.log_text = nil
+      refresh_viewer()
     end
     return math.max(by, y + BTN_H)
   end
@@ -2186,32 +2370,18 @@ report_kind = function()
 end
 
 local function draw_send_card(dl, x, y, w)
-  local lw = btn_w("Hide what's sent")
+  local lw = btn_w("Show what's sent")
   local v, changed, by = switch_row("##uselog", x, y, w - lw - 16, S.include_log, "Include usage log",
     "Script version, REAPER version, OS and recent script messages. Personal folder names are removed.")
   S.include_log = v
   if changed then
-    S.log_text = nil
+    refresh_viewer()
   end
-  if btn("##showlog", S.show_log and "Hide what's sent" or "Show what's sent", x + w - lw, y - 4, nil, lw) then
-    S.show_log = not S.show_log
-    S.log_text = nil
+  if btn("##showlog", "Show what's sent", x + w - lw, y - 4, nil, lw) then
+    open_viewer("sent")
   end
+  tip("Open the exact log this report will send, in a separate window.")
   y = by + 12
-  if S.show_log then
-    if not S.log_text then
-      local trace = S.include_trace and (T.on or F.HasRecording())
-      S.log_text = (S.include_log or trace) and F.BuildLogText({ usage = S.include_log, trace = trace })
-        or "(no log will be sent)"
-    end
-    push_input_style()
-    ImGui.SetCursorScreenPos(ctx, x, y)
-    ImGui.PushStyleColor(ctx, ImGui.Col_Text, P.ink2)
-    ImGui.InputTextMultiline(ctx, "##logpreview", S.log_text, w, 120, ImGui.InputTextFlags_ReadOnly)
-    ImGui.PopStyleColor(ctx)
-    y = item_bottom() + 14
-    pop_input_style()
-  end
   ImGui.DrawList_AddLine(dl, x, y, x + w, y, P.soft, 1)
   y = field_label(dl, x, y + 14, "Contact (optional)")
   push_input_style()
@@ -2285,55 +2455,7 @@ local function draw_sent(x, y, w)
   return y + BTN_H
 end
 
--- Window styles shared by the feedback window and the recording badge.
-local function push_style()
-  local n_col, n_var = 0, 0
-  local function col(id, v)
-    if id then
-      ImGui.PushStyleColor(ctx, id, v)
-      n_col = n_col + 1
-    end
-  end
-  local function var(id, a, b)
-    if id then
-      if b then
-        ImGui.PushStyleVar(ctx, id, a, b)
-      else
-        ImGui.PushStyleVar(ctx, id, a)
-      end
-      n_var = n_var + 1
-    end
-  end
-  col(im_opt("Col_WindowBg"), P.page)
-  col(im_opt("Col_ChildBg"), 0x00000000)
-  col(im_opt("Col_PopupBg"), P.page)
-  col(im_opt("Col_Border"), P.line2)
-  col(im_opt("Col_Text"), P.ink)
-  col(im_opt("Col_TextDisabled"), P.ink3)
-  col(im_opt("Col_TextSelectedBg"), A(P.acc, 0x55))
-  col(im_opt("Col_FrameBg"), P.page)
-  col(im_opt("Col_FrameBgHovered"), P.page)
-  col(im_opt("Col_FrameBgActive"), P.page)
-  col(im_opt("Col_ScrollbarBg"), 0x00000000)
-  col(im_opt("Col_ScrollbarGrab"), 0xFFFFFF1F)
-  col(im_opt("Col_ScrollbarGrabHovered"), 0xFFFFFF38)
-  col(im_opt("Col_ScrollbarGrabActive"), P.acc)
-  col(im_opt("Col_NavHighlight"), A(P.acc, 0x80))
-  var(im_opt("StyleVar_WindowPadding"), 0, 0)
-  var(im_opt("StyleVar_WindowRounding"), 0)
-  var(im_opt("StyleVar_WindowBorderSize"), 1)
-  var(im_opt("StyleVar_ChildRounding"), 0)
-  var(im_opt("StyleVar_FrameRounding"), 0)
-  var(im_opt("StyleVar_PopupRounding"), 0)
-  var(im_opt("StyleVar_ItemSpacing"), 0, 0)
-  var(im_opt("StyleVar_ScrollbarSize"), 8)
-  var(im_opt("StyleVar_ScrollbarRounding"), 0)
-  return n_col, n_var
-end
 
-local WIN_W = 620
-local HEADER_H = 56
-local PAD = 26
 
 -- Usable screen height, to keep the window on screen (the body scrolls).
 local function max_body_h()
@@ -2433,6 +2555,9 @@ local function draw_feedback()
   end
   ImGui.PopStyleVar(ctx, n_var)
   ImGui.PopStyleColor(ctx, n_col)
+  if S.viewer and not hidden then
+    draw_viewer()
+  end
 
   if open == false or S.close then
     local send = S.send
