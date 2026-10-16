@@ -2,7 +2,7 @@
 -- CRS Feedback: an in-script "Send feedback" window shared by BryanChi's REAPER
 -- scripts (Sample Map, FX Devices, Vertical FX List).
 --
--- A report (kind, title, note, optional contact, optional usage log, up to 5
+-- A report (title, note, optional contact, optional usage log, up to 5
 -- pictures) is posted with curl to a small relay (feedback/relay in the
 -- Sample-Map repo). The relay holds the GitHub token and files the report as
 -- an issue on the script's repository. No token ever ships with a script.
@@ -20,8 +20,15 @@
 --   if ImGui.MenuItem(ctx, "Send feedback...") then Feedback.Open() end
 --   Feedback.Defer(loop)                  -- optional: r.defer that reports crashes
 --
--- Bug recording (see the "Bug recording" section): the window's Bug tab has a
--- "Start bug recording" button; hosts can also call Feedback.StartRecording().
+-- Look: the "Monolith" style (black, square controls, display and mono caps).
+-- Optional Setup field fonts = { title = <Anton .ttf>, mono = <JetBrains Mono
+-- .ttf>, mono_bold, body, body_bold } loads those files into the window's own
+-- context; anything missing falls back to a system font.
+--
+-- Bug recording (see the "Bug recording" section): the window opens with a
+-- "Start bug recording" button; hosts can also call Feedback.StartRecording(),
+-- and Feedback.StopAndReport() to stop and open the window with it attached.
+-- record_hint = "or ..." in Setup adds where else recording can be stopped.
 -- Optional Setup fields for it: imgui = the script's ImGui API table (globals
 -- ImGui / im are found on their own), get_state = function returning lines
 -- describing the script's state, on_recording = function(on) to switch the
@@ -1221,19 +1228,13 @@ F._open_url = open_url
 
 -- --- Window state ------------------------------------------------------------
 
-local KINDS = {
-  { id = "bug", label = "Bug", hint = "What did you do, what did you expect, and what happened instead?" },
-  { id = "idea", label = "Idea", hint = "What would you like the script to do?" },
-  { id = "question", label = "Question", hint = "What would you like to know?" },
-  { id = "other", label = "Other", hint = "Tell us anything." },
-}
-
 local S -- window state; nil while closed
+local report_kind -- set further down
 
 local function new_state(opts)
   opts = opts or {}
   return {
-    kind = opts.kind or "bug",
+    kind = opts.kind, -- sent as "bug" when a recording is attached, else this or "other"
     title = opts.title or "",
     note = opts.note or "",
     contact = r.GetExtState and r.GetExtState("CRS_Feedback", "contact") or "",
@@ -1413,7 +1414,7 @@ end
 local function report_as_text()
   local env = environment()
   local t = {
-    string.format("[%s] %s", S.kind, trim(S.title)),
+    string.format("[%s] %s", report_kind(), trim(S.title)),
     string.format("%s %s - REAPER %s - %s", cfg.script_name, cfg.version, env.reaper, env.os),
     "",
     trim(S.note),
@@ -1468,6 +1469,7 @@ local function start_send()
   if T.on and S.include_trace then
     F.StopRecording()
   end
+  S.kind = report_kind()
   local payload, err = F._build_payload(S)
   if not payload then
     set_status("error", err)
@@ -1618,21 +1620,672 @@ local function load_imgui()
   return ImGui
 end
 
-local COL = {
-  bg = 0x1E2126FF,
-  panel = 0x272B32FF,
-  frame = 0x2F343DFF,
-  frame_hover = 0x3A404BFF,
-  accent = 0x4C8DFFFF,
-  accent_hover = 0x6AA0FFFF,
-  text = 0xE6E8EBFF,
-  mute = 0x9BA3AFFF,
-  error = 0xFF7A7AFF,
-  ok = 0x6FD98CFF,
-  rec = 0xFF5A5AFF,
-  border = 0x3A3F48FF,
+-- ImGui field that may not exist in this ReaImGui version (the builtin shim
+-- raises an error for unknown names).
+local function im_opt(name)
+  local ok, v = pcall(function() return ImGui[name] end)
+  return ok and v or nil
+end
+
+-- --- Look: "Monolith" --------------------------------------------------------
+-- Black, faint column guides, display caps, letter-spaced mono labels, square
+-- controls, one green accent (red for bug recording). Drawn on the draw list
+-- over invisible buttons; text boxes are ImGui widgets styled to match.
+
+local P = {
+  page = 0x000000FF,
+  card = 0x0A0A0AFF,
+  acc = 0x49CC85FF,
+  acc_hi = 0x5FDA97FF,
+  ink = 0xF2F2F2FF,
+  ink2 = 0x9A9A9AFF,
+  ink3 = 0x5F5F5FFF,
+  line = 0xFFFFFF1F,
+  line2 = 0xFFFFFF33,
+  soft = 0xFFFFFF12,
+  guide = 0xFFFFFF0B,
+  amber = 0xF6C344FF,
+  red = 0xEF5A5AFF,
+  red_hi = 0xFF7A7AFF,
+}
+local COL = { error = P.red, ok = P.acc, mute = P.ink2, rec = P.red }
+
+local function A(c, a)
+  return (c & 0xFFFFFF00) | (math.floor(a) & 0xFF)
+end
+
+local function mix(a, b, t)
+  local function m(s)
+    local ca, cb = (a >> s) & 0xFF, (b >> s) & 0xFF
+    return math.floor(ca + (cb - ca) * t + 0.5)
+  end
+  return (m(24) << 24) | (m(16) << 16) | (m(8) << 8) | m(0)
+end
+
+-- Smooth 0..1 pulse for the recording dot.
+local function pulse()
+  return 0.5 + 0.5 * math.sin(now_s() * 4.2)
+end
+
+-- Fonts live in the module's own context. Setup's `fonts` may name font files
+-- ({ title = Anton, mono = JetBrains Mono, mono_bold, body, body_bold });
+-- anything missing or unreadable falls back to a system family.
+local FONT_SPECS = {
+  title18 = { "title", 18 }, title22 = { "title", 22 }, title30 = { "title", 30 },
+  mono10 = { "mono", 10 }, mono11 = { "mono", 11 }, monoB10 = { "mono_bold", 10 }, monoB11 = { "mono_bold", 11 },
+  body13 = { "body", 13 }, bold13 = { "body_bold", 13 },
+}
+local FONT_FALLBACK = {
+  title = { "sans-serif", true }, mono = { "monospace" }, mono_bold = { "monospace", true },
+  body = { "sans-serif" }, body_bold = { "sans-serif", true },
+}
+local FONT_FILE_FALLBACK = { mono_bold = "mono", body_bold = "body" }
+local FONTS = {}
+local char_w_cache = {}
+
+local function load_fonts()
+  FONTS, char_w_cache = {}, {}
+  local create, attach = im_opt("CreateFont"), im_opt("Attach")
+  if not create or not attach then
+    return
+  end
+  local files = type(cfg.fonts) == "table" and cfg.fonts or {}
+  local bold = im_opt("FontFlags_Bold")
+  for key, spec in pairs(FONT_SPECS) do
+    local role, size = spec[1], spec[2]
+    local file = files[role] or files[FONT_FILE_FALLBACK[role] or ""]
+    local ok, f = false, nil
+    if type(file) == "string" and file_size(file) then
+      ok, f = pcall(create, file, size)
+    end
+    if not ok or not f then
+      local fb = FONT_FALLBACK[role]
+      if fb[2] and bold then
+        ok, f = pcall(create, fb[1], size, bold)
+      else
+        ok, f = pcall(create, fb[1], size)
+      end
+    end
+    if ok and f and pcall(attach, ctx, f) then
+      FONTS[key] = f
+    end
+  end
+end
+
+local function text_w(s, f)
+  if f then ImGui.PushFont(ctx, f) end
+  local w = ImGui.CalcTextSize(ctx, s)
+  if f then ImGui.PopFont(ctx) end
+  return w or 0
+end
+
+local function txt(dl, f, size, x, y, c, s)
+  if f then
+    ImGui.DrawList_AddTextEx(dl, f, size, x, y, c, s)
+  else
+    ImGui.DrawList_AddText(dl, x, y, c, s)
+  end
+end
+
+local function char_w(f, ch)
+  local k = f or "default"
+  local t = char_w_cache[k]
+  if not t then
+    t = {}
+    char_w_cache[k] = t
+  end
+  local w = t[ch]
+  if not w then
+    w = text_w(ch, f)
+    t[ch] = w
+  end
+  return w
+end
+
+-- Letter-spaced mono caps (the site's labels).
+local function caps_w(size, s, bold)
+  local f = FONTS[(bold and "monoB" or "mono") .. size]
+  local w, n = 0, 0
+  for _, cp in utf8.codes(tostring(s):upper()) do
+    w = w + char_w(f, utf8.char(cp))
+    n = n + 1
+  end
+  return w + math.max(0, n - 1) * size * 0.12
+end
+
+local function caps(dl, size, x, y, c, s, bold)
+  local f = FONTS[(bold and "monoB" or "mono") .. size]
+  for _, cp in utf8.codes(tostring(s):upper()) do
+    local ch = utf8.char(cp)
+    txt(dl, f, size, x, y, c, ch)
+    x = x + char_w(f, ch) + size * 0.12
+  end
+  return x
+end
+
+-- Display caps with a chrome sheen, painted in vertical bands.
+local CHROME = { { 0, 0x6B6B6BFF }, { .22, 0xF5F5F5FF }, { .38, 0x8A8A8AFF }, { .52, 0xFFFFFFFF }, { .70, 0x707070FF }, { 1, 0xE8E8E8FF } }
+local function chrome_at(t)
+  for i = 2, #CHROME do
+    local a, b = CHROME[i - 1], CHROME[i]
+    if t <= b[1] then
+      return mix(a[2], b[2], (t - a[1]) / (b[1] - a[1]))
+    end
+  end
+  return CHROME[#CHROME][2]
+end
+
+local function chrome_text(dl, f, size, x, y, s)
+  local w = text_w(s, f)
+  local bands = 28
+  local bw = w / bands
+  for i = 0, bands - 1 do
+    ImGui.DrawList_PushClipRect(dl, x + i * bw, y - 2, x + (i + 1) * bw + 0.5, y + size * 1.5, true)
+    txt(dl, f, size, x, y, chrome_at((i + 0.5) / bands), s)
+    ImGui.DrawList_PopClipRect(dl)
+  end
+  return w
+end
+
+-- Split s into lines no wider than w (words are never broken).
+local function wrap(s, f, w)
+  local lines = {}
+  for para in (tostring(s) .. "\n"):gmatch("([^\n]*)\n") do
+    local cur = ""
+    for word in para:gmatch("%S+") do
+      local cand = cur == "" and word or (cur .. " " .. word)
+      if cur ~= "" and text_w(cand, f) > w then
+        lines[#lines + 1] = cur
+        cur = word
+      else
+        cur = cand
+      end
+    end
+    lines[#lines + 1] = cur
+  end
+  return lines
+end
+
+-- Wrapped body text; returns the y under it.
+local function para(dl, x, y, w, s, c, f, line_h)
+  f = f or FONTS.body13
+  line_h = line_h or 18
+  for _, l in ipairs(wrap(s, f, w)) do
+    txt(dl, f, 13, x, y, c or P.ink2, l)
+    y = y + line_h
+  end
+  return y
+end
+
+-- Wrapped mono note (amber in the settings window); returns the y under it.
+local function note(dl, x, y, w, s, c)
+  local f = FONTS.mono10
+  for _, l in ipairs(wrap(s, f, w)) do
+    txt(dl, f, 10, x, y, c or P.amber, l)
+    y = y + 15
+  end
+  return y
+end
+
+local function hand()
+  local set, cur = im_opt("SetMouseCursor"), im_opt("MouseCursor_Hand")
+  if set and cur then
+    set(ctx, cur)
+  end
+end
+
+-- Reserve w x h at x, y as an invisible button.
+local function hit(id, x, y, w, h)
+  ImGui.SetCursorScreenPos(ctx, x, y)
+  local clicked = ImGui.InvisibleButton(ctx, id, math.max(1, w), math.max(1, h))
+  local hov, held = ImGui.IsItemHovered(ctx), ImGui.IsItemActive(ctx)
+  if hov then
+    hand()
+  end
+  return clicked, hov, held
+end
+
+local function tip(text)
+  if ImGui.IsItemHovered(ctx) then
+    ImGui.SetTooltip(ctx, text)
+  end
+end
+
+-- --- Controls (all square) ---
+
+local BTN_H = 30
+
+local function btn_w(label)
+  return caps_w(10, label, true) + 32
+end
+
+-- kind "go" = white fill (green on hover), otherwise a ghost button.
+local function btn(id, label, x, y, kind, w, disabled)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  w = w or btn_w(label)
+  local clicked, hov, held = hit(id, x, y, w, BTN_H)
+  if disabled then
+    clicked, hov, held = false, false, false
+  end
+  local tc
+  if kind == "go" then
+    ImGui.DrawList_AddRectFilled(dl, x, y, x + w, y + BTN_H, disabled and 0xFFFFFF59 or ((hov or held) and P.acc or 0xFFFFFFFF))
+    tc = 0x000000FF
+  else
+    if held then
+      ImGui.DrawList_AddRectFilled(dl, x, y, x + w, y + BTN_H, 0xFFFFFF14)
+    end
+    ImGui.DrawList_AddRect(dl, x, y, x + w, y + BTN_H, hov and 0xFFFFFF80 or P.line2)
+    tc = disabled and P.ink3 or P.ink
+  end
+  caps(dl, 10, x + (w - caps_w(10, label, true)) / 2, y + (BTN_H - 10) / 2 - 1 + (held and 1 or 0), tc, label, true)
+  return clicked
+end
+
+-- The big red "start bug recording" button.
+local REC_H = 46
+local function rec_button(id, label, x, y, w)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  local clicked, hov, held = hit(id, x, y, w, REC_H)
+  ImGui.DrawList_AddRectFilled(dl, x, y, x + w, y + REC_H, A(P.red, held and 0x5A or (hov and 0x3C or 0x24)))
+  ImGui.DrawList_AddRect(dl, x, y, x + w, y + REC_H, hov and P.red_hi or A(P.red, 0xB0))
+  local cx, cy = x + 24, y + REC_H / 2
+  ImGui.DrawList_AddCircle(dl, cx, cy, 10, A(P.red, hov and 0x90 or 0x50), 0, 1)
+  ImGui.DrawList_AddCircleFilled(dl, cx, cy, 6, hov and P.red_hi or P.red)
+  caps(dl, 11, x + 46, y + (REC_H - 11) / 2 - 1 + (held and 1 or 0), P.ink, label, true)
+  return clicked
+end
+
+local SWITCH_W, SWITCH_H = 40, 20
+local function switch(id, x, y, on)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  local clicked, hov = hit(id, x, y, SWITCH_W, SWITCH_H)
+  if on then
+    ImGui.DrawList_AddRectFilled(dl, x, y, x + SWITCH_W, y + SWITCH_H, hov and P.acc_hi or P.acc)
+    ImGui.DrawList_AddRectFilled(dl, x + SWITCH_W - 17, y + 3, x + SWITCH_W - 3, y + SWITCH_H - 3, 0x000000FF)
+  else
+    ImGui.DrawList_AddRect(dl, x, y, x + SWITCH_W, y + SWITCH_H, hov and 0xFFFFFF66 or P.line2)
+    ImGui.DrawList_AddRectFilled(dl, x + 3, y + 3, x + 17, y + SWITCH_H - 3, hov and P.ink2 or P.ink3)
+  end
+  if clicked then
+    return not on, true
+  end
+  return on, false
+end
+
+-- A switch with a label and a one-line explanation; returns new value, changed, bottom y.
+local function switch_row(id, x, y, w, on, label, desc)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  local v, changed = switch(id, x, y, on)
+  local tx = x + SWITCH_W + 14
+  txt(dl, FONTS.bold13, 13, tx, y + 1, P.ink, label)
+  local by = y + 22
+  if desc then
+    by = para(dl, tx, by, w - (tx - x), desc, P.ink2, nil, 17)
+  end
+  return v, changed, math.max(by, y + SWITCH_H)
+end
+
+-- Text boxes: black, square, a thin border.
+local function push_input_style()
+  ImGui.PushStyleColor(ctx, ImGui.Col_FrameBg, P.page)
+  ImGui.PushStyleColor(ctx, ImGui.Col_FrameBgHovered, P.page)
+  ImGui.PushStyleColor(ctx, ImGui.Col_FrameBgActive, P.page)
+  ImGui.PushStyleColor(ctx, ImGui.Col_Border, P.line2)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameBorderSize, 1)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, 10, 8)
+  if FONTS.body13 then ImGui.PushFont(ctx, FONTS.body13) end
+end
+
+local function pop_input_style()
+  if FONTS.body13 then ImGui.PopFont(ctx) end
+  ImGui.PopStyleVar(ctx, 2)
+  ImGui.PopStyleColor(ctx, 4)
+end
+
+-- Field label in mono caps; returns the y under it.
+local function field_label(dl, x, y, s)
+  caps(dl, 10, x, y, P.ink2, s)
+  return y + 20
+end
+
+local function item_bottom()
+  local _, b = ImGui.GetItemRectMax(ctx)
+  return b
+end
+
+-- --- Cards ---
+-- "01  CAPTION" kicker, then a card whose background is drawn with last
+-- frame's height (the content decides it), with corner ticks.
+
+local CARD_PAD_X, CARD_PAD_Y = 18, 16
+local card_h = {}
+
+local function card(id, x, y, w, n, caption, accent, body)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  accent = accent or P.acc
+  local num = string.format("%02d", n)
+  txt(dl, FONTS.title18, 18, x, y, accent, num)
+  caps(dl, 10, x + text_w(num, FONTS.title18) + 10, y + 5, P.ink2, caption)
+  local cy = y + 30
+  local h = card_h[id]
+  if h then
+    ImGui.DrawList_AddRectFilled(dl, x, cy, x + w, cy + h, P.card)
+    ImGui.DrawList_AddRect(dl, x, cy, x + w, cy + h, P.line)
+    local t = 6
+    for _, c in ipairs({ { x, cy, 1, 1 }, { x + w, cy, -1, 1 }, { x, cy + h, 1, -1 }, { x + w, cy + h, -1, -1 } }) do
+      ImGui.DrawList_AddLine(dl, c[1], c[2], c[1] + t * c[3], c[2], accent, 1)
+      ImGui.DrawList_AddLine(dl, c[1], c[2], c[1], c[2] + t * c[4], accent, 1)
+    end
+  end
+  local bottom = body(dl, x + CARD_PAD_X, cy + CARD_PAD_Y, w - CARD_PAD_X * 2)
+  card_h[id] = bottom + CARD_PAD_Y - cy
+  return cy + card_h[id]
+end
+
+-- --- Window parts ---
+
+local function kind_hint()
+  return "What you did and what happened, or the idea you'd like to see."
+end
+
+local function fmt_bytes(n)
+  if n >= 1048576 then
+    return string.format("%.1f MB", n / 1048576)
+  end
+  return string.format("%d KB", math.max(1, math.floor(n / 1024 + 0.5)))
+end
+
+local THUMB = 58
+
+local function draw_pictures(dl, x, y, w)
+  local box_h = THUMB + 16
+  ImGui.SetCursorScreenPos(ctx, x, y)
+  ImGui.PushStyleColor(ctx, ImGui.Col_ChildBg, P.page)
+  ImGui.PushStyleColor(ctx, ImGui.Col_Border, P.line2)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_WindowPadding, 8, 8)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_ChildBorderSize, 1)
+  if ImGui.BeginChild(ctx, "##pictures", w, box_h, im_opt("ChildFlags_Border") or 1) then
+    local cdl = ImGui.GetWindowDrawList(ctx)
+    local px, py = ImGui.GetCursorScreenPos(ctx)
+    local remove_at
+    for i, img in ipairs(S.images) do
+      local ix = px + (i - 1) * (THUMB + 8)
+      ImGui.SetCursorScreenPos(ctx, ix, py)
+      local drew = false
+      if img.img and im_opt("Image") then
+        local ok, iw, ih = pcall(ImGui.Image_GetSize, img.img)
+        if ok and iw and iw > 0 and ih > 0 then
+          local s = math.min(THUMB / iw, THUMB / ih)
+          ImGui.SetCursorScreenPos(ctx, ix + (THUMB - iw * s) / 2, py + (THUMB - ih * s) / 2)
+          drew = pcall(ImGui.Image, ctx, img.img, iw * s, ih * s)
+        end
+      end
+      ImGui.SetCursorScreenPos(ctx, ix, py)
+      local clicked, hov = hit("##thumb" .. i, ix, py, THUMB, THUMB)
+      ImGui.DrawList_AddRect(cdl, ix, py, ix + THUMB, py + THUMB, hov and 0xFFFFFF80 or P.line2)
+      if not drew then
+        caps(cdl, 10, ix + (THUMB - caps_w(10, img.ext)) / 2, py + THUMB / 2 - 7, P.ink2, img.ext)
+      end
+      if hov then
+        ImGui.DrawList_AddRectFilled(cdl, ix, py, ix + THUMB, py + THUMB, 0x000000AA)
+        local c, k = P.ink, 6
+        ImGui.DrawList_AddLine(cdl, ix + THUMB / 2 - k, py + THUMB / 2 - k, ix + THUMB / 2 + k, py + THUMB / 2 + k, c, 1.5)
+        ImGui.DrawList_AddLine(cdl, ix + THUMB / 2 + k, py + THUMB / 2 - k, ix + THUMB / 2 - k, py + THUMB / 2 + k, c, 1.5)
+        ImGui.SetTooltip(ctx, F.ScrubPaths(img.name) .. "  (" .. fmt_bytes(img.bytes) .. ")\nClick to remove")
+      end
+      if clicked then
+        remove_at = i
+      end
+    end
+    if #S.images == 0 then
+      local s = "Drop pictures here, or use the buttons below"
+      caps(cdl, 10, px + (w - 16 - caps_w(10, s)) / 2, py + THUMB / 2 - 7, P.ink3, s)
+      ImGui.SetCursorScreenPos(ctx, px, py)
+      ImGui.Dummy(ctx, 1, THUMB)
+    end
+    ImGui.EndChild(ctx)
+    if remove_at then
+      remove_image(remove_at)
+    end
+  end
+  ImGui.PopStyleVar(ctx, 2)
+  ImGui.PopStyleColor(ctx, 2)
+  -- Accept files dragged from Finder/Explorer onto the picture area.
+  if im_opt("BeginDragDropTarget") and ImGui.BeginDragDropTarget(ctx) then
+    local rv, count = ImGui.AcceptDragDropPayloadFiles(ctx)
+    if rv then
+      for i = 0, (count or 0) - 1 do
+        local ok, path = ImGui.GetDragDropPayloadFile(ctx, i)
+        if ok and path then
+          add_image(path)
+        end
+      end
+    end
+    ImGui.EndDragDropTarget(ctx)
+  end
+  y = y + box_h + 10
+  local full = #S.images >= F.MAX_IMAGES
+  local bx = x
+  if btn("##addpic", "Add picture", bx, y, nil, nil, full) then
+    browse_images()
+  end
+  bx = bx + btn_w("Add picture") + 8
+  if is_mac() or is_windows() then
+    local label = S.shot and "Taking screenshot..." or "Take screenshot"
+    if btn("##shot", label, bx, y, nil, nil, full or S.shot ~= nil) then
+      start_screenshot()
+    end
+  end
+  return y + BTN_H
+end
+
+local function draw_status(dl, x, y, w)
+  if not S.status then
+    return y
+  end
+  local c = S.status.kind == "error" and COL.error or (S.status.kind == "ok" and COL.ok or COL.mute)
+  return para(dl, x, y, w, S.status.text, c) + 4
+end
+
+-- How stopping is described in the steps; hosts can add where else it's found.
+local function stop_hint()
+  return "Press Stop and send on the recording badge" .. (cfg.record_hint and (" " .. cfg.record_hint) or "") .. "."
+end
+
+local STEPS = {
+  "Press Start bug recording. This window hides and a small recording badge appears.",
+  "Do what causes the problem again.",
+  false, -- stop_hint()
+  "Describe what went wrong, then send.",
 }
 
+local function draw_recording_card(dl, x, y, w)
+  if T.on then
+    local a = math.floor((0.35 + 0.65 * pulse()) * 255)
+    ImGui.DrawList_AddCircleFilled(dl, x + 7, y + 8, 6, A(P.red, a))
+    local tx = caps(dl, 11, x + 22, y + 1, P.red, "Recording", true)
+    caps(dl, 10, tx + 14, y + 2, P.ink2, F.RecordingDuration() .. "  /  " .. T.events .. " events")
+    y = para(dl, x, y + 28, w, "Do what causes the problem again, then stop the recording to attach it to this report.")
+    if btn("##recstop", "Stop and attach", x, y + 10, "go") then
+      F.StopRecording()
+      S.include_trace = true
+      S.log_text = nil
+    end
+    return y + 10 + BTN_H
+  elseif F.HasRecording() then
+    local dw = btn_w("Discard")
+    local v, changed, by = switch_row("##rectoggle", x, y, w - dw - 16, S.include_trace, "Attach the bug recording",
+      string.format("%d events, %s long.", T.events, F.RecordingDuration()))
+    S.include_trace = v
+    if changed then
+      S.log_text = nil
+    end
+    if btn("##recdiscard", "Discard", x + w - dw, y - 4, nil, dw) then
+      F.DiscardRecording()
+      S.log_text = nil
+    end
+    return math.max(by, y + BTN_H)
+  end
+  y = para(dl, x, y, w, "Hard to pin down? Record what the script does while you repeat the problem, "
+    .. "and the recording goes with your report.", P.ink2)
+  y = y + 10
+  if rec_button("##recstart", "Start bug recording", x, y, 260) then
+    T.draft = { title = S.title, note = S.note }
+    S.close = true
+    F.StartRecording()
+  end
+  tip("Starts recording right away. This window hides until you stop.")
+  y = y + REC_H + 16
+  local nf = FONTS.mono10
+  for i, s in ipairs(STEPS) do
+    local num = string.format("%02d", i)
+    txt(dl, FONTS.title18, 18, x, y - 3, A(P.red, 0xD0), num)
+    y = para(dl, x + 34, y, w - 34, s or stop_hint(), P.ink) + 6
+  end
+  y = y + 4
+  ImGui.DrawList_AddLine(dl, x, y, x + w, y, P.soft, 1)
+  y = note(dl, x, y + 12, w, "The script may run a bit slower while recording. It notes clicks, changed values, "
+    .. "REAPER actions and errors; never the text you type.")
+  return y
+end
+
+local function draw_report_card(dl, x, y, w)
+  y = field_label(dl, x, y, "Title")
+  push_input_style()
+  ImGui.SetCursorScreenPos(ctx, x, y)
+  ImGui.SetNextItemWidth(ctx, w)
+  if S.focus_title then
+    ImGui.SetKeyboardFocusHere(ctx)
+    S.focus_title = false
+  end
+  local _
+  _, S.title = ImGui.InputTextWithHint(ctx, "##title", "Short summary", S.title)
+  y = item_bottom() + 14
+  pop_input_style()
+
+  y = field_label(dl, x, y, "What happened, or what would you like?")
+  push_input_style()
+  ImGui.SetCursorScreenPos(ctx, x, y)
+  _, S.note = ImGui.InputTextMultiline(ctx, "##note", S.note, w, 110)
+  if S.note == "" and not ImGui.IsItemActive(ctx) then
+    -- InputTextMultiline has no hint; draw one over the empty box.
+    local ix, iy = ImGui.GetItemRectMin(ctx)
+    txt(dl, FONTS.body13, 13, ix + 10, iy + 8, P.ink3, kind_hint())
+  end
+  y = item_bottom() + 14
+  pop_input_style()
+
+  y = field_label(dl, x, y, "Pictures (optional, up to " .. F.MAX_IMAGES .. ")")
+  return draw_pictures(dl, x, y, w)
+end
+
+report_kind = function()
+  local trace = S.include_trace and (T.on or F.HasRecording())
+  return trace and "bug" or (S.kind or "other")
+end
+
+local function draw_send_card(dl, x, y, w)
+  local lw = btn_w("Hide what's sent")
+  local v, changed, by = switch_row("##uselog", x, y, w - lw - 16, S.include_log, "Include usage log",
+    "Script version, REAPER version, OS and recent script messages. Personal folder names are removed.")
+  S.include_log = v
+  if changed then
+    S.log_text = nil
+  end
+  if btn("##showlog", S.show_log and "Hide what's sent" or "Show what's sent", x + w - lw, y - 4, nil, lw) then
+    S.show_log = not S.show_log
+    S.log_text = nil
+  end
+  y = by + 12
+  if S.show_log then
+    if not S.log_text then
+      local trace = S.include_trace and (T.on or F.HasRecording())
+      S.log_text = (S.include_log or trace) and F.BuildLogText({ usage = S.include_log, trace = trace })
+        or "(no log will be sent)"
+    end
+    push_input_style()
+    ImGui.SetCursorScreenPos(ctx, x, y)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, P.ink2)
+    ImGui.InputTextMultiline(ctx, "##logpreview", S.log_text, w, 120, ImGui.InputTextFlags_ReadOnly)
+    ImGui.PopStyleColor(ctx)
+    y = item_bottom() + 14
+    pop_input_style()
+  end
+  ImGui.DrawList_AddLine(dl, x, y, x + w, y, P.soft, 1)
+  y = field_label(dl, x, y + 14, "Contact (optional)")
+  push_input_style()
+  ImGui.SetCursorScreenPos(ctx, x, y)
+  ImGui.SetNextItemWidth(ctx, w)
+  local _
+  _, S.contact = ImGui.InputTextWithHint(ctx, "##contact", "Email or forum name, if you'd like a reply", S.contact)
+  y = item_bottom() + 12
+  pop_input_style()
+  y = note(dl, x, y, w, "Your report is posted publicly as an issue on " .. (cfg.repo_label or "the developer's GitHub page")
+    .. ". Don't include anything private.")
+  y = draw_status(dl, x, y + 8, w)
+  y = y + 10
+
+  local sending = S.phase == "sending"
+  local sw = 170
+  if btn("##send", sending and "Sending..." or "Send report", x, y, "go", sw, sending) then
+    start_send()
+  end
+  local bx = x + sw + 8
+  if btn("##cancel", "Cancel", bx, y, nil, 96) then
+    S.close = true
+  end
+  bx = bx + 96 + 8
+  if S.status and S.status.kind == "error" and not sending then
+    if btn("##copy", "Copy report", bx, y) then
+      ImGui.SetClipboardText(ctx, report_as_text())
+      set_status("info", "Copied. You can paste it in an email or forum post.")
+    end
+  end
+  return y + BTN_H
+end
+
+local function draw_intro(dl, x, y, w, title, sub)
+  caps(dl, 10, x, y, P.ink3, "Feedback  /  " .. tostring(cfg.script_name))
+  chrome_text(dl, FONTS.title30, 30, x, y + 16, title)
+  return para(dl, x, y + 58, w, sub, P.ink2) + 18
+end
+
+local function draw_form(x, y, w)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  y = draw_intro(dl, x, y, w, "SEND FEEDBACK", "Report a problem or suggest an idea. It goes straight to the developer.")
+  y = card("rec", x, y, w, 1, T.on and "Bug recording is on" or "Bug recording", P.red, draw_recording_card) + 24
+  y = card("report", x, y, w, 2, "Your report", nil, draw_report_card) + 24
+  y = card("send", x, y, w, 3, "Send", nil, draw_send_card)
+  return y
+end
+
+local function draw_sent(x, y, w)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  y = draw_intro(dl, x, y, w, "THANK YOU",
+    "Your report was sent. It's now " .. (S.result.number and ("issue #" .. S.result.number) or "an issue")
+    .. "; you can follow it, or add more details, on GitHub.")
+  if btn("##open", "Open on GitHub", x, y, "go", 170) then
+    open_url(S.result.url)
+  end
+  local bx = x + 178
+  if btn("##another", "Send another", bx, y) then
+    local contact = S.contact
+    for i = #S.images, 1, -1 do
+      remove_image(i)
+    end
+    S = new_state()
+    S.contact = contact
+    return y + BTN_H
+  end
+  bx = bx + btn_w("Send another") + 8
+  if btn("##close", "Close", bx, y) then
+    S.close = true
+  end
+  return y + BTN_H
+end
+
+-- Window styles shared by the feedback window and the recording badge.
 local function push_style()
   local n_col, n_var = 0, 0
   local function col(id, v)
@@ -1651,304 +2304,76 @@ local function push_style()
       n_var = n_var + 1
     end
   end
-  col(ImGui.Col_WindowBg, COL.bg)
-  col(ImGui.Col_ChildBg, COL.panel)
-  col(ImGui.Col_FrameBg, COL.frame)
-  col(ImGui.Col_FrameBgHovered, COL.frame_hover)
-  col(ImGui.Col_FrameBgActive, COL.frame_hover)
-  col(ImGui.Col_Button, COL.frame)
-  col(ImGui.Col_ButtonHovered, COL.frame_hover)
-  col(ImGui.Col_ButtonActive, COL.accent)
-  col(ImGui.Col_CheckMark, COL.accent_hover)
-  col(ImGui.Col_Text, COL.text)
-  col(ImGui.Col_TextDisabled, COL.mute)
-  col(ImGui.Col_Border, COL.border)
-  col(ImGui.Col_TitleBg, COL.bg)
-  col(ImGui.Col_TitleBgActive, COL.panel)
-  var(ImGui.StyleVar_WindowPadding, 16, 14)
-  var(ImGui.StyleVar_FramePadding, 8, 6)
-  var(ImGui.StyleVar_ItemSpacing, 8, 8)
-  var(ImGui.StyleVar_FrameRounding, 5)
-  var(ImGui.StyleVar_ChildRounding, 6)
-  var(ImGui.StyleVar_WindowRounding, 8)
+  col(im_opt("Col_WindowBg"), P.page)
+  col(im_opt("Col_ChildBg"), 0x00000000)
+  col(im_opt("Col_PopupBg"), P.page)
+  col(im_opt("Col_Border"), P.line2)
+  col(im_opt("Col_Text"), P.ink)
+  col(im_opt("Col_TextDisabled"), P.ink3)
+  col(im_opt("Col_TextSelectedBg"), A(P.acc, 0x55))
+  col(im_opt("Col_FrameBg"), P.page)
+  col(im_opt("Col_FrameBgHovered"), P.page)
+  col(im_opt("Col_FrameBgActive"), P.page)
+  col(im_opt("Col_ScrollbarBg"), 0x00000000)
+  col(im_opt("Col_ScrollbarGrab"), 0xFFFFFF1F)
+  col(im_opt("Col_ScrollbarGrabHovered"), 0xFFFFFF38)
+  col(im_opt("Col_ScrollbarGrabActive"), P.acc)
+  col(im_opt("Col_NavHighlight"), A(P.acc, 0x80))
+  var(im_opt("StyleVar_WindowPadding"), 0, 0)
+  var(im_opt("StyleVar_WindowRounding"), 0)
+  var(im_opt("StyleVar_WindowBorderSize"), 1)
+  var(im_opt("StyleVar_ChildRounding"), 0)
+  var(im_opt("StyleVar_FrameRounding"), 0)
+  var(im_opt("StyleVar_PopupRounding"), 0)
+  var(im_opt("StyleVar_ItemSpacing"), 0, 0)
+  var(im_opt("StyleVar_ScrollbarSize"), 8)
+  var(im_opt("StyleVar_ScrollbarRounding"), 0)
   return n_col, n_var
 end
 
-local function primary_button(label, w)
-  ImGui.PushStyleColor(ctx, ImGui.Col_Button, COL.accent)
-  ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, COL.accent_hover)
-  ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, COL.accent)
-  ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xFFFFFFFF)
-  local pressed = ImGui.Button(ctx, label, w or 0, 0)
-  ImGui.PopStyleColor(ctx, 4)
-  return pressed
+local WIN_W = 620
+local HEADER_H = 56
+local PAD = 26
+
+-- Usable screen height, to keep the window on screen (the body scrolls).
+local function max_body_h()
+  if im_opt("GetMainViewport") and im_opt("Viewport_GetWorkSize") then
+    local vp = ImGui.GetMainViewport(ctx)
+    local _, h = ImGui.Viewport_GetWorkSize(vp)
+    if h and h > 300 then
+      return h - HEADER_H - 80
+    end
+  end
+  return 760
 end
 
-local function caption(text, wrapped)
-  if wrapped then
-    ImGui.PushStyleColor(ctx, ImGui.Col_Text, COL.mute)
-    ImGui.TextWrapped(ctx, text)
-    ImGui.PopStyleColor(ctx)
-  else
-    ImGui.TextColored(ctx, COL.mute, text)
-  end
+-- The window header: mark, SCRIPT NAME | SEND FEEDBACK, version, close X.
+-- Returns true when the close button was clicked.
+local function draw_header(dl, x, y, w)
+  ImGui.DrawList_AddLine(dl, x, y + HEADER_H, x + w, y + HEADER_H, P.line, 1)
+  local mx, my, ms = x + 20, y + (HEADER_H - 26) / 2, 26
+  ImGui.DrawList_AddRect(dl, mx, my, mx + ms, my + ms, P.line2)
+  ImGui.DrawList_AddLine(dl, mx + 7, my + 9, mx + ms - 7, my + 9, P.ink2, 1.4)
+  ImGui.DrawList_AddLine(dl, mx + 7, my + 14, mx + ms - 11, my + 14, P.ink3, 1.4)
+  ImGui.DrawList_AddCircleFilled(dl, mx + ms - 6, my + ms - 6, 3.2, T.on and A(P.red, math.floor((0.35 + 0.65 * pulse()) * 255)) or P.acc)
+  local tx = x + 60
+  local name = tostring(cfg.script_name):upper()
+  txt(dl, FONTS.title22, 22, tx, y + (HEADER_H - 22) / 2 - 3, P.ink, name)
+  local sx = tx + text_w(name, FONTS.title22) + 14
+  ImGui.DrawList_AddLine(dl, sx, y + 19, sx, y + HEADER_H - 19, P.line2, 1)
+  caps(dl, 11, sx + 14, y + (HEADER_H - 11) / 2 - 1, P.ink2, "Send feedback")
+
+  local cs = 28
+  local cx, cy = x + w - 16 - cs, y + (HEADER_H - cs) / 2
+  local clicked, hov = hit("##crs_close", cx, cy, cs, cs)
+  ImGui.DrawList_AddRect(dl, cx, cy, cx + cs, cy + cs, hov and 0xFFFFFF80 or P.line2)
+  local cc, k = hov and P.ink or P.ink2, 4.5
+  ImGui.DrawList_AddLine(dl, cx + cs / 2 - k, cy + cs / 2 - k, cx + cs / 2 + k, cy + cs / 2 + k, cc, 1.4)
+  ImGui.DrawList_AddLine(dl, cx + cs / 2 + k, cy + cs / 2 - k, cx + cs / 2 - k, cy + cs / 2 + k, cc, 1.4)
+  local vs = "v" .. tostring(cfg.version):gsub("^[vV]", "")
+  caps(dl, 10, cx - 14 - caps_w(10, vs), y + (HEADER_H - 10) / 2 - 1, P.ink3, vs)
+  return clicked
 end
-
-local function kind_hint()
-  for _, k in ipairs(KINDS) do
-    if k.id == S.kind then
-      return k.hint
-    end
-  end
-  return ""
-end
-
-local function draw_kind_tabs()
-  for i, k in ipairs(KINDS) do
-    if i > 1 then
-      ImGui.SameLine(ctx, 0, 4)
-    end
-    local active = S.kind == k.id
-    if active then
-      ImGui.PushStyleColor(ctx, ImGui.Col_Button, COL.accent)
-      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, COL.accent_hover)
-      ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xFFFFFFFF)
-    end
-    if ImGui.Button(ctx, k.label .. "##kind", 86, 0) then
-      S.kind = k.id
-    end
-    if active then
-      ImGui.PopStyleColor(ctx, 3)
-    end
-  end
-end
-
-local function fmt_bytes(n)
-  if n >= 1048576 then
-    return string.format("%.1f MB", n / 1048576)
-  end
-  return string.format("%d KB", math.max(1, math.floor(n / 1024 + 0.5)))
-end
-
-local THUMB = 84
-
-local function draw_pictures(width)
-  caption("Pictures (optional, up to " .. F.MAX_IMAGES .. ")")
-  local h = THUMB + 34
-  if ImGui.BeginChild(ctx, "##pictures", width, h, ImGui.ChildFlags_Border or 1) then
-    local remove_at
-    for i, im in ipairs(S.images) do
-      if i > 1 then
-        ImGui.SameLine(ctx, 0, 8)
-      end
-      ImGui.BeginGroup(ctx)
-      local drew = false
-      if im.img and ImGui.Image then
-        local ok, iw, ih = pcall(ImGui.Image_GetSize, im.img)
-        if ok and iw and iw > 0 and ih > 0 then
-          local s = math.min(THUMB / iw, THUMB / ih)
-          drew = pcall(ImGui.Image, ctx, im.img, iw * s, ih * s)
-        end
-      end
-      if not drew then
-        ImGui.Button(ctx, im.ext:upper() .. "##thumb" .. i, THUMB, THUMB)
-      end
-      if ImGui.IsItemHovered(ctx) then
-        ImGui.SetTooltip(ctx, F.ScrubPaths(im.name) .. "  (" .. fmt_bytes(im.bytes) .. ")")
-      end
-      if ImGui.SmallButton(ctx, "Remove##img" .. i) then
-        remove_at = i
-      end
-      ImGui.EndGroup(ctx)
-    end
-    if #S.images == 0 then
-      ImGui.Dummy(ctx, 1, 18)
-      ImGui.TextColored(ctx, COL.mute, "Drop picture files here, or use the buttons below.")
-    end
-    ImGui.EndChild(ctx)
-    if remove_at then
-      remove_image(remove_at)
-    end
-  end
-  -- Accept files dragged from Finder/Explorer onto the picture area.
-  if ImGui.BeginDragDropTarget and ImGui.BeginDragDropTarget(ctx) then
-    local rv, count = ImGui.AcceptDragDropPayloadFiles(ctx)
-    if rv then
-      for i = 0, (count or 0) - 1 do
-        local ok, path = ImGui.GetDragDropPayloadFile(ctx, i)
-        if ok and path then
-          add_image(path)
-        end
-      end
-    end
-    ImGui.EndDragDropTarget(ctx)
-  end
-  local full = #S.images >= F.MAX_IMAGES
-  if full and ImGui.BeginDisabled then ImGui.BeginDisabled(ctx) end
-  if ImGui.Button(ctx, "Add picture...") and not full then
-    browse_images()
-  end
-  if is_mac() or is_windows() then
-    ImGui.SameLine(ctx)
-    if ImGui.Button(ctx, S.shot and "Taking screenshot..." or "Take screenshot") and not full and not S.shot then
-      start_screenshot()
-    end
-  end
-  if full and ImGui.EndDisabled then ImGui.EndDisabled(ctx) end
-end
-
-local function draw_status()
-  if not S.status then
-    return
-  end
-  local c = S.status.kind == "error" and COL.error or (S.status.kind == "ok" and COL.ok or COL.mute)
-  ImGui.PushStyleColor(ctx, ImGui.Col_Text, c)
-  ImGui.TextWrapped(ctx, S.status.text)
-  ImGui.PopStyleColor(ctx)
-end
-
-local function draw_recording_block()
-  if T.on then
-    ImGui.TextColored(ctx, COL.rec, "Bug recording is on")
-    caption(string.format("%s, %d events so far. Repeat the problem, then stop the recording to attach it.",
-      F.RecordingDuration(), T.events), true)
-    if ImGui.Button(ctx, "Stop recording and attach it") then
-      F.StopRecording()
-      S.include_trace = true
-      S.log_text = nil
-    end
-  elseif F.HasRecording() then
-    local changed
-    changed, S.include_trace = ImGui.Checkbox(ctx, string.format("Include bug recording (%d events, %s)",
-      T.events, F.RecordingDuration()), S.include_trace)
-    if changed then
-      S.log_text = nil
-    end
-    ImGui.SameLine(ctx)
-    if ImGui.Button(ctx, "Discard recording") then
-      F.DiscardRecording()
-      S.log_text = nil
-    end
-  elseif S.kind == "bug" then
-    caption("Hard to pin down? Bug recording writes down everything the script does while you repeat "
-      .. "the problem. The script may run a little slower until you stop it.", true)
-    if ImGui.Button(ctx, "Start bug recording") then
-      T.draft = { title = S.title, note = S.note }
-      S.close = true
-      F.StartRecording()
-    end
-  end
-end
-
-local function repo_hint()
-  return cfg.repo_label or "the developer's GitHub page"
-end
-
-local function draw_form(avail_w)
-  draw_kind_tabs()
-  ImGui.Spacing(ctx)
-  caption("Title")
-  ImGui.SetNextItemWidth(ctx, avail_w)
-  if S.focus_title then
-    ImGui.SetKeyboardFocusHere(ctx)
-    S.focus_title = false
-  end
-  local _
-  _, S.title = ImGui.InputTextWithHint(ctx, "##title", "Short summary", S.title)
-  caption(S.kind == "bug" and "What happened?" or "Details")
-  _, S.note = ImGui.InputTextMultiline(ctx, "##note", S.note, avail_w, 130)
-  if S.note == "" and not ImGui.IsItemActive(ctx) then
-    -- InputTextMultiline has no hint; draw one over the empty box.
-    local x, y = ImGui.GetItemRectMin(ctx)
-    local dl = ImGui.GetWindowDrawList(ctx)
-    ImGui.DrawList_AddText(dl, x + 8, y + 6, COL.mute, kind_hint())
-  end
-
-  ImGui.Spacing(ctx)
-  draw_pictures(avail_w)
-
-  ImGui.Spacing(ctx)
-  draw_recording_block()
-
-  ImGui.Spacing(ctx)
-  local changed
-  changed, S.include_log = ImGui.Checkbox(ctx, "Include usage log", S.include_log)
-  if changed then
-    S.log_text = nil
-  end
-  ImGui.SameLine(ctx)
-  if ImGui.Button(ctx, S.show_log and "Hide what's sent" or "Show what's sent") then
-    S.show_log = not S.show_log
-    S.log_text = nil
-  end
-  caption("Script version, REAPER version, OS and recent script messages. Personal folder names are removed.", true)
-  if S.show_log then
-    if not S.log_text then
-      local trace = S.include_trace and (T.on or F.HasRecording())
-      S.log_text = (S.include_log or trace) and F.BuildLogText({ usage = S.include_log, trace = trace })
-        or "(no log will be sent)"
-    end
-    ImGui.InputTextMultiline(ctx, "##logpreview", S.log_text, avail_w, 120, ImGui.InputTextFlags_ReadOnly)
-  end
-
-  ImGui.Spacing(ctx)
-  caption("Contact (optional)")
-  ImGui.SetNextItemWidth(ctx, avail_w)
-  _, S.contact = ImGui.InputTextWithHint(ctx, "##contact", "Email or forum name, if you'd like a reply", S.contact)
-
-  ImGui.Spacing(ctx)
-  caption("Your report is posted publicly as an issue on " .. repo_hint()
-    .. ". Don't include anything private.", true)
-  draw_status()
-  ImGui.Spacing(ctx)
-
-  local sending = S.phase == "sending"
-  if sending and ImGui.BeginDisabled then ImGui.BeginDisabled(ctx) end
-  if primary_button(sending and "Sending..." or "Send report", 130) and not sending then
-    start_send()
-  end
-  if sending and ImGui.EndDisabled then ImGui.EndDisabled(ctx) end
-  ImGui.SameLine(ctx)
-  if ImGui.Button(ctx, "Cancel", 80) then
-    S.close = true
-  end
-  if S.status and S.status.kind == "error" and not sending then
-    ImGui.SameLine(ctx)
-    if ImGui.Button(ctx, "Copy report") then
-      ImGui.SetClipboardText(ctx, report_as_text())
-      set_status("info", "Copied. You can paste it in an email or forum post.")
-    end
-  end
-end
-
-local function draw_sent()
-  ImGui.Dummy(ctx, 1, 10)
-  ImGui.PushStyleColor(ctx, ImGui.Col_Text, COL.ok)
-  ImGui.Text(ctx, "Thanks! Your report was sent.")
-  ImGui.PopStyleColor(ctx)
-  ImGui.Spacing(ctx)
-  ImGui.TextWrapped(ctx, "It's now " .. (S.result.number and ("issue #" .. S.result.number) or "an issue")
-    .. ". You can follow it, or add more details, on GitHub.")
-  ImGui.Spacing(ctx)
-  if primary_button("Open on GitHub", 140) then
-    open_url(S.result.url)
-  end
-  ImGui.SameLine(ctx)
-  if ImGui.Button(ctx, "Send another") then
-    local contact = S.contact
-    for i = #S.images, 1, -1 do
-      remove_image(i)
-    end
-    S = new_state()
-    S.contact = contact
-  end
-  ImGui.SameLine(ctx)
-  if ImGui.Button(ctx, "Close") then
-    S.close = true
-  end
-end
-
-local WIN_W = 560
 
 local function draw_feedback()
   poll_screenshot()
@@ -1964,20 +2389,45 @@ local function draw_feedback()
     ImGui.SetNextWindowPos(ctx, S.win_x, S.win_y, ImGui.Cond_Always)
     S.restore_pos = false
   end
-  -- Fixed width; a height of 0 auto-fits the content.
-  ImGui.SetNextWindowSize(ctx, WIN_W, 0, ImGui.Cond_Always)
-  local flags = (ImGui.WindowFlags_NoCollapse or 0) | (ImGui.WindowFlags_NoDocking or 0)
+  -- Fixed width; the height follows the content (last frame's), up to the screen.
+  local body_h = math.min(S.body_h or 640, max_body_h())
+  ImGui.SetNextWindowSize(ctx, WIN_W, HEADER_H + body_h + 2, ImGui.Cond_Always)
+  local flags = (im_opt("WindowFlags_NoCollapse") or 0) | (im_opt("WindowFlags_NoDocking") or 0)
+    | (im_opt("WindowFlags_NoTitleBar") or 0) | (im_opt("WindowFlags_NoScrollbar") or 0)
+    | (im_opt("WindowFlags_NoScrollWithMouse") or 0)
   local title = "Send feedback - " .. cfg.script_name .. "###CRS_Feedback"
   local visible, open = ImGui.Begin(ctx, title, true, flags)
   if visible then
+    local x, y = ImGui.GetWindowPos(ctx)
     if not hidden then
-      S.win_x, S.win_y = ImGui.GetWindowPos(ctx)
+      S.win_x, S.win_y = x, y
     end
-    local avail_w = WIN_W - 32
-    if S.phase == "sent" then
-      draw_sent()
-    else
-      draw_form(avail_w)
+    local dl = ImGui.GetWindowDrawList(ctx)
+    -- the site's column guides behind everything
+    local wh = HEADER_H + body_h + 2
+    for k = 1, 5 do
+      local gx = math.floor(x + WIN_W * k / 6) + 0.5
+      ImGui.DrawList_AddLine(dl, gx, y + HEADER_H, gx, y + wh, P.guide, 1)
+    end
+    if draw_header(dl, x, y, WIN_W) then
+      S.close = true
+    end
+    ImGui.SetCursorScreenPos(ctx, x + 1, y + HEADER_H + 1)
+    if ImGui.BeginChild(ctx, "##crs_body", WIN_W - 2, body_h) then
+      local cx, cy = ImGui.GetCursorScreenPos(ctx)
+      local cw = WIN_W - 2 - PAD * 2
+      local bottom
+      if S.phase == "sent" then
+        bottom = draw_sent(cx + PAD, cy + PAD, cw)
+      else
+        bottom = draw_form(cx + PAD, cy + PAD, cw)
+      end
+      if S then
+        S.body_h = bottom + PAD - cy
+      end
+      ImGui.SetCursorScreenPos(ctx, cx, bottom)
+      ImGui.Dummy(ctx, 1, PAD)
+      ImGui.EndChild(ctx)
     end
     ImGui.End(ctx)
   end
@@ -2006,54 +2456,53 @@ local function draw_feedback()
   end
 end
 
--- ImGui field that may not exist in this ReaImGui version (the builtin shim
--- raises an error for unknown names).
-local function im_opt(name)
-  local ok, v = pcall(function() return ImGui[name] end)
-  return ok and v or nil
+-- Stop recording and open the window with the recording attached (the
+-- badge's "Stop and send"; hosts can call it from their own button).
+function F.StopAndReport()
+  local draft = T.draft or {}
+  T.draft = nil
+  F.StopRecording()
+  F.Open({ title = draft.title, note = draft.note, include_trace = true })
 end
 
 -- The small always-on-top badge shown while bug recording is on.
+local BADGE_W, BADGE_H = 340, 92
 local function draw_badge()
   local n_col, n_var = push_style()
-  local flags = (im_opt("WindowFlags_NoTitleBar") or 0) | (im_opt("WindowFlags_AlwaysAutoResize") or 0)
+  local flags = (im_opt("WindowFlags_NoTitleBar") or 0) | (im_opt("WindowFlags_NoResize") or 0)
     | (im_opt("WindowFlags_NoDocking") or 0) | (im_opt("WindowFlags_NoCollapse") or 0)
-    | (im_opt("WindowFlags_NoFocusOnAppearing") or 0) | (im_opt("WindowFlags_TopMost") or 0)
+    | (im_opt("WindowFlags_NoScrollbar") or 0) | (im_opt("WindowFlags_NoFocusOnAppearing") or 0)
+    | (im_opt("WindowFlags_TopMost") or 0)
   if im_opt("GetMainViewport") and im_opt("Viewport_GetWorkPos") and im_opt("Viewport_GetWorkSize") then
     local vp = ImGui.GetMainViewport(ctx)
     local x, y = ImGui.Viewport_GetWorkPos(vp)
     local w = vp and ImGui.Viewport_GetWorkSize(vp)
     if x and y and w then
-      ImGui.SetNextWindowPos(ctx, x + w - 420, y + 80, ImGui.Cond_FirstUseEver)
+      ImGui.SetNextWindowPos(ctx, x + w - BADGE_W - 60, y + 80, ImGui.Cond_FirstUseEver)
     end
   end
+  ImGui.SetNextWindowSize(ctx, BADGE_W, BADGE_H, ImGui.Cond_Always)
   local visible = ImGui.Begin(ctx, "Bug recording###CRS_Recording", nil, flags)
   if visible then
+    local x, y = ImGui.GetWindowPos(ctx)
     local dl = ImGui.GetWindowDrawList(ctx)
-    local cx, cy = ImGui.GetCursorScreenPos(ctx)
-    local pulse = 0.55 + 0.45 * math.abs(math.sin(now_s() * 3))
-    local alpha = math.floor(pulse * 255)
-    ImGui.DrawList_AddCircleFilled(dl, cx + 6, cy + 9, 5, (COL.rec & 0xFFFFFF00) | alpha)
-    ImGui.Dummy(ctx, 14, 18)
-    ImGui.SameLine(ctx)
-    ImGui.Text(ctx, string.format("Recording bug details  %s, %d events", F.RecordingDuration(), T.events))
-    if ImGui.IsItemHovered(ctx) then
-      ImGui.SetTooltip(ctx, cfg.script_name .. " is writing down everything it does.\n"
-        .. "Repeat the problem, then press Stop and send.\nThe script may run a little slower until you stop.")
+    ImGui.DrawList_AddRectFilled(dl, x, y, x + 2, y + BADGE_H, P.red)
+    local a = math.floor((0.35 + 0.65 * pulse()) * 255)
+    ImGui.DrawList_AddCircle(dl, x + 22, y + 24, 9, A(P.red, a // 3), 0, 1)
+    ImGui.DrawList_AddCircleFilled(dl, x + 22, y + 24, 5.5, A(P.red, a))
+    local tx = caps(dl, 11, x + 40, y + 18, P.red, "Recording", true)
+    caps(dl, 10, tx + 12, y + 19, P.ink2, F.RecordingDuration() .. "  /  " .. T.events .. " events")
+    ImGui.SetCursorScreenPos(ctx, x, y)
+    ImGui.Dummy(ctx, BADGE_W, 44)
+    tip(cfg.script_name .. " is writing down what it does.\nRepeat the problem, then press Stop and send.\n"
+      .. "The script may run a little slower until you stop.")
+    if btn("##badge_send", "Stop and send", x + 16, y + 48, "go", 170) then
+      F.StopAndReport()
     end
-    if primary_button("Stop and send", 120) then
-      local draft = T.draft or {}
-      T.draft = nil
-      F.StopRecording()
-      F.Open({ kind = "bug", title = draft.title, note = draft.note, include_trace = true })
-    end
-    ImGui.SameLine(ctx)
-    if ImGui.Button(ctx, "Stop", 60) then
+    if btn("##badge_stop", "Stop", x + 194, y + 48, nil, 80) then
       F.StopRecording()
     end
-    if ImGui.IsItemHovered(ctx) then
-      ImGui.SetTooltip(ctx, "Stops recording. It's kept until you send a report or discard it.")
-    end
+    tip("Stops recording. It's kept until you send a report or discard it.")
     ImGui.End(ctx)
   end
   ImGui.PopStyleVar(ctx, n_var)
@@ -2110,6 +2559,7 @@ ensure_loop = function()
   load_imgui()
   if not ctx or not (ImGui.ValidatePtr and ImGui.ValidatePtr(ctx, "ImGui_Context*")) then
     ctx = ImGui.CreateContext("CRS Feedback")
+    load_fonts()
   end
   if not loop_on then
     loop_on = true
@@ -2139,7 +2589,8 @@ function F.IsOpen()
 end
 
 -- Open the window (or bring it back if it's already open).
--- opts: kind ("bug"|"idea"|"question"|"other"), title, note.
+-- opts: title, note, include_trace, kind (sent as "bug" when a recording is
+-- attached, otherwise this or "other").
 function F.Open(opts)
   if S then
     if opts and opts.note and S.note == "" then
