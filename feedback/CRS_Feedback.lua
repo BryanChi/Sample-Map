@@ -2782,6 +2782,7 @@ local function draw_badge()
   local visible = ImGui.Begin(ctx, "Bug recording###CRS_Recording", nil, flags)
   if visible then
     local x, y = ImGui.GetWindowPos(ctx)
+    T.badge_x, T.badge_y = x, y
     local dl = ImGui.GetWindowDrawList(ctx)
     ImGui.DrawList_AddRectFilled(dl, x, y, x + 2, y + BADGE_H, P.red)
     local a = math.floor((0.35 + 0.65 * pulse()) * 255)
@@ -2798,9 +2799,76 @@ local function draw_badge()
     end
     if btn("##badge_stop", "Stop", x + 194, y + 48, nil, 80) then
       F.StopRecording()
+      F.ShowStopNote()
     end
     tip("Stops recording. It's kept until you send a report or discard it.")
     ImGui.End(ctx)
+  end
+  ImGui.PopStyleVar(ctx, n_var)
+  ImGui.PopStyleColor(ctx, n_col)
+end
+
+-- After Stop: a short note where the badge was, saying where the recording
+-- went. It fades out by itself; a click closes it sooner.
+local NOTE_S = 7
+local stop_note -- { t = start time }
+
+function F.ShowStopNote()
+  stop_note = { t = now_s() }
+end
+
+local function draw_stop_note()
+  local age = now_s() - stop_note.t
+  if age > NOTE_S or stop_note.closed then
+    stop_note = nil
+    return
+  end
+  local alpha = math.max(0, math.min(1, age / 0.15, (NOTE_S - age) / 0.6))
+  local body = "It's waiting in the Send feedback window, attached and ready. Open Send feedback in "
+    .. tostring(cfg.script_name) .. " to say what went wrong and send it."
+  local lines = wrap(body, FONTS.body13, BADGE_W - 56)
+  local h = 50 + #lines * 17 + 18
+  local n_col, n_var = push_style()
+  local alpha_var = im_opt("StyleVar_Alpha")
+  if alpha_var then
+    ImGui.PushStyleVar(ctx, alpha_var, alpha)
+  end
+  local flags = (im_opt("WindowFlags_NoTitleBar") or 0) | (im_opt("WindowFlags_NoResize") or 0)
+    | (im_opt("WindowFlags_NoDocking") or 0) | (im_opt("WindowFlags_NoCollapse") or 0)
+    | (im_opt("WindowFlags_NoScrollbar") or 0) | (im_opt("WindowFlags_NoFocusOnAppearing") or 0)
+    | (im_opt("WindowFlags_TopMost") or 0) | (im_opt("WindowFlags_NoMove") or 0)
+  if T.badge_x then
+    ImGui.SetNextWindowPos(ctx, T.badge_x, T.badge_y, ImGui.Cond_Always)
+  end
+  ImGui.SetNextWindowSize(ctx, BADGE_W, h, ImGui.Cond_Always)
+  local visible = ImGui.Begin(ctx, "Recording saved###CRS_StopNote", nil, flags)
+  if visible then
+    local x, y = ImGui.GetWindowPos(ctx)
+    local dl = ImGui.GetWindowDrawList(ctx)
+    ImGui.DrawList_AddRectFilled(dl, x, y, x + 2, y + h, P.acc)
+    -- a check mark in a ring
+    local cx, cy = x + 22, y + 24
+    ImGui.DrawList_AddCircle(dl, cx, cy, 9, A(P.acc, 0x70), 0, 1)
+    ImGui.DrawList_AddLine(dl, cx - 4, cy, cx - 1, cy + 3, P.acc, 1.6)
+    ImGui.DrawList_AddLine(dl, cx - 1, cy + 3, cx + 4.5, cy - 3.5, P.acc, 1.6)
+    local tx = caps(dl, 11, x + 40, y + 18, P.acc, "Recording saved", true)
+    caps(dl, 10, tx + 12, y + 19, P.ink2, (tonumber(T.events) or 0) .. " events")
+    local ly = y + 46
+    for _, l in ipairs(lines) do
+      txt(dl, FONTS.body13, 13, x + 40, ly, P.ink, l)
+      ly = ly + 17
+    end
+    -- time left, as a thin line along the bottom
+    local left = math.max(0, 1 - age / NOTE_S)
+    ImGui.DrawList_AddLine(dl, x + 2, y + h - 1.5, x + 2 + (BADGE_W - 2) * left, y + h - 1.5, A(P.acc, 0x90), 2)
+    if hit("##stopnote", x, y, BADGE_W, h) then
+      stop_note.closed = true
+    end
+    tip("Click to close.")
+    ImGui.End(ctx)
+  end
+  if alpha_var then
+    ImGui.PopStyleVar(ctx)
   end
   ImGui.PopStyleVar(ctx, n_var)
   ImGui.PopStyleColor(ctx, n_col)
@@ -2857,6 +2925,11 @@ local function tick()
       S = nil
     end
   end
+  if stop_note and not badge then
+    if not pcall(draw_stop_note) then
+      stop_note = nil
+    end
+  end
   if badge then
     local ok, err = pcall(draw_badge)
     if not ok and not T.badge_err then
@@ -2864,7 +2937,7 @@ local function tick()
       F.Log("Recording badge error: " .. tostring(err))
     end
   end
-  if S or badge or (T.on and not (T.host_frame_t and now_s() - T.host_frame_t > 1.5)) then
+  if S or badge or stop_note or (T.on and not (T.host_frame_t and now_s() - T.host_frame_t > 1.5)) then
     own_defer(tick)
   else
     loop_on = false
@@ -2945,6 +3018,7 @@ local function companion_badge()
   local visible = ImGui.Begin(ctx, "Bug recording - " .. tostring(cfg.script_name) .. "###CRS_Recording", nil, flags)
   if visible then
     local x, y = ImGui.GetWindowPos(ctx)
+    T.badge_x, T.badge_y = x, y
     local dl = ImGui.GetWindowDrawList(ctx)
     ImGui.DrawList_AddRectFilled(dl, x, y, x + 2, y + BADGE_H, P.red)
     local events = tonumber(xget("rec_ev")) or 0
@@ -3019,6 +3093,8 @@ companion_tick = function()
         companion_open_report(not acked)
       else
         companion_finish()
+        F.ShowStopNote()
+        T.events = tonumber(xget("rec_ev")) or 0
       end
     end
   elseif not S then
@@ -3055,8 +3131,12 @@ companion_tick = function()
       C.badge_err = true
       F.Log("Recorder badge error: " .. tostring(err))
     end
+  elseif stop_note then
+    if not pcall(draw_stop_note) then
+      stop_note = nil
+    end
   end
-  if S or not C.done then
+  if S or not C.done or stop_note then
     r.defer(companion_tick)
   else
     r.DeleteExtState("CRS_Feedback", xkey("comp_hb"), false)
