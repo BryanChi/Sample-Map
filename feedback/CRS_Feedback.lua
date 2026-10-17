@@ -34,6 +34,13 @@
 -- describing the script's state, on_recording = function(on) to switch the
 -- script's own debug output. Feedback.Trace("msg") adds a line while recording.
 -- Call Setup when the script starts, so a recording left on resumes.
+-- private_repo = true in Setup says reports land in a private repo.
+--
+-- Recorder script: while recording, the badge and the window that sends the
+-- recording run in CRS_Feedback_Recorder.lua (next to this file), a separate
+-- script with its own Lua state, so they stay up when the host crashes or is
+-- closed. The host starts it, and the two talk through ExtState (see the
+-- "Recorder script" section). Without that file the host draws the badge.
 --
 -- The window runs in its own ImGui context and defer loop, so the host only
 -- needs to call Open(). This file defines the global CRSFeedback and returns
@@ -48,6 +55,10 @@ local F = {}
 CRSFeedback = F
 
 F.API_VERSION = 1
+
+-- This file's folder (the recorder script sits next to it).
+local MODULE_DIR = (debug and debug.getinfo and (debug.getinfo(1, "S").source or "") or ""):match("^@(.+)[/\\][^/\\]+$")
+F.RECORDER_FILE = "CRS_Feedback_Recorder.lua"
 
 -- Where reports go. Set this once the relay is deployed (see
 -- feedback/README.md). An ExtState override lets testers point at a dev relay:
@@ -810,6 +821,11 @@ local function wrap_defer(orig)
         end
         if not ok then
           rec("ERROR " .. tostring(err):gsub("\n", "\n    "))
+          -- on disk now: the script is about to stop, the recorder reads the file
+          rec_flush_pending()
+          if T.fh then
+            T.fh:flush()
+          end
         end
       end
       if not ok then
@@ -925,6 +941,128 @@ local function rec_open_file(fresh)
   T.fh = io.open(path, "ab")
 end
 
+-- --- Recorder script (host side) ---
+-- ExtState keys in section CRS_Feedback, all ending in _<script id>, none saved:
+--   rec_hb   host's frame time (time_precise) while it runs and records
+--   rec_ev   events recorded so far
+--   rec_cmd  "stop" from the recorder; the host stops and sets rec_ack
+--   rec_ack  "stopped"
+--   comp_hb  the recorder's frame time while it runs
+--   comp_cfg the host's Setup fields the recorder needs
+--   draft_title / draft_note  what was typed before recording started
+
+local function xkey(name)
+  return name .. "_" .. safe_id(cfg.script_id)
+end
+
+local function xget(name)
+  return r.GetExtState and r.GetExtState("CRS_Feedback", xkey(name)) or ""
+end
+
+local function xset(name, v)
+  if r.SetExtState then
+    r.SetExtState("CRS_Feedback", xkey(name), tostring(v or ""), false)
+  end
+end
+
+-- True while `name` holds a time_precise stamp newer than `age` seconds.
+local function xfresh(name, age)
+  local t = tonumber(xget(name))
+  return t ~= nil and math.abs(now_s() - t) < age
+end
+
+local CFG_KEYS = { "script_id", "script_name", "version", "repo", "repo_label", "record_hint", "private_repo" }
+local FONT_KEYS = { "title", "mono", "mono_bold", "body", "body_bold" }
+
+local function encode_cfg()
+  local parts = {}
+  local function add(k, v)
+    if v ~= nil and v ~= "" then
+      parts[#parts + 1] = k .. "=" .. tostring(v):gsub("[\r\n\31]", " ")
+    end
+  end
+  for _, k in ipairs(CFG_KEYS) do
+    add(k, cfg[k] == true and "1" or (type(cfg[k]) == "string" and cfg[k] or nil))
+  end
+  if type(cfg.fonts) == "table" then
+    for _, k in ipairs(FONT_KEYS) do
+      add("font." .. k, cfg.fonts[k])
+    end
+  end
+  return table.concat(parts, "\31")
+end
+
+local function decode_cfg(s)
+  local out, fonts = {}, {}
+  for part in (tostring(s or "") .. "\31"):gmatch("([^\31]*)\31") do
+    local k, v = part:match("^([^=]+)=(.*)$")
+    if k then
+      local fk = k:match("^font%.(.+)$")
+      if fk then
+        fonts[fk] = v
+      elseif k == "private_repo" then
+        out[k] = v == "1"
+      else
+        out[k] = v
+      end
+    end
+  end
+  if next(fonts) then
+    out.fonts = fonts
+  end
+  return out
+end
+F._encode_cfg, F._decode_cfg = encode_cfg, decode_cfg
+
+local function recorder_alive()
+  return xfresh("comp_hb", 2)
+end
+
+-- The host's own badge is needed when the recorder isn't running (missing
+-- file, an old REAPER, or it failed to start).
+local function host_badge_needed()
+  if recorder_alive() then
+    return false
+  end
+  return not (T.comp_launch_t and now_s() - T.comp_launch_t < 3)
+end
+
+-- Start the recorder script (once: a running one just picks the host up again).
+local function launch_recorder()
+  if F.COMPANION or not MODULE_DIR or not (r.AddRemoveReaScript and r.Main_OnCommand) then
+    return false
+  end
+  if recorder_alive() then
+    return true
+  end
+  local path = MODULE_DIR .. "/" .. F.RECORDER_FILE
+  if not file_size(path) then
+    return false
+  end
+  xset("comp_cfg", encode_cfg())
+  r.SetExtState("CRS_Feedback", "recorder_launch", cfg.script_id, false)
+  local ok, cmd = pcall(r.AddRemoveReaScript, true, 0, path, true)
+  if not ok or not cmd or cmd == 0 then
+    return false
+  end
+  T.comp_launch_t = now_s()
+  local ran = pcall(r.Main_OnCommand, cmd, 0)
+  return ran
+end
+
+-- Each host frame while recording: tell the recorder the host is alive, and
+-- do what it asks.
+local function host_beat()
+  xset("rec_hb", now_s())
+  xset("rec_ev", T.events)
+  if xget("rec_cmd") == "stop" then
+    xset("rec_cmd", "")
+    T.draft = nil
+    F.StopRecording()
+    xset("rec_ack", "stopped")
+  end
+end
+
 -- Turn bug recording on. `resumed` is set when it was left on last time.
 function F.StartRecording(resumed)
   if T.on then
@@ -950,9 +1088,20 @@ function F.StartRecording(resumed)
     r.SetExtState("CRS_Feedback", rec_ext_key(), "1", true)
     r.SetExtState("CRS_Feedback", rec_ext_key() .. "_since", tostring(T.started), true)
   end
+  -- The badge and the send window run as their own script from here on.
+  xset("draft_title", T.draft and T.draft.title or "")
+  xset("draft_note", T.draft and T.draft.note or "")
+  xset("rec_cmd", "")
+  xset("rec_ack", "")
+  xset("rec_ev", T.events)
+  xset("rec_hb", now_s())
+  local launched_ok, launched = pcall(launch_recorder)
   local env = environment()
   rec(string.format("RECORDING %s: %s %s, REAPER %s on %s, ReaImGui %s",
     resumed and "resumed after a restart" or "started", cfg.script_name, cfg.version, env.reaper, env.os, env.reaimgui))
+  if not (launched_ok and launched) then
+    rec("RECORDING badge shown by the script itself (recorder script not started)")
+  end
   if r.Undo_CanUndo2 then
     T.last_undo = r.Undo_CanUndo2(0)
   end
@@ -995,6 +1144,7 @@ function F.StopRecording()
   if r.SetExtState then
     r.SetExtState("CRS_Feedback", rec_ext_key(), "", true)
   end
+  xset("rec_ev", T.events)
   if cfg.on_recording then
     pcall(cfg.on_recording, false)
   end
@@ -1008,6 +1158,10 @@ function F.DiscardRecording()
   T.lines, T.next, T.count, T.events = {}, 1, 0, 0
   T.stopped_unsent = false
   os.remove(rec_path())
+  -- also when the host stopped without stopping the recording (a crash)
+  if r.SetExtState then
+    r.SetExtState("CRS_Feedback", rec_ext_key(), "", true)
+  end
 end
 
 function F.IsRecording()
@@ -1016,7 +1170,15 @@ end
 
 -- A recording that was stopped but not sent yet.
 function F.HasRecording()
-  return T.stopped_unsent and T.count > 0
+  if not (T.stopped_unsent and T.count > 0) then
+    return false
+  end
+  -- The recorder script may have sent (and deleted) it meanwhile.
+  if not F.COMPANION and not file_size(rec_path()) then
+    T.stopped_unsent = false
+    return false
+  end
+  return true
 end
 
 function F.RecordingDuration()
@@ -2311,6 +2473,11 @@ local function draw_recording_card(dl, x, y, w)
     end
     return math.max(by, y + BTN_H)
   end
+  if F.COMPANION then
+    -- the recorder script only sends; a new recording starts in the script
+    return para(dl, x, y, w, "To record a problem, press the red dot next to Send feedback in "
+      .. tostring(cfg.script_name) .. ".", P.ink2)
+  end
   y = para(dl, x, y, w, "Hard to pin down? Record what the script does while you repeat the problem, "
     .. "and the recording goes with your report.", P.ink2)
   y = y + 10
@@ -2391,8 +2558,13 @@ local function draw_send_card(dl, x, y, w)
   _, S.contact = ImGui.InputTextWithHint(ctx, "##contact", "Email or forum name, if you'd like a reply", S.contact)
   y = item_bottom() + 12
   pop_input_style()
-  y = note(dl, x, y, w, "Your report is posted publicly as an issue on " .. (cfg.repo_label or "the developer's GitHub page")
-    .. ". Don't include anything private.")
+  if cfg.private_repo then
+    -- a private repo: reports are issues only the developer sees
+    y = note(dl, x, y, w, "Your report goes straight to the developer. It isn't posted publicly.")
+  else
+    y = note(dl, x, y, w, "Your report is posted publicly as an issue on " .. (cfg.repo_label or "the developer's GitHub page")
+      .. ". Don't include anything private.")
+  end
   y = draw_status(dl, x, y + 8, w)
   y = y + 10
 
@@ -2644,7 +2816,12 @@ local function own_defer(fn)
   d(fn)
 end
 
+local companion_tick -- set further down
+
 local function tick()
+  if F.COMPANION then
+    return companion_tick()
+  end
   local badge = T.on
   if T.on then
     T.busy = true
@@ -2652,7 +2829,8 @@ local function tick()
     T.busy = false
     -- The host closed its window (its frames stopped): end with it instead
     -- of keeping the script alive for the badge. Recording stays switched
-    -- on, so it resumes the next time the script starts.
+    -- on, so it resumes the next time the script starts (or is sent from
+    -- the recorder script, which notices the heartbeat stopped).
     if T.host_frame_t and now_s() - T.host_frame_t > 1.5 then
       badge = false
       rec_flush_pending()
@@ -2660,10 +2838,24 @@ local function tick()
         T.fh:close()
         T.fh = nil
       end
+    else
+      T.busy = true
+      local ok, err = pcall(host_beat)
+      T.busy = false
+      if not ok then
+        F.Log("Recorder heartbeat error: " .. tostring(err))
+      end
+      -- the recorder script draws the badge when it runs
+      badge = T.on and host_badge_needed()
     end
   end
   if S then
-    draw_feedback()
+    -- same Lua state as the host script: an error here must not stop the host
+    local ok, err = pcall(draw_feedback)
+    if not ok then
+      F.Log("Feedback window error: " .. tostring(err))
+      S = nil
+    end
   end
   if badge then
     local ok, err = pcall(draw_badge)
@@ -2672,7 +2864,7 @@ local function tick()
       F.Log("Recording badge error: " .. tostring(err))
     end
   end
-  if S or badge then
+  if S or badge or (T.on and not (T.host_frame_t and now_s() - T.host_frame_t > 1.5)) then
     own_defer(tick)
   else
     loop_on = false
@@ -2692,6 +2884,209 @@ ensure_loop = function()
   end
 end
 
+-- --- Recorder script (its side) ----------------------------------------------
+-- CRS_Feedback_Recorder.lua loads this file in its own Lua state and calls
+-- F.RunCompanion. It never records anything itself: the host writes the
+-- recording file, and this side shows the badge, asks the host to stop,
+-- and sends the file. When the host's heartbeat stops (it crashed or was
+-- closed) the badge offers to send what was recorded up to then.
+
+local C -- recorder state; nil in a host
+
+-- Load the recording the host wrote, for the report window.
+local function companion_load_recording(host_gone)
+  T.lines, T.next, T.count, T.events = {}, 1, 0, 0
+  T.fh = nil
+  for line in (read_file(rec_path()) or ""):gmatch("[^\n]+") do
+    rec_write(line)
+  end
+  if host_gone then
+    rec_write(rec_clock() .. " RECORDING ended: " .. tostring(cfg.script_name)
+      .. " stopped while recording (it crashed or was closed). Sent from the recorder window.")
+  end
+  T.events = math.max(T.count, tonumber(xget("rec_ev")) or 0)
+  T.started = tonumber(r.GetExtState("CRS_Feedback", rec_ext_key() .. "_since")) or T.started or os.time()
+  T.ended = os.time()
+  T.on = false
+  T.stopped_unsent = T.count > 0
+end
+
+local function companion_open_report(host_gone)
+  companion_load_recording(host_gone)
+  local title, note_text = xget("draft_title"), xget("draft_note")
+  if host_gone and title == "" then
+    title = tostring(cfg.script_name) .. " stopped while recording"
+  end
+  F.Open({ kind = "bug", title = title, note = note_text, include_trace = true })
+  if S and host_gone then
+    set_status("info", tostring(cfg.script_name) .. " isn't running. The recording up to when it stopped is attached.")
+  end
+end
+
+local function companion_finish()
+  C.done = true
+end
+
+local function companion_badge()
+  local n_col, n_var = push_style()
+  local flags = (im_opt("WindowFlags_NoTitleBar") or 0) | (im_opt("WindowFlags_NoResize") or 0)
+    | (im_opt("WindowFlags_NoDocking") or 0) | (im_opt("WindowFlags_NoCollapse") or 0)
+    | (im_opt("WindowFlags_NoScrollbar") or 0) | (im_opt("WindowFlags_NoFocusOnAppearing") or 0)
+    | (im_opt("WindowFlags_TopMost") or 0)
+  if im_opt("GetMainViewport") and im_opt("Viewport_GetWorkPos") and im_opt("Viewport_GetWorkSize") then
+    local vp = ImGui.GetMainViewport(ctx)
+    local x, y = ImGui.Viewport_GetWorkPos(vp)
+    local w = vp and ImGui.Viewport_GetWorkSize(vp)
+    if x and y and w then
+      ImGui.SetNextWindowPos(ctx, x + w - BADGE_W - 60, y + 80, ImGui.Cond_FirstUseEver)
+    end
+  end
+  ImGui.SetNextWindowSize(ctx, BADGE_W, BADGE_H, ImGui.Cond_Always)
+  local visible = ImGui.Begin(ctx, "Bug recording - " .. tostring(cfg.script_name) .. "###CRS_Recording", nil, flags)
+  if visible then
+    local x, y = ImGui.GetWindowPos(ctx)
+    local dl = ImGui.GetWindowDrawList(ctx)
+    ImGui.DrawList_AddRectFilled(dl, x, y, x + 2, y + BADGE_H, P.red)
+    local events = tonumber(xget("rec_ev")) or 0
+    local since = tonumber(r.GetExtState("CRS_Feedback", rec_ext_key() .. "_since")) or os.time()
+    local secs = math.max(0, os.time() - since)
+    local dur = secs >= 3600 and string.format("%d:%02d:%02d", secs // 3600, (secs % 3600) // 60, secs % 60)
+      or string.format("%d:%02d", secs // 60, secs % 60)
+    if C.host_gone then
+      ImGui.DrawList_AddCircleFilled(dl, x + 22, y + 24, 5.5, P.red)
+      local tx = caps(dl, 11, x + 40, y + 18, P.red, "Recording saved", true)
+      caps(dl, 10, tx + 12, y + 19, P.ink2, events .. " events")
+      ImGui.SetCursorScreenPos(ctx, x, y)
+      ImGui.Dummy(ctx, BADGE_W, 44)
+      tip(tostring(cfg.script_name) .. " stopped while recording (it crashed or was closed).\n"
+        .. "Send what was recorded now, or press Later: recording carries on\nthe next time you open "
+        .. tostring(cfg.script_name) .. ".")
+      if btn("##badge_send", "Send report", x + 16, y + 48, "go", 150) then
+        companion_open_report(true)
+      end
+      if btn("##badge_discard", "Discard", x + 174, y + 48, nil, 80) then
+        F.DiscardRecording()
+        companion_finish()
+      end
+      tip("Delete the recording.")
+      if btn("##badge_later", "Later", x + 262, y + 48, nil, 62) then
+        companion_finish()
+      end
+      tip("Close this. Recording carries on the next time you open " .. tostring(cfg.script_name) .. ".")
+    else
+      local a = math.floor((0.35 + 0.65 * pulse()) * 255)
+      ImGui.DrawList_AddCircle(dl, x + 22, y + 24, 9, A(P.red, a // 3), 0, 1)
+      ImGui.DrawList_AddCircleFilled(dl, x + 22, y + 24, 5.5, A(P.red, a))
+      local tx = caps(dl, 11, x + 40, y + 18, P.red, "Recording", true)
+      caps(dl, 10, tx + 12, y + 19, P.ink2, dur .. "  /  " .. events .. " events")
+      ImGui.SetCursorScreenPos(ctx, x, y)
+      ImGui.Dummy(ctx, BADGE_W, 44)
+      tip(tostring(cfg.script_name) .. " is writing down what it does.\nRepeat the problem, then press Stop and send.\n"
+        .. "This badge stays even if " .. tostring(cfg.script_name) .. " crashes.")
+      local stopping = C.stopping ~= nil
+      if btn("##badge_send", stopping and "Stopping..." or "Stop and send", x + 16, y + 48, "go", 170, stopping) then
+        xset("rec_ack", "")
+        xset("rec_cmd", "stop")
+        C.stopping = { send = true, t = now_s() }
+      end
+      if btn("##badge_stop", "Stop", x + 194, y + 48, nil, 80, stopping) then
+        xset("rec_ack", "")
+        xset("rec_cmd", "stop")
+        C.stopping = { send = false, t = now_s() }
+      end
+      tip("Stops recording. It's kept until you send a report from " .. tostring(cfg.script_name) .. " or discard it.")
+    end
+    ImGui.End(ctx)
+  end
+  ImGui.PopStyleVar(ctx, n_var)
+  ImGui.PopStyleColor(ctx, n_col)
+end
+
+companion_tick = function()
+  r.SetExtState("CRS_Feedback", xkey("comp_hb"), tostring(now_s()), false)
+  local host_alive = xfresh("rec_hb", 2.5)
+  local recording = r.GetExtState("CRS_Feedback", rec_ext_key()) == "1"
+  if C.stopping then
+    local acked = xget("rec_ack") == "stopped"
+    if acked or not host_alive or now_s() - C.stopping.t > 4 then
+      local send = C.stopping.send
+      C.stopping = nil
+      xset("rec_ack", "")
+      if not acked then
+        xset("rec_cmd", "")
+      end
+      if send then
+        companion_open_report(not acked)
+      else
+        companion_finish()
+      end
+    end
+  elseif not S then
+    if host_alive and recording then
+      C.host_gone = false
+    elseif not host_alive and (recording or (C.host_gone and file_size(rec_path()))) then
+      if not C.host_gone then
+        C.host_gone = true
+        F.Log("Recorder: " .. tostring(cfg.script_name) .. " stopped while recording")
+      end
+    elseif not C.host_gone then
+      -- the host stopped the recording itself (and shows its own window)
+      companion_finish()
+    end
+  end
+  if S then
+    local ok, err = pcall(draw_feedback)
+    if not ok then
+      F.Log("Recorder window error: " .. tostring(err))
+      S = nil
+    end
+    if not S then
+      -- window closed: back to the badge if the host is recording again,
+      -- otherwise done (a recording not sent stays on disk)
+      if xfresh("rec_hb", 2.5) and r.GetExtState("CRS_Feedback", rec_ext_key()) == "1" then
+        C.host_gone = false
+      else
+        companion_finish()
+      end
+    end
+  elseif not C.done then
+    local ok, err = pcall(companion_badge)
+    if not ok and not C.badge_err then
+      C.badge_err = true
+      F.Log("Recorder badge error: " .. tostring(err))
+    end
+  end
+  if S or not C.done then
+    r.defer(companion_tick)
+  else
+    r.DeleteExtState("CRS_Feedback", xkey("comp_hb"), false)
+    loop_on = false
+  end
+end
+
+-- Entry point of CRS_Feedback_Recorder.lua.
+function F.RunCompanion(script_id)
+  F.COMPANION = true
+  cfg.script_id = script_id
+  local got = decode_cfg(xget("comp_cfg"))
+  for k, v in pairs(got) do
+    cfg[k] = v
+  end
+  cfg.script_id = script_id
+  log_path = nil
+  if not cfg.repo_label and cfg.repo then
+    cfg.repo_label = "github.com/" .. cfg.repo
+  end
+  C = { host_gone = false }
+  r.SetExtState("CRS_Feedback", xkey("comp_hb"), tostring(now_s()), false)
+  if r.atexit then
+    r.atexit(function()
+      r.DeleteExtState("CRS_Feedback", xkey("comp_hb"), false)
+    end)
+  end
+  ensure_loop()
+end
+
 -- --- Public API --------------------------------------------------------------
 
 function F.Setup(opts)
@@ -2703,7 +3098,7 @@ function F.Setup(opts)
     cfg.repo_label = "github.com/" .. cfg.repo
   end
   -- Bug recording left on last time: carry on (catches bugs at startup).
-  if not T.on and r.GetExtState and r.GetExtState("CRS_Feedback", rec_ext_key()) == "1" then
+  if not T.on and not F.COMPANION and r.GetExtState and r.GetExtState("CRS_Feedback", rec_ext_key()) == "1" then
     F.StartRecording(true)
   end
   return F

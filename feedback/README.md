@@ -14,6 +14,7 @@ No GitHub token ships inside the scripts. The relay is the only thing that holds
 | Path | What |
 |---|---|
 | `CRS_Feedback.lua` | The window. One file, copied unchanged into each script. |
+| `CRS_Feedback_Recorder.lua` | The recording badge and send window as their own script, so they survive a crash of the script being recorded. Copied next to `CRS_Feedback.lua`. |
 | `relay/src/index.js` | The Cloudflare Worker. |
 | `relay/wrangler.toml` | Worker config (name, KV storage, rate limit). |
 | `relay/test/` | Worker tests (`npm test`). |
