@@ -36,6 +36,8 @@ function SampleMap_BeginInstance()
 
   begin_library_load()
   log("ImGui context created; loading library asynchronously")
+  -- frame timing for the Performance Tracker window (no cost while it is closed)
+  pcall(function() loop = dofile(SCRIPT_DIR .. "/perf/CRS_Perf.lua").Wrap("Sample Map", loop) end)
   loop()
 end
 

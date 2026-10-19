@@ -13,6 +13,7 @@
 --   [nomain] tag_presets.default.lua
 --   [nomain] feedback/CRS_Feedback.lua
 --   [nomain] feedback/CRS_Feedback_Recorder.lua
+--   [nomain] perf/CRS_Perf.lua
 --   [nomain] assets/*
 --   [nomain] assets/behringer-icons/*
 --   [nomain] assets/behringer-icons/png/*

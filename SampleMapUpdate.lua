@@ -394,6 +394,7 @@ local FILES_TO_UPDATE = {
   { url = "tag_presets.default.lua" },
   { url = "feedback/CRS_Feedback.lua" },
   { url = "feedback/CRS_Feedback_Recorder.lua" },
+  { url = "perf/CRS_Perf.lua" },
   { url = "SampleMapUpdate.lua", required = true },
   { url = "Effects/SampleMapMIDI.jsfx", dest = "Effects/SampleMapMIDI.jsfx", resource = true },
   { url = "Effects/SampleMapPlayer.jsfx", dest = "Effects/SampleMapPlayer.jsfx", resource = true },
