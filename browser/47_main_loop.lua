@@ -67,8 +67,9 @@ function sm_loop_frame()
 
   local loading = is_library_loading()
   if loading then
+    -- A frame that finishes the load still draws the loading view: the first
+    -- map frame (atlas, tag chips) then gets a frame of its own.
     sm_pcall("process_library_load_slice", process_library_load_slice, LIBRARY_LOAD_SLICE_MS)
-    loading = is_library_loading()
   end
 
   -- Start scan after a miss, but defer cache rewrite until after first interactive frame.

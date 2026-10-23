@@ -1267,7 +1267,7 @@ function shutdown_script(reason)
   pcall(stop_analyzer_workers, true)
 
   if #state.samples > 0 or #state.scan_queue > 0 or #(state.analyzer_queue or {}) > 0 then
-    pcall(save_samples)
+    pcall(save_samples, { bytecode = true })
     log(string.format(
       "Saved library on exit (%s): %d sample(s), %d file(s) still queued",
       reason or "close",

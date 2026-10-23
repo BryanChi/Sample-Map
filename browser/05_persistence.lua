@@ -2146,9 +2146,22 @@ function sm_library_apply_folder_filter(job)
   end
 end
 
-function finish_library_hit(job)
+-- The end of a library load runs over two frames so the loading view keeps
+-- drawing. Step 1 (queues, folder filter, layout, Library tags) runs on
+-- job.cleaned with state.samples swapped back afterwards, so the rest of the
+-- frame still sees the library as not loaded yet.
+function finish_library_hit_tags(job)
+  local prev_samples = state.samples
   state.samples = job.cleaned
+  local ok, err = pcall(sm_library_finish_tags_body, job)
+  job.cleaned = state.samples
+  state.samples = prev_samples
+  if not ok then
+    error(err, 0)
+  end
+end
 
+function sm_library_finish_tags_body(job)
   local data = job.data or {}
   local dirs = data.dirs
   if data.scan_queue and type(data.scan_queue) == "table" and #data.scan_queue > 0 then
@@ -2206,6 +2219,10 @@ function finish_library_hit(job)
   end
 
   apply_discovered_library_tags()
+end
+
+function finish_library_hit(job)
+  state.samples = job.cleaned
   rebuild_samples_path_index()
   apply_custom_tags_to_samples()
   rebuild_tag_index()
@@ -2234,14 +2251,83 @@ function finish_library_hit(job)
   ))
 end
 
--- Pick the next readable cache file: main Lua, main JSON, then their .bak copies.
+-- Precompiled copy of the Lua cache. Loading bytecode skips parsing ~9 MB of
+-- source (about 140 ms -> 6 ms for 55k samples). DATA_LUAC_PATH .. ".stamp"
+-- holds the byte size of the SampleMapData.cache.lua it was built from; the
+-- copy is only used while that file still has this size. Saves remove it, and
+-- the save on exit writes a fresh one.
+function sm_file_size(path)
+  local f = io.open(path, "rb")
+  if not f then
+    return nil
+  end
+  local size = f:seek("end")
+  f:close()
+  return size
+end
+
+function sm_remove_bytecode_cache()
+  os.remove(DATA_LUAC_PATH)
+  os.remove(DATA_LUAC_PATH .. ".stamp")
+end
+
+function sm_bytecode_cache_valid()
+  local f = io.open(DATA_LUAC_PATH .. ".stamp", "rb")
+  if not f then
+    return false
+  end
+  local stamp = tonumber(f:read("*l") or "")
+  f:close()
+  local src = sm_file_size(DATA_LUA_PATH)
+  local bc = sm_file_size(DATA_LUAC_PATH)
+  return stamp ~= nil and src ~= nil and src > 0 and stamp == src and (bc or 0) > 0
+end
+
+-- fn: the compiled SampleMapData.cache.lua chunk; source_size: that file's size.
+function sm_write_bytecode_cache(fn, source_size)
+  if not (string.dump and type(fn) == "function" and source_size and source_size > 0) then
+    return false
+  end
+  local ok, bc = pcall(string.dump, fn, true)
+  if not ok or type(bc) ~= "string" then
+    return false
+  end
+  sm_remove_bytecode_cache()
+  local tmp = DATA_LUAC_PATH .. ".tmp"
+  local f = io.open(tmp, "wb")
+  if not f then
+    return false
+  end
+  local ok_w = f:write(bc)
+  local ok_c = f:close()
+  if not ok_w or not ok_c or not os.rename(tmp, DATA_LUAC_PATH) then
+    os.remove(tmp)
+    return false
+  end
+  local sf = io.open(DATA_LUAC_PATH .. ".stamp", "wb")
+  if not sf then
+    os.remove(DATA_LUAC_PATH)
+    return false
+  end
+  sf:write(tostring(source_size))
+  sf:close()
+  return true
+end
+
+-- Pick the next readable cache file: precompiled Lua (when current), main Lua,
+-- main JSON, then their .bak copies.
 function sm_library_load_next_source(job)
-  local candidates = {
-    { "lua", DATA_LUA_PATH },
-    { "json", DATA_PATH },
-    { "lua", DATA_LUA_PATH .. ".bak" },
-    { "json", DATA_PATH .. ".bak" },
-  }
+  if job.bytecode_ok == nil then
+    job.bytecode_ok = sm_bytecode_cache_valid()
+  end
+  local candidates = {}
+  if job.bytecode_ok then
+    candidates[1] = { "lua", DATA_LUAC_PATH, true }
+  end
+  candidates[#candidates + 1] = { "lua", DATA_LUA_PATH }
+  candidates[#candidates + 1] = { "json", DATA_PATH }
+  candidates[#candidates + 1] = { "lua", DATA_LUA_PATH .. ".bak" }
+  candidates[#candidates + 1] = { "json", DATA_PATH .. ".bak" }
   local i = (job.source_index or 0) + 1
   while i <= #candidates do
     local c = candidates[i]
@@ -2253,6 +2339,7 @@ function sm_library_load_next_source(job)
         job.source_index = i
         job.format = c[1]
         job.path = c[2]
+        job.bytecode = c[3] == true
         job.content = nil
         job.phase = "read"
         job.message = (c[1] == "lua") and "Reading Lua cache…" or "Reading JSON cache…"
@@ -2275,8 +2362,16 @@ function process_library_load_slice(max_ms)
   end
   max_ms = max_ms or LIBRARY_LOAD_SLICE_MS
   local deadline = r.time_precise() + (max_ms / 1000.0)
+  -- The long single steps (decode, finalize) start on a frame of their own, so
+  -- the window shows before the cache is decoded and no frame stacks two of them.
+  local first_step = true
 
   while r.time_precise() < deadline do
+    local step_first = first_step
+    first_step = false
+    if (job.phase == "decode" or job.phase == "finalize") and not step_first then
+      return true
+    end
     if job.phase == "init" then
       if not sm_library_load_next_source(job) then
         finish_library_miss("Cache file not found")
@@ -2321,12 +2416,17 @@ function process_library_load_slice(max_ms)
       if job.format == "lua" then
         local loader, err
         if loadfile then
-          local ok_lf, a, b = pcall(loadfile, job.path)
+          local ok_lf, a, b
+          if job.bytecode then
+            ok_lf, a, b = pcall(loadfile, job.path, "b")
+          else
+            ok_lf, a, b = pcall(loadfile, job.path)
+          end
           if ok_lf then
             loader, err = a, b
           end
         end
-        if not loader then
+        if not loader and not job.bytecode then
           local file = io.open(job.path, "r")
           if file then
             local content = file:read("*all")
@@ -2343,7 +2443,9 @@ function process_library_load_slice(max_ms)
         end
         if not loader then
           log("Failed to load Lua cache: " .. tostring(err))
-          if job.path == DATA_LUA_PATH then
+          if job.bytecode then
+            pcall(sm_remove_bytecode_cache)
+          elseif job.path == DATA_LUA_PATH then
             pcall(os.remove, DATA_LUA_PATH)
           end
           if not sm_library_load_next_source(job) then
@@ -2354,7 +2456,9 @@ function process_library_load_slice(max_ms)
           local ok, result = pcall(loader)
           if not ok or type(result) ~= "table" then
             log("Failed to execute Lua cache: " .. tostring(result))
-            if job.path == DATA_LUA_PATH then
+            if job.bytecode then
+              pcall(sm_remove_bytecode_cache)
+            elseif job.path == DATA_LUA_PATH then
               pcall(os.remove, DATA_LUA_PATH)
             end
             if not sm_library_load_next_source(job) then
@@ -2363,6 +2467,10 @@ function process_library_load_slice(max_ms)
             end
           else
             data = result
+            -- Loaded from source: keep a precompiled copy for the next start.
+            if not job.bytecode and job.path == DATA_LUA_PATH and not sm_bytecode_cache_valid() then
+              pcall(sm_write_bytecode_cache, loader, sm_file_size(DATA_LUA_PATH))
+            end
           end
         end
       else
@@ -2502,6 +2610,12 @@ function process_library_load_slice(max_ms)
         finish_library_miss("No valid samples in cache")
         return false
       end
+      finish_library_hit_tags(job)
+      job.phase = "finalize_index"
+      job.progress = 0.98
+      return true
+
+    elseif job.phase == "finalize_index" then
       finish_library_hit(job)
       return false
     else
@@ -2513,7 +2627,9 @@ function process_library_load_slice(max_ms)
 end
 
 
-function save_samples()
+-- opts.bytecode: also write the precompiled cache (costs a compile of the
+-- whole cache, so only the save on exit asks for it).
+function save_samples(opts)
   local save_start = r.time_precise()
 
   local normalized_folders = {}
@@ -2528,7 +2644,15 @@ function save_samples()
   local ok_lua_enc, lua_str = pcall(encode_lua_cache, payload)
   local lua_saved, lua_err = false, nil
   if ok_lua_enc and type(lua_str) == "string" then
+    -- The precompiled copy describes the file being replaced.
+    pcall(sm_remove_bytecode_cache)
     lua_saved, lua_err = sm_atomic_write(DATA_LUA_PATH, lua_str)
+    if lua_saved and type(opts) == "table" and opts.bytecode and load then
+      local ok_c, fn = pcall(load, lua_str, "@SampleMapData.cache.lua", "t")
+      if ok_c and fn then
+        pcall(sm_write_bytecode_cache, fn, #lua_str)
+      end
+    end
   else
     lua_err = "encode failed: " .. tostring(lua_str)
   end
@@ -2590,6 +2714,7 @@ end
 
 
 function clear_sample_cache()
+  sm_remove_bytecode_cache()
   for _, p in ipairs({ DATA_PATH, DATA_LUA_PATH }) do
     os.remove(p)
     os.remove(p .. ".bak")

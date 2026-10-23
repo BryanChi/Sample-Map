@@ -24,6 +24,7 @@ CONFIG_DIR = SCRIPT_DIR
 CONFIG_PATH = CONFIG_DIR .. "/SampleMapBrowser.json"
 DATA_PATH = SCRIPT_DIR .. "/SampleMapData.json"  -- Cached sample index (JSON, compatibility)
 DATA_LUA_PATH = SCRIPT_DIR .. "/SampleMapData.cache.lua"  -- Fast Lua table cache
+DATA_LUAC_PATH = SCRIPT_DIR .. "/SampleMapData.cache.luac"  -- Precompiled copy of the Lua cache
 -- Behringer mixer instrument icons (see assets/behringer-icons/ATTRIBUTION.md)
 -- Kept global to avoid Lua's 200-local main-chunk limit.
 -- New module-level helpers/constants should be globals or live on `state`, not `local`.

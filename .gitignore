@@ -4,6 +4,8 @@
 SampleMapBrowser.json
 SampleMapData.json
 SampleMapData.cache.lua
+SampleMapData.cache.luac
+SampleMapData.cache.luac.stamp
 .samplemap_player_status.json
 # Atomic-save temp files and backups
 *.tmp
