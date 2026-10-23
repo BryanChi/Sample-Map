@@ -823,6 +823,11 @@ function SampleCacheCodec.compact_sample(sample, intern_dir, intern_tag)
   return row
 end
 
+local function expand_num(v)
+  if type(v) == "number" then return v end
+  return nil
+end
+
 function SampleCacheCodec.expand_sample(row, dirs, tag_dict)
   if type(row) ~= "table" then
     return nil
@@ -849,10 +854,7 @@ function SampleCacheCodec.expand_sample(row, dirs, tag_dict)
       end
     end
   end
-  local function num(v)
-    if type(v) == "number" then return v end
-    return nil
-  end
+  local num = expand_num
   local pt = row[11]
   local playback_type = nil
   if type(pt) == "number" then

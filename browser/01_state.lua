@@ -32,7 +32,9 @@ VFX_ICON_DIR = SCRIPT_DIR .. "/assets/vertical-fx-icons"
 FXD_ICON_DIR = SCRIPT_DIR .. "/assets/fx-device-icons"
 -- Bump when genre/loop/library-folder inference rules change and caches must be re-tagged.
 TAG_SCHEMA_VERSION = 4
-LIBRARY_LOAD_SLICE_MS = 10.0
+-- Only the loading view draws while the library loads, so most of each ~33 ms
+-- defer frame can go to it (10 ms left the load waiting on idle frames).
+LIBRARY_LOAD_SLICE_MS = 25.0
 PROJ_EXT_SECTION = "SampleMapBrowser"
 PROJ_EXT_KEY_SEQUENCER = "SequencerStateV1"
 

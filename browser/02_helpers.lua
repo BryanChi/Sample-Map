@@ -261,6 +261,10 @@ function normalize_path(path)
   if not path or path == "" then
     return path
   end
+  -- Already normalized (the usual case): skip the two gsubs.
+  if type(path) == "string" and path:byte(-1) ~= 47 and not path:find("\\", 1, true) then
+    return path
+  end
   -- Replace backslashes with forward slashes
   path = path:gsub("\\", "/")
   -- Remove trailing slash
@@ -1099,18 +1103,41 @@ end
 -- boundaries so "house" does not match "warehouse".
 -- Multi-word keys accept any punctuation/separator between parts:
 --   deep house, deep.house, deep_house, deep-house, deep/house, deephouse
+-- Patterns per key, built once: { first word, separated pattern, concatenated pattern or false }.
+local genre_key_patterns = {}
+-- Byte -> true when that character is %w (same test as before, one lookup per byte).
+local genre_word_byte = setmetatable({}, { __index = function(t, b)
+  local v = string.char(b):match("%w") ~= nil
+  t[b] = v
+  return v
+end })
+
 function genre_key_matches(haystack, key)
   if not haystack or not key or key == "" then
     return false
   end
-  local parts = {}
-  for part in tostring(key):lower():gmatch("%w+") do
-    parts[#parts + 1] = part
+  local pats = genre_key_patterns[key]
+  if not pats then
+    local parts = {}
+    for part in tostring(key):lower():gmatch("%w+") do
+      parts[#parts + 1] = part
+    end
+    if #parts == 0 then
+      pats = false
+    else
+      pats = { parts[1], table.concat(parts, "[^%w]+"), #parts > 1 and table.concat(parts) or false }
+    end
+    genre_key_patterns[key] = pats
   end
-  if #parts == 0 then
+  if not pats then
+    return false
+  end
+  -- Both forms start with the first word, so a haystack without it can't match.
+  if not haystack:find(pats[1], 1, true) then
     return false
   end
 
+  local len = #haystack
   local function bounded(pat)
     -- Plain substring with alphanumeric word boundaries (works at string ends too)
     local i = 1
@@ -1119,11 +1146,8 @@ function genre_key_matches(haystack, key)
       if not s then
         return false
       end
-      local before = (s == 1) and "" or haystack:sub(s - 1, s - 1)
-      local after = (e == #haystack) and "" or haystack:sub(e + 1, e + 1)
-      local before_ok = before == "" or not before:match("%w")
-      local after_ok = after == "" or not after:match("%w")
-      if before_ok and after_ok then
+      if (s == 1 or not genre_word_byte[haystack:byte(s - 1)])
+          and (e == len or not genre_word_byte[haystack:byte(e + 1)]) then
         return true
       end
       i = s + 1
@@ -1132,12 +1156,12 @@ function genre_key_matches(haystack, key)
 
   -- Separated form: deep house / deep.house / deep_house / deep-house / etc.
   -- [^%w]+ matches any run of non-alphanumeric chars (space, ., _, -, /, +, ...)
-  if bounded(table.concat(parts, "[^%w]+")) then
+  if bounded(pats[2]) then
     return true
   end
 
   -- Concatenated form: deephouse, futurebass, jerseyclub
-  if #parts > 1 and bounded(table.concat(parts)) then
+  if pats[3] and bounded(pats[3]) then
     return true
   end
 
@@ -1359,31 +1383,58 @@ function apply_discovered_library_tags()
     return info
   end
 
-  local function tokens_from_library_path(rel, root)
-    local found = {}
+  -- Folder names repeat across many directories (pack roots, "Kicks", ...), so
+  -- each segment's kept tokens are worked out once per pass.
+  local junk_of = {}
+  local function is_junk_cached(token)
+    local v = junk_of[token]
+    if v == nil then
+      v = is_junk_token(token) and true or false
+      junk_of[token] = v
+    end
+    return v
+  end
+  local segment_tokens = {}
+  local function tokens_of_segment(segment)
+    local list = segment_tokens[segment]
+    if list then
+      return list
+    end
+    list = {}
+    local seen = {}
     local function consider(token)
       token = tostring(token or ""):lower():gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
-      if is_junk_token(token) or found[token] then
+      if is_junk_cached(token) or seen[token] then
         return
       end
-      found[token] = true
+      seen[token] = true
+      list[#list + 1] = token
     end
-    local function add_segment(segment)
-      local phrase = tostring(segment or ""):lower():gsub("[^%w]+", " "):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
-      if phrase == "" then
-        return
-      end
-      local kept_words = {}
+    local phrase = tostring(segment or ""):lower():gsub("[^%w]+", " "):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+    if phrase ~= "" then
+      local kept_words = 0
       for word in phrase:gmatch("%w+") do
         consider(word)
-        if not is_junk_token(word) then
-          kept_words[#kept_words + 1] = word
+        if not is_junk_cached(word) then
+          kept_words = kept_words + 1
         end
       end
       -- Keep the original folder name when it has a distinctive word, so
       -- "Cymatics Lofi Pack" stays one chip instead of a stitched fragment.
-      if phrase:find(" ", 1, true) and #kept_words >= 1 then
+      if phrase:find(" ", 1, true) and kept_words >= 1 then
         consider(phrase)
+      end
+    end
+    segment_tokens[segment] = list
+    return list
+  end
+
+  local function tokens_from_library_path(rel, root)
+    local found = {}
+    local function add_segment(segment)
+      local list = tokens_of_segment(segment)
+      for i = 1, #list do
+        found[list[i]] = true
       end
     end
     if root and root ~= "" then
@@ -1407,9 +1458,11 @@ function apply_discovered_library_tags()
   local dir_tokens = {}
   local dir_meta = {}
   local n = #samples
+  local info_of = {} -- per sample, reused by the tag pass below
   for i = 1, n do
     local sample = samples[i]
     local info = dir_info(sample and sample.path)
+    info_of[i] = info
     local root, rel = info.root, info.rel
     local key = info.key
     if not key then
@@ -1505,8 +1558,7 @@ function apply_discovered_library_tags()
   end
 
   local dir_match_cache = {}
-  local function matching_tags_for_path(path)
-    local info = dir_info(path)
+  local function matching_tags_for_info(info)
     local cached = info.extra
     if cached then
       return cached
@@ -1575,7 +1627,29 @@ function apply_discovered_library_tags()
           end
         end
       end
-      sample.tags = append_unique_tags(kept, matching_tags_for_path(path))
+      -- Same as append_unique_tags(kept, extra), with the suppressed checks memoized.
+      local extra = matching_tags_for_info(info_of[i])
+      if #extra > 0 then
+        local existing = {}
+        for k = 1, #kept do
+          existing[kept[k]] = true
+        end
+        for k = 1, #extra do
+          local tag = extra[k]
+          if not existing[tag] then
+            local suppressed = suppressed_of[tag]
+            if suppressed == nil then
+              suppressed = (tag_is_suppressed and tag_is_suppressed(tag)) and true or false
+              suppressed_of[tag] = suppressed
+            end
+            if not suppressed then
+              kept[#kept + 1] = tag
+              existing[tag] = true
+            end
+          end
+        end
+      end
+      sample.tags = kept
     end
   end
 
@@ -1593,17 +1667,40 @@ function rebuild_tag_index()
     s._render_color = nil
     local set = {}
     if s.tags and type(s.tags) == "table" then
-      local tags, seen = {}, {}
-      for _, tag in ipairs(s.tags) do
-        if tag == "808" then
-          tag = "808s"
+      -- Most lists have no "808" and no repeats: keep them as they are
+      -- instead of copying 50k+ small tables on every rebuild.
+      local tags = s.tags
+      local clean = true
+      for i = 1, #tags do
+        local tag = tags[i]
+        if tag == "808" or tag == nil then
+          clean = false
+          break
         end
-        if tag and not seen[tag] then
-          seen[tag] = true
-          tags[#tags + 1] = tag
+        for j = 1, i - 1 do
+          if tags[j] == tag then
+            clean = false
+            break
+          end
+        end
+        if not clean then
+          break
         end
       end
-      s.tags = tags
+      if not clean then
+        local seen = {}
+        tags = {}
+        for _, tag in ipairs(s.tags) do
+          if tag == "808" then
+            tag = "808s"
+          end
+          if tag and not seen[tag] then
+            seen[tag] = true
+            tags[#tags + 1] = tag
+          end
+        end
+        s.tags = tags
+      end
       for _, tag in ipairs(tags) do
         local suppressed = suppressed_of[tag]
         if suppressed == nil then
