@@ -33,6 +33,8 @@
 -- ImGui / im are found on their own), get_state = function returning lines
 -- describing the script's state, on_recording = function(on) to switch the
 -- script's own debug output. Feedback.Trace("msg") adds a line while recording.
+-- Each Stop keeps a recording; several can go with one report.
+-- Feedback.RecordingCount() says how many wait (hosts show it on their button).
 -- Call Setup when the script starts, so a recording left on resumes.
 -- private_repo = true in Setup says reports land in a private repo.
 --
@@ -941,6 +943,100 @@ local function rec_open_file(fresh)
   T.fh = io.open(path, "ab")
 end
 
+-- --- Saved recordings ---
+-- Each Stop keeps what was recorded as a recording of its own, so several can
+-- wait for one report. The files sit next to the live one and are listed in
+-- <id>.recordings, one per line: file, started, ended, events (tab separated).
+-- Both the host and the recorder script read and write that list.
+
+local function saved_index_path()
+  return data_dir() .. "/" .. safe_id(cfg.script_id) .. ".recordings"
+end
+
+local saved_cache -- { t, list }
+
+local function read_saved()
+  local list, dir = {}, data_dir()
+  for line in (read_file(saved_index_path()) or ""):gmatch("[^\n]+") do
+    local name, started, ended, events = line:match("^([^\t]+)\t(%d+)\t(%d+)\t(%d+)")
+    if name and file_size(dir .. "/" .. name) then
+      list[#list + 1] = { name = name, path = dir .. "/" .. name,
+        started = tonumber(started), ended = tonumber(ended), events = tonumber(events) }
+    end
+  end
+  return list
+end
+
+local function write_saved(list)
+  local out = {}
+  for _, s in ipairs(list) do
+    out[#out + 1] = table.concat({ s.name, s.started, s.ended, s.events }, "\t")
+  end
+  if #out == 0 then
+    os.remove(saved_index_path())
+  else
+    write_file(saved_index_path(), table.concat(out, "\n") .. "\n")
+  end
+  saved_cache = nil
+end
+
+-- Recordings stopped and not sent yet, oldest first:
+-- { name, path, started, ended, events }. Read again at most twice a second.
+function F.Recordings()
+  if not (saved_cache and math.abs(now_s() - saved_cache.t) < 0.5) then
+    saved_cache = { t = now_s(), list = read_saved() }
+  end
+  return saved_cache.list
+end
+
+-- How many recordings wait for a report (hosts show it on their button).
+function F.RecordingCount()
+  return #F.Recordings()
+end
+
+-- Keep the live recording file as a saved recording.
+local function save_live(started, ended, events)
+  local live = rec_path()
+  if not file_size(live) then
+    return nil
+  end
+  local dir = data_dir()
+  local base = safe_id(cfg.script_id) .. ".rec-" .. os.date("%Y%m%d-%H%M%S", started)
+  local name, n = base .. ".log", 1
+  while file_size(dir .. "/" .. name) do
+    n = n + 1
+    name = base .. "-" .. n .. ".log"
+  end
+  if not os.rename(live, dir .. "/" .. name) then
+    return nil
+  end
+  local list = read_saved()
+  list[#list + 1] = { name = name, started = started, ended = ended, events = events }
+  write_saved(list)
+  return name
+end
+
+-- Delete one saved recording.
+local function discard_saved(name)
+  local list = read_saved()
+  for i = #list, 1, -1 do
+    if list[i].name == name then
+      os.remove(list[i].path)
+      table.remove(list, i)
+    end
+  end
+  write_saved(list)
+end
+F.DiscardSaved = discard_saved
+
+local function fmt_duration(s)
+  s = math.max(0, s or 0)
+  if s >= 3600 then
+    return string.format("%d:%02d:%02d", s // 3600, (s % 3600) // 60, s % 60)
+  end
+  return string.format("%d:%02d", s // 60, s % 60)
+end
+
 -- --- Recorder script (host side) ---
 -- ExtState keys in section CRS_Feedback, all ending in _<script id>, none saved:
 --   rec_hb   host's frame time (time_precise) while it runs and records
@@ -1082,7 +1178,6 @@ function F.StartRecording(resumed)
   T.pending, T.recent, T.host_frame_t = nil, {}, nil
   T.proj_count, T.play, T.stats_t, T.frames, T.slowest = nil, nil, nil, 0, 0
   T.on = true
-  T.stopped_unsent = false
   rec_open_file(not resumed)
   if r.SetExtState then
     r.SetExtState("CRS_Feedback", rec_ext_key(), "1", true)
@@ -1124,9 +1219,9 @@ function F.StartRecording(resumed)
   ensure_loop()
 end
 
--- Turn it off. The recording stays in memory (and on disk) until it is sent
--- or discarded, so "Stop and send" can attach it.
-function F.StopRecording()
+-- Turn it off. With `keep`, what was recorded becomes a saved recording that
+-- waits (with any others) until it is sent or discarded.
+local function stop_recording(keep)
   if not T.on then
     return
   end
@@ -1135,12 +1230,17 @@ function F.StopRecording()
   rec_flush_pending()
   T.on = false
   T.ended = os.time()
-  T.stopped_unsent = true
   unwrap_all()
   if T.fh then
     T.fh:close()
     T.fh = nil
   end
+  if keep then
+    save_live(T.started or T.ended, T.ended, T.events)
+  else
+    os.remove(rec_path())
+  end
+  T.lines, T.next, T.count = {}, 1, 0
   if r.SetExtState then
     r.SetExtState("CRS_Feedback", rec_ext_key(), "", true)
   end
@@ -1151,12 +1251,16 @@ function F.StopRecording()
   F.Log("Bug recording stopped (" .. T.events .. " events)")
 end
 
-function F.DiscardRecording()
+function F.StopRecording()
+  stop_recording(true)
+end
+
+-- Drop the live recording (stopping it without keeping it).
+local function discard_live()
   if T.on then
-    F.StopRecording()
+    stop_recording(false)
   end
   T.lines, T.next, T.count, T.events = {}, 1, 0, 0
-  T.stopped_unsent = false
   os.remove(rec_path())
   -- also when the host stopped without stopping the recording (a crash)
   if r.SetExtState then
@@ -1164,29 +1268,30 @@ function F.DiscardRecording()
   end
 end
 
+-- Discard one saved recording by name, or (no name) the live one and all saved.
+function F.DiscardRecording(name)
+  if name then
+    discard_saved(name)
+    return
+  end
+  discard_live()
+  for _, s in ipairs(read_saved()) do
+    os.remove(s.path)
+  end
+  write_saved({})
+end
+
 function F.IsRecording()
   return T.on
 end
 
--- A recording that was stopped but not sent yet.
+-- At least one recording was stopped but not sent yet.
 function F.HasRecording()
-  if not (T.stopped_unsent and T.count > 0) then
-    return false
-  end
-  -- The recorder script may have sent (and deleted) it meanwhile.
-  if not F.COMPANION and not file_size(rec_path()) then
-    T.stopped_unsent = false
-    return false
-  end
-  return true
+  return F.RecordingCount() > 0
 end
 
 function F.RecordingDuration()
-  local s = math.max(0, (T.ended or os.time()) - (T.started or os.time()))
-  if s >= 3600 then
-    return string.format("%d:%02d:%02d", s // 3600, (s % 3600) // 60, s % 60)
-  end
-  return string.format("%d:%02d", s // 60, s % 60)
+  return fmt_duration((T.ended or os.time()) - (T.started or os.time()))
 end
 
 function F.RecordingEvents()
@@ -1202,24 +1307,28 @@ function F.Trace(msg, key)
   end
 end
 
--- The recording as text lines, newest last, at most F.TRACE_SEND_BYTES.
-local function recording_lines()
-  rec_flush_pending()
+-- A recording as text lines, newest last, at most `budget` bytes
+-- (F.TRACE_SEND_BYTES). `path` is a saved recording; without it, the live one.
+local function recording_lines(path, budget)
   local all = {}
-  local start = (T.count < F.TRACE_MAX_LINES) and 1 or T.next
-  for i = 0, T.count - 1 do
-    all[#all + 1] = T.lines[((start - 1 + i) % F.TRACE_MAX_LINES) + 1]
+  if not path then
+    rec_flush_pending()
+    local start = (T.count < F.TRACE_MAX_LINES) and 1 or T.next
+    for i = 0, T.count - 1 do
+      all[#all + 1] = T.lines[((start - 1 + i) % F.TRACE_MAX_LINES) + 1]
+    end
   end
   if #all == 0 then
-    local data = read_file(rec_path()) or ""
+    local data = read_file(path or rec_path()) or ""
     for line in data:gmatch("[^\n]+") do
       all[#all + 1] = line
     end
   end
+  budget = budget or F.TRACE_SEND_BYTES
   local size, first = 0, #all + 1
   for i = #all, 1, -1 do
     size = size + #all[i] + 1
-    if size > F.TRACE_SEND_BYTES then
+    if size > budget then
       break
     end
     first = i
@@ -1234,6 +1343,25 @@ local function recording_lines()
   return out
 end
 F._recording_lines = recording_lines
+
+-- The recordings a report attaches: the saved ones not switched off in
+-- state.rec_off, plus the live one while recording. Without a state, all.
+-- state.include_trace = false attaches none.
+function F.TraceItems(state)
+  local items = {}
+  if state and state.include_trace == false then
+    return items
+  end
+  for _, s in ipairs(F.Recordings()) do
+    if not (state and state.rec_off and state.rec_off[s.name]) then
+      items[#items + 1] = s
+    end
+  end
+  if T.on then
+    items[#items + 1] = { live = true, started = T.started or os.time(), ended = os.time(), events = T.events }
+  end
+  return items
+end
 
 -- The exact log text a report would include (already scrubbed).
 -- opts.usage (default true): the usage log; opts.trace: the bug recording.
@@ -1282,10 +1410,13 @@ function F.BuildLogText(opts)
   if #ring == 0 and #extra == 0 and opts.usage ~= false then
     lines[#lines + 1] = "(no log lines yet)"
   end
-  if opts.trace then
-    local rl = recording_lines()
+  local items = opts.trace and (type(opts.trace) == "table" and opts.trace or F.TraceItems()) or {}
+  for i, it in ipairs(items) do
+    local rl = recording_lines(it.path, F.TRACE_SEND_BYTES // #items)
     lines[#lines + 1] = ""
-    lines[#lines + 1] = string.format("-- Bug recording (%d events, %s) --", T.events, F.RecordingDuration())
+    lines[#lines + 1] = string.format("-- Bug recording%s (%d events, %s, started %s) --",
+      #items > 1 and (" " .. i .. " of " .. #items) or "", it.events, fmt_duration(it.ended - it.started),
+      os.date("%H:%M:%S", it.started))
     for _, l in ipairs(rl) do
       lines[#lines + 1] = l
     end
@@ -1402,6 +1533,7 @@ local function new_state(opts)
     contact = r.GetExtState and r.GetExtState("CRS_Feedback", "contact") or "",
     include_log = opts.include_log ~= false,
     include_trace = opts.include_trace ~= false,
+    rec_off = {}, -- [saved recording name] = true: not attached
     viewer = nil, -- { kind = "trace"|"sent", text, lines }: the separate viewer window
     images = {}, -- { path, name, bytes, img }
     status = nil, -- { kind = "info"|"error"|"ok", text }
@@ -1584,10 +1716,10 @@ local function report_as_text()
     t[#t + 1] = ""
     t[#t + 1] = "Contact: " .. trim(S.contact)
   end
-  local trace = S.include_trace and (T.on or F.HasRecording())
-  if S.include_log or trace then
+  local items = F.TraceItems(S)
+  if S.include_log or #items > 0 then
     t[#t + 1] = ""
-    t[#t + 1] = F.BuildLogText({ usage = S.include_log, trace = trace })
+    t[#t + 1] = F.BuildLogText({ usage = S.include_log, trace = items })
   end
   return table.concat(t, "\n")
 end
@@ -1606,7 +1738,7 @@ function F._build_payload(state)
   if #note > F.MAX_NOTE_CHARS then
     return nil, "The note is too long (" .. #note .. " characters, limit " .. F.MAX_NOTE_CHARS .. ")."
   end
-  local trace = state.include_trace and F.HasRecording() or false
+  local items = F.TraceItems(state)
   local images = {}
   for i, im in ipairs(state.images) do
     images[i] = { field = "image" .. i, name = F.ScrubPaths(im.name):match("([^/\\]+)$") }
@@ -1620,7 +1752,7 @@ function F._build_payload(state)
     title = title,
     note = note,
     contact = trim(state.contact),
-    log = (state.include_log or trace) and F.BuildLogText({ usage = state.include_log, trace = trace }) or "",
+    log = (state.include_log or #items > 0) and F.BuildLogText({ usage = state.include_log, trace = items }) or "",
     env = environment(),
     images = images,
   }
@@ -1681,8 +1813,11 @@ local function start_send()
   end
   temps[#temps + 1] = resp_path
   temps[#temps + 1] = code_path
-  S.send = { job = job, resp_path = resp_path, code_path = code_path, temps = temps,
-    with_trace = S.include_trace and F.HasRecording() }
+  local sent_recs = {}
+  for _, it in ipairs(F.TraceItems(S)) do
+    sent_recs[#sent_recs + 1] = it.name
+  end
+  S.send = { job = job, resp_path = resp_path, code_path = code_path, temps = temps, sent_recs = sent_recs }
   S.phase = "sending"
   set_status("info", "Sending...")
   if r.SetExtState then
@@ -1732,8 +1867,11 @@ local function poll_send()
     return
   end
   local result, err = F._parse_reply(rc, code:match("%d+"), body)
-  if result and send.with_trace then
-    F.DiscardRecording()
+  if result then
+    -- the recordings that went with it
+    for _, name in ipairs(send.sent_recs) do
+      discard_saved(name)
+    end
   end
   if result then
     S.phase = "sent"
@@ -1903,12 +2041,17 @@ local function char_w(f, ch)
   return w
 end
 
+-- ASCII-only upper + a UTF-8 char iterator that never throws: string.upper follows the C locale,
+-- which on macOS maps bytes 0x80-0xFF as Latin-1 and breaks multi-byte chars (utf8.codes then errors)
+local function caps_upper(s) return (tostring(s):gsub('[a-z]', string.upper)) end
+local function caps_chars(s) return caps_upper(s):gmatch('[\0-\x7F\xC2-\xF4][\x80-\xBF]*') end
+
 -- Letter-spaced mono caps (the site's labels).
 local function caps_w(size, s, bold)
   local f = FONTS[(bold and "monoB" or "mono") .. size]
   local w, n = 0, 0
-  for _, cp in utf8.codes(tostring(s):upper()) do
-    w = w + char_w(f, utf8.char(cp))
+  for ch in caps_chars(s) do
+    w = w + char_w(f, ch)
     n = n + 1
   end
   return w + math.max(0, n - 1) * size * 0.12
@@ -1916,8 +2059,7 @@ end
 
 local function caps(dl, size, x, y, c, s, bold)
   local f = FONTS[(bold and "monoB" or "mono") .. size]
-  for _, cp in utf8.codes(tostring(s):upper()) do
-    local ch = utf8.char(cp)
+  for ch in caps_chars(s) do
     txt(dl, f, size, x, y, c, ch)
     x = x + char_w(f, ch) + size * 0.12
   end
@@ -2307,25 +2449,39 @@ local PAD = 26
 -- --- Viewer: a separate window with the bug recording or what a report sends ---
 -- Its text is built when it opens (and on Refresh or an option change), not every frame.
 
-local function viewer_text(kind)
+-- The recording a "trace" viewer shows: a saved one by name, or (no name) the live one.
+local function viewer_item(name)
+  if not name then
+    return T.on and { live = true, started = T.started or os.time(), ended = os.time(), events = T.events } or nil
+  end
+  for _, s in ipairs(F.Recordings()) do
+    if s.name == name then
+      return s
+    end
+  end
+end
+
+local function viewer_text(kind, name)
   if kind == "trace" then
-    local lines = recording_lines()
+    local it = viewer_item(name)
+    local lines = it and recording_lines(it.path) or {}
     if #lines == 0 then
       return "(Nothing recorded yet.)"
     end
     return F.ScrubPaths(table.concat(lines, "\n"))
   end
-  local trace = S.include_trace and (T.on or F.HasRecording())
-  if not (S.include_log or trace) then
+  local items = F.TraceItems(S)
+  if not (S.include_log or #items > 0) then
     return "(No log will be sent with this report: the usage log is off and no bug recording is attached.)"
   end
-  return F.BuildLogText({ usage = S.include_log, trace = trace })
+  return F.BuildLogText({ usage = S.include_log, trace = items })
 end
 
-local function open_viewer(kind)
-  local text = viewer_text(kind)
+-- kind "trace" (name: which recording, nil for the live one) or "sent".
+local function open_viewer(kind, name)
+  local text = viewer_text(kind, name)
   local _, n = text:gsub("\n", "")
-  S.viewer = { kind = kind, text = text, lines = n + 1, built = os.time() }
+  S.viewer = { kind = kind, name = name, text = text, lines = n + 1, built = os.time() }
 end
 
 -- Rebuild an open viewer after something it shows changed.
@@ -2333,10 +2489,10 @@ local function refresh_viewer()
   if not (S and S.viewer) then
     return
   end
-  if S.viewer.kind == "trace" and not (T.on or F.HasRecording()) then
+  if S.viewer.kind == "trace" and not viewer_item(S.viewer.name) then
     S.viewer = nil
   else
-    open_viewer(S.viewer.kind)
+    open_viewer(S.viewer.kind, S.viewer.name)
   end
 end
 
@@ -2366,9 +2522,10 @@ local function draw_viewer()
     local dl = ImGui.GetWindowDrawList(ctx)
     local hh = 52
     ImGui.DrawList_AddLine(dl, x, y + hh, x + w, y + hh, P.line, 1)
+    local item = trace and viewer_item(v.name)
     if trace then
       ImGui.DrawList_AddRectFilled(dl, x, y, x + 2, y + hh, P.red)
-      if T.on then
+      if item and item.live then
         local a = math.floor((0.35 + 0.65 * pulse()) * 255)
         ImGui.DrawList_AddCircleFilled(dl, x + 24, y + hh / 2, 5, A(P.red, a))
       else
@@ -2379,8 +2536,8 @@ local function draw_viewer()
     end
     local tx = caps(dl, 11, x + 40, y + (hh - 11) / 2 - 1, trace and P.red or P.ink, trace and "Bug recording" or "What's sent", true)
     local sub = string.format("%d lines  /  %s", v.lines, fmt_bytes(#v.text))
-    if trace then
-      sub = string.format("%d events  /  %s  /  ", T.events, F.RecordingDuration()) .. sub
+    if item then
+      sub = string.format("%d events  /  %s  /  ", item.events, fmt_duration(item.ended - item.started)) .. sub
     end
     caps(dl, 10, tx + 16, y + (hh - 10) / 2 - 1, P.ink3, sub)
 
@@ -2404,7 +2561,7 @@ local function draw_viewer()
     local rw = btn_w("Refresh")
     bx = bx - 8 - rw
     if btn("##viewer_refresh", "Refresh", bx, y + (hh - BTN_H) / 2, nil, rw) then
-      open_viewer(v.kind)
+      open_viewer(v.kind, v.name)
       S.viewer.placed = true
       v = S.viewer
     end
@@ -2438,7 +2595,41 @@ local STEPS = {
   "Describe what went wrong, then send.",
 }
 
+-- One row per saved recording: attach switch, View, Discard.
+local function draw_saved_recordings(dl, x, y, w, list)
+  local dw, vw = btn_w("Discard"), btn_w("View")
+  for i, s in ipairs(list) do
+    if i > 1 then
+      ImGui.DrawList_AddLine(dl, x, y - 8, x + w, y - 8, P.soft, 1)
+    end
+    local label = #list > 1 and ("Recording " .. i) or "Bug recording"
+    local v, changed, by = switch_row("##rectoggle" .. s.name, x, y, w - dw - vw - 24, not S.rec_off[s.name],
+      label, string.format("%d events, %s long, at %s.", s.events, fmt_duration(s.ended - s.started),
+        os.date("%H:%M", s.started)))
+    S.rec_off[s.name] = not v or nil
+    if changed then
+      refresh_viewer()
+    end
+    if btn("##recview" .. s.name, "View", x + w - dw - 8 - vw, y - 4, nil, vw) then
+      open_viewer("trace", s.name)
+    end
+    tip("Open this recording in a separate window.")
+    if btn("##recdiscard" .. s.name, "Discard", x + w - dw, y - 4, nil, dw) then
+      discard_saved(s.name)
+      S.rec_off[s.name] = nil
+      refresh_viewer()
+    end
+    tip("Delete this recording.")
+    y = math.max(by, y + BTN_H) + 16
+  end
+  return y
+end
+
 local function draw_recording_card(dl, x, y, w)
+  local list = F.Recordings()
+  if #list > 0 then
+    y = draw_saved_recordings(dl, x, y, w, list)
+  end
   if T.on then
     local a = math.floor((0.35 + 0.65 * pulse()) * 255)
     ImGui.DrawList_AddCircleFilled(dl, x + 7, y + 8, 6, A(P.red, a))
@@ -2447,7 +2638,6 @@ local function draw_recording_card(dl, x, y, w)
     y = para(dl, x, y + 28, w, "Do what causes the problem again, then stop the recording to attach it to this report.")
     if btn("##recstop", "Stop and attach", x, y + 10, "go") then
       F.StopRecording()
-      S.include_trace = true
       refresh_viewer()
     end
     if btn("##recview", "View", x + btn_w("Stop and attach") + 8, y + 10) then
@@ -2455,28 +2645,24 @@ local function draw_recording_card(dl, x, y, w)
     end
     tip("Open what's been recorded so far in a separate window.")
     return y + 10 + BTN_H
-  elseif F.HasRecording() then
-    local dw, vw = btn_w("Discard"), btn_w("View")
-    local v, changed, by = switch_row("##rectoggle", x, y, w - dw - vw - 24, S.include_trace, "Attach the bug recording",
-      string.format("%d events, %s long.", T.events, F.RecordingDuration()))
-    S.include_trace = v
-    if changed then
-      refresh_viewer()
-    end
-    if btn("##recview", "View", x + w - dw - 8 - vw, y - 4, nil, vw) then
-      open_viewer("trace")
-    end
-    tip("Open the recording in a separate window.")
-    if btn("##recdiscard", "Discard", x + w - dw, y - 4, nil, dw) then
-      F.DiscardRecording()
-      refresh_viewer()
-    end
-    return math.max(by, y + BTN_H)
   end
   if F.COMPANION then
+    if #list > 0 then
+      return y - 16
+    end
     -- the recorder script only sends; a new recording starts in the script
     return para(dl, x, y, w, "To record a problem, press the red dot next to Send feedback in "
       .. tostring(cfg.script_name) .. ".", P.ink2)
+  end
+  if #list > 0 then
+    -- more can be recorded; each Stop adds one to this list
+    if rec_button("##recstart", "Record another", x, y, 220) then
+      T.draft = { title = S.title, note = S.note }
+      S.close = true
+      F.StartRecording()
+    end
+    tip("Starts recording right away. This window hides until you stop.")
+    return y + REC_H
   end
   y = para(dl, x, y, w, "Hard to pin down? Record what the script does while you repeat the problem, "
     .. "and the recording goes with your report.", P.ink2)
@@ -2532,8 +2718,7 @@ local function draw_report_card(dl, x, y, w)
 end
 
 report_kind = function()
-  local trace = S.include_trace and (T.on or F.HasRecording())
-  return trace and "bug" or (S.kind or "other")
+  return #F.TraceItems(S) > 0 and "bug" or (S.kind or "other")
 end
 
 local function draw_send_card(dl, x, y, w)
@@ -2596,7 +2781,10 @@ end
 local function draw_form(x, y, w)
   local dl = ImGui.GetWindowDrawList(ctx)
   y = draw_intro(dl, x, y, w, "SEND FEEDBACK", "Report a problem or suggest an idea. It goes straight to the developer.")
-  y = card("rec", x, y, w, 1, T.on and "Bug recording is on" or "Bug recording", P.red, draw_recording_card) + 24
+  local n_saved = F.RecordingCount()
+  local rec_caption = T.on and "Bug recording is on"
+    or (n_saved > 1 and (n_saved .. " bug recordings") or "Bug recording")
+  y = card("rec", x, y, w, 1, rec_caption, P.red, draw_recording_card) + 24
   y = card("report", x, y, w, 2, "Your report", nil, draw_report_card) + 24
   y = card("send", x, y, w, 3, "Send", nil, draw_send_card)
   return y
@@ -2808,9 +2996,10 @@ local function draw_badge()
   ImGui.PopStyleColor(ctx, n_col)
 end
 
--- After Stop: a short note where the badge was, saying where the recording
--- went. It fades out by itself; a click closes it sooner.
-local NOTE_S = 7
+-- After Stop: a short note where the badge was, saying the recording stopped
+-- and was saved. It fades out by itself; a click closes it sooner.
+local NOTE_S = 3
+local NOTE_H = 48
 local stop_note -- { t = start time }
 
 function F.ShowStopNote()
@@ -2824,10 +3013,7 @@ local function draw_stop_note()
     return
   end
   local alpha = math.max(0, math.min(1, age / 0.15, (NOTE_S - age) / 0.6))
-  local body = "It's waiting in the Send feedback window, attached and ready. Open Send feedback in "
-    .. tostring(cfg.script_name) .. " to say what went wrong and send it."
-  local lines = wrap(body, FONTS.body13, BADGE_W - 56)
-  local h = 50 + #lines * 17 + 18
+  local h = NOTE_H
   local n_col, n_var = push_style()
   local alpha_var = im_opt("StyleVar_Alpha")
   if alpha_var then
@@ -2847,17 +3033,12 @@ local function draw_stop_note()
     local dl = ImGui.GetWindowDrawList(ctx)
     ImGui.DrawList_AddRectFilled(dl, x, y, x + 2, y + h, P.acc)
     -- a check mark in a ring
-    local cx, cy = x + 22, y + 24
+    local cx, cy = x + 22, y + h / 2
     ImGui.DrawList_AddCircle(dl, cx, cy, 9, A(P.acc, 0x70), 0, 1)
     ImGui.DrawList_AddLine(dl, cx - 4, cy, cx - 1, cy + 3, P.acc, 1.6)
     ImGui.DrawList_AddLine(dl, cx - 1, cy + 3, cx + 4.5, cy - 3.5, P.acc, 1.6)
-    local tx = caps(dl, 11, x + 40, y + 18, P.acc, "Recording saved", true)
-    caps(dl, 10, tx + 12, y + 19, P.ink2, (tonumber(T.events) or 0) .. " events")
-    local ly = y + 46
-    for _, l in ipairs(lines) do
-      txt(dl, FONTS.body13, 13, x + 40, ly, P.ink, l)
-      ly = ly + 17
-    end
+    local tx = caps(dl, 11, x + 40, cy - 6, P.ink, "Recording stopped", true)
+    caps(dl, 11, tx + 12, cy - 6, P.acc, "Saved", true)
     -- time left, as a thin line along the bottom
     local left = math.max(0, 1 - age / NOTE_S)
     ImGui.DrawList_AddLine(dl, x + 2, y + h - 1.5, x + 2 + (BADGE_W - 2) * left, y + h - 1.5, A(P.acc, 0x90), 2)
@@ -2966,26 +3147,29 @@ end
 
 local C -- recorder state; nil in a host
 
--- Load the recording the host wrote, for the report window.
-local function companion_load_recording(host_gone)
-  T.lines, T.next, T.count, T.events = {}, 1, 0, 0
-  T.fh = nil
-  for line in (read_file(rec_path()) or ""):gmatch("[^\n]+") do
-    rec_write(line)
+-- The host stopped while recording: keep what it wrote as a saved recording
+-- (the host saves its own when it stops normally).
+local function companion_save_live()
+  r.SetExtState("CRS_Feedback", rec_ext_key(), "", true)
+  local fh = file_size(rec_path()) and io.open(rec_path(), "ab")
+  if not fh then
+    return
   end
-  if host_gone then
-    rec_write(rec_clock() .. " RECORDING ended: " .. tostring(cfg.script_name)
-      .. " stopped while recording (it crashed or was closed). Sent from the recorder window.")
+  fh:write(rec_clock(), " RECORDING ended: ", tostring(cfg.script_name),
+    " stopped while recording (it crashed or was closed). Sent from the recorder window.\n")
+  fh:close()
+  local started = tonumber(r.GetExtState("CRS_Feedback", rec_ext_key() .. "_since")) or os.time()
+  local events = 0
+  for _ in (read_file(rec_path()) or ""):gmatch("[^\n]+") do
+    events = events + 1
   end
-  T.events = math.max(T.count, tonumber(xget("rec_ev")) or 0)
-  T.started = tonumber(r.GetExtState("CRS_Feedback", rec_ext_key() .. "_since")) or T.started or os.time()
-  T.ended = os.time()
-  T.on = false
-  T.stopped_unsent = T.count > 0
+  save_live(started, os.time(), math.max(events, tonumber(xget("rec_ev")) or 0))
 end
 
 local function companion_open_report(host_gone)
-  companion_load_recording(host_gone)
+  if host_gone then
+    companion_save_live()
+  end
   local title, note_text = xget("draft_title"), xget("draft_note")
   if host_gone and title == "" then
     title = tostring(cfg.script_name) .. " stopped while recording"
@@ -3039,7 +3223,7 @@ local function companion_badge()
         companion_open_report(true)
       end
       if btn("##badge_discard", "Discard", x + 174, y + 48, nil, 80) then
-        F.DiscardRecording()
+        discard_live()
         companion_finish()
       end
       tip("Delete the recording.")

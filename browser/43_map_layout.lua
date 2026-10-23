@@ -899,6 +899,17 @@ function render_header()
   if r.ImGui_MenuItem(ctx, "Feedback") then
     sm_open_feedback()
   end
+  -- green count on its corner: bug recordings waiting to be sent
+  local fb_saved = SM_FEEDBACK and SM_FEEDBACK.RecordingCount and SM_FEEDBACK.RecordingCount() or 0
+  if fb_saved > 0 then
+    local _, fy = r.ImGui_GetItemRectMin(ctx)
+    local fx = r.ImGui_GetItemRectMax(ctx)
+    local n = fb_saved > 9 and "9+" or tostring(fb_saved)
+    local tw, th = r.ImGui_CalcTextSize(ctx, n)
+    local fdl = r.ImGui_GetWindowDrawList(ctx)
+    r.ImGui_DrawList_AddCircleFilled(fdl, fx - 3, fy + 5, 7, 0x49CC85FF)
+    r.ImGui_DrawList_AddText(fdl, fx - 3 - tw / 2, fy + 5 - th / 2, 0x000000FF, n)
+  end
   menu_item_tooltip("Report a bug or suggest an idea.\nYou can add pictures and the usage log; it goes to the developer on GitHub.")
 
   if SampleMapUpdateState and SampleMapUpdateState.show_update_icon then

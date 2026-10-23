@@ -237,7 +237,30 @@ def test_recording_send_size_is_capped():
     F.StartRecording()
     L.execute('for i = 1, 6000 do CRSFeedback.Trace(("event %d "):format(i) .. string.rep("x", 100)) end')
     F.StopRecording()
-    lines = list(F._recording_lines().values())
+    lines = list(F._recording_lines(F.Recordings()[1].path).values())
     assert sum(len(l) + 1 for l in lines) <= F.TRACE_SEND_BYTES + 100
     assert lines[0].endswith("older lines left out)")
     assert "event 6000" in lines[-2] or "event 6000" in "".join(lines[-3:])
+
+
+def test_each_stop_keeps_a_recording_and_reports_attach_the_chosen_ones():
+    (L, F), _ = _rec_runtime()
+    F.StartRecording()
+    L.execute("CRSFeedback.Trace('first take')")
+    F.StopRecording()
+    F.StartRecording()
+    L.execute("CRSFeedback.Trace('second take')")
+    F.StopRecording()
+    assert F.RecordingCount() == 2
+    text = F.BuildLogText(L.table_from({"usage": False, "trace": True}))
+    assert "Bug recording 1 of 2" in text and "first take" in text and "second take" in text
+    first = F.Recordings()[1].name
+    state = L.eval('{ kind = "bug", title = "Knob jumps", note = "It jumps when I drag it.", contact = "", '
+                   'include_log = false, include_trace = true, images = {}, rec_off = {} }')
+    state.rec_off[first] = True
+    log = json.loads(F._json_encode(F._build_payload(state)))["log"]
+    assert "second take" in log and "first take" not in log
+    F.DiscardRecording(first)
+    assert F.RecordingCount() == 1
+    F.DiscardRecording()
+    assert F.RecordingCount() == 0
