@@ -28,7 +28,7 @@ for i = 0, frames - 1 do
   n = n + 1; x[n] = s / ch
 end
 local t0 = os.clock()
-local res = CD.analyze(x, sr, { nnls = os.getenv("CD_NNLS") ~= "0", vocabulary = os.getenv("CD_VOCAB") or "full" })
+local res = CD.analyze(x, sr, { nnls = ({ ["0"] = false, ["1"] = true })[os.getenv("CD_NNLS") or ""], vocabulary = os.getenv("CD_VOCAB") or "full" })
 local st = res.stats
 print(("file: %d ch, %d Hz, %d bit, %.1f s, analysed in %.1f s"):format(ch, sr, bits, n / sr, os.clock() - t0))
 print(("key %s (conf %.2f), tempo %.1f, tuning %+d c"):format(res.key and res.key.name or "?", res.key and res.key.confidence or 0, res.tempo or 0, res.tuning_cents or 0))

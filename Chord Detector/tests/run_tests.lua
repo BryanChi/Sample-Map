@@ -101,7 +101,7 @@ for _, song in ipairs(songs) do
   local x, sr = read_wav(dir .. "/" .. song .. ".wav")
   local truth = dofile(dir .. "/" .. song .. ".truth.lua")
   local t0 = os.clock()
-  local res = CD.analyze(x, sr, { vocabulary = os.getenv("CD_VOCAB") or "full", slash_chords = os.getenv("CD_SLASH") and true, nnls = os.getenv("CD_NNLS") ~= "0" })
+  local res = CD.analyze(x, sr, { vocabulary = os.getenv("CD_VOCAB") or "full", slash_chords = os.getenv("CD_SLASH") and true, nnls = ({ ["0"] = false, ["1"] = true })[os.getenv("CD_NNLS") or ""] })
   local el = os.clock() - t0
   local function truth_at(t)
     for _, c in ipairs(truth.chords) do if t >= c[1] and t < c[2] then return c end end

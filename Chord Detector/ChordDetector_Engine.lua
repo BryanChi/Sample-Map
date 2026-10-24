@@ -48,7 +48,12 @@ M.QUALITIES = {
   { id = "m7b5", suffix = "m7b5", tones = { 0, 3, 6, 10 }, prior = -1.4, beat = -0.2 },
 }
 local QBYID = {}
-for i, q in ipairs(M.QUALITIES) do QBYID[q.id] = q; q.index = i end
+for i, q in ipairs(M.QUALITIES) do
+  QBYID[q.id] = q; q.index = i
+  q.seventh = #q.tones == 4 or nil
+  q.sus = (q.id == "sus2" or q.id == "sus4") or nil
+  q.fifth_idx = 3
+end
 
 M.VOCABULARIES = {
   triads = { "maj", "min" },
@@ -66,7 +71,7 @@ M.DEFAULTS = {
   key_changes    = true,     -- allow modulations
   min_key_beats  = 24,       -- shortest key area, in beats
   slash_chords   = false,    -- name inversions as C/E
-  nnls           = true,     -- remove overtones before chroma (approximate transcription)
+  nnls           = "key",    -- overtone-free NNLS chroma: "key" (key finding only), true (also chords), false
   refine         = true,     -- allow changes a half beat early/late (pushes)
   no_chord       = "N.C.",   -- label for silence / noise, false = drop
   tuning         = nil,      -- force tuning offset in cents (nil = estimate)
@@ -616,7 +621,7 @@ local function build_states(opts)
         local tones = {}
         for i, iv in ipairs(q.tones) do tones[i] = (root + iv) % 12 end
         states[#states + 1] = { root = root, quality = q.id, q = q, tones = tones,
-                                template = chord_template(root, q.tones, opts.nnls and 0.3 or 1) }
+                                template = chord_template(root, q.tones, opts.nnls == true and 0.3 or 1) }
       end
     end
   end
@@ -870,7 +875,9 @@ function M.analyze(samples, samplerate, user_opts)
   -- approximate transcription per beat (non-negative least squares, as in
   -- Mauch & Dixon's NNLS Chroma): explain the spectrum as notes with decaying
   -- overtones, so a note's 3rd/5th harmonics stop looking like chord tones
+  local ktre, kbas = btre, bbas      -- chroma used for key finding
   if opts.nnls then
+    local ntre, nbas = {}, {}
     local H = { 0, 12, 19, 24, 28, 31, 34, 36 }
     local D = {}                       -- D[note] = list of {bin, weight}
     for i = 1, NNOTES do
@@ -937,9 +944,11 @@ function M.analyze(samples, samplerate, user_opts)
           bc[pc] = bc[pc] + F.wb[i] * x
         end
       end
-      btre[j], bbas[j] = tc, bc
+      ntre[j], nbas[j] = tc, bc
       if j % 32 == 0 then report(0.7 + 0.05 * j / T, "Finding notes") end
     end
+    ktre, kbas = ntre, nbas
+    if opts.nnls == true then btre, bbas = ntre, nbas end
   end
 
   local e90 = percentile(benergy, 0.9)
@@ -975,7 +984,24 @@ function M.analyze(samples, samplerate, user_opts)
         for i = 2, #st.tones do bt = bt + 0.35 * bn[st.tones[i] + 1] end
         v = v + BETA * (bt - 0.3)
       end
-      row[s] = v + (st.q.beat or 0)
+      -- extensions need their own evidence: a 7th must be nearly as strong as
+      -- the triad tones, a sus chord needs a weak third
+      local q = st.q
+      if not silent[j] and tn > 0 and (q.seventh or q.sus) then
+        local r = tj[st.root + 1]
+        local fifth = tj[st.tones[q.fifth_idx] + 1]
+        if q.seventh then
+          local tri = (r + tj[st.tones[2] + 1] + fifth) / 3
+          local ext = tri > 0 and tj[st.tones[4] + 1] / tri or 0
+          if ext < 0.6 then v = v - 1.5 * (0.6 - ext) / 0.6 end
+        else
+          local third = math.max(tj[(st.root + 3) % 12 + 1], tj[(st.root + 4) % 12 + 1])
+          local rf = 0.5 * (r + fifth)
+          local th = rf > 0 and third / rf or 0
+          if th > 0.3 then v = v - 2.0 * (th - 0.3) end
+        end
+      end
+      row[s] = v + (q.beat or 0)
     end
     -- no-chord gets stronger the flatter (noisier) the chroma is
     local flat = 0
@@ -1005,7 +1031,7 @@ function M.analyze(samples, samplerate, user_opts)
     for i = 1, 12 do v[i] = 0 end
     for jj = math.max(1, j - KW), math.min(T, j + KW) do
       if not silent[jj] then
-        local t, b = btre[jj], bbas[jj]
+        local t, b = ktre[jj], kbas[jj]
         local s = 0
         for i = 1, 12 do s = s + t[i] + 0.7 * b[i] end
         if s > 0 then for i = 1, 12 do v[i] = v[i] + (t[i] + 0.7 * b[i]) / s end end
