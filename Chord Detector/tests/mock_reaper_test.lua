@@ -20,6 +20,7 @@ local take = { markers = { { pos = 10.0, name = "my own marker", color = 123 } }
 local item = { take = take }
 local ext = {}
 local deferred = {}
+coroutine_reads = 0
 
 reaper = {
   ColorToNative = function(r, g, b) return r | (g << 8) | (b << 16) end,
@@ -57,6 +58,8 @@ reaper = {
     return a
   end,
   GetAudioAccessorSamples = function(acc, sr, nch, t, cnt, buf)
+    -- like REAPER 7.79: inside a coroutine the call returns nil and the buffer stays zero
+    if coroutine.isyieldable() then coroutine_reads = coroutine_reads + 1; return nil end
     for i = 0, cnt - 1 do
       local si = math.floor((OFFS + t + i / sr) * src_sr) + 1
       local v = src[si] or 0
@@ -81,6 +84,7 @@ local function run()
 end
 
 local steps = run()
+check(coroutine_reads == 0, "audio is never read inside a coroutine")
 check(steps > 5, "analysis ran in the background (" .. steps .. " defer cycles)")
 local ours = 0
 for _, m in ipairs(take.markers) do if m.color ~= 123 then ours = ours + 1 end end
@@ -98,6 +102,9 @@ for _, m in ipairs(take.markers) do
 end
 check(total > 4 and good >= total - 1, ("markers at true source positions and names (%d/%d)"):format(good, total))
 check(take.markers[2].name:find("key Eb major"), "first chord carries the key")
+local real = 0
+for _, m in ipairs(take.markers) do if m.color ~= 123 and not m.name:find("N.C.") then real = real + 1 end end
+check(real >= 8, "found real chords, not only N.C. (" .. real .. ")")
 check(take.ext["P_EXT:CRS_ChordDetector"]:find("key\tEb major"), "result stored in take P_EXT")
 run()
 local ours2 = 0

@@ -105,9 +105,12 @@ end
 -- background analysis with a small progress window
 ---------------------------------------------------------------------------
 
+-- REAPER returns silence from GetAudioAccessorSamples inside a coroutine, so
+-- audio is read in the defer loop itself; only the analysis runs in a coroutine.
 local status = { job = 1, frac = 0, label = "Reading audio" }
 local results = {}
 local last_yield = r.time_precise()
+local reader, worker
 
 local function maybe_yield()
   local now = r.time_precise()
@@ -117,22 +120,44 @@ local function maybe_yield()
   end
 end
 
-local worker = coroutine.create(function()
-  for i, job in ipairs(jobs) do
-    status.job = i
-    local opts = {
-      vocabulary = settings.vocabulary,
-      min_beats = settings.min_beats,
-      change_penalty = settings.change_penalty,
-      key_changes = settings.key_changes,
-      slash_chords = settings.slash_chords,
-      no_chord = settings.mark_no_chord and "N.C." or false,
-      read_progress = function(p) status.frac = 0.15 * p; status.label = "Reading audio"; maybe_yield() end,
-      progress = function(p, label) status.frac = 0.15 + 0.85 * p; status.label = label; maybe_yield() end,
-    }
-    results[i] = CD.analyze_take(job.take, opts)
+local function analysis_opts()
+  return {
+    vocabulary = settings.vocabulary,
+    min_beats = settings.min_beats,
+    change_penalty = settings.change_penalty,
+    key_changes = settings.key_changes,
+    slash_chords = settings.slash_chords,
+    no_chord = settings.mark_no_chord and "N.C." or false,
+    progress = function(p, label) status.frac = 0.15 + 0.85 * p; status.label = label; maybe_yield() end,
+  }
+end
+
+-- one slice of work per defer cycle; returns true when every job is done
+local function work()
+  local job = jobs[status.job]
+  if not job then return true end
+  if not worker then
+    if not reader then reader = CD.take_reader(job.take) end
+    local done, frac = reader:step(0.03)
+    status.frac, status.label = 0.15 * frac, "Reading audio"
+    if done then
+      local rd = reader
+      worker = coroutine.create(function()
+        return CD.shift_result(CD.analyze(rd.samples, rd.sr, analysis_opts()), rd.t_start)
+      end)
+    end
+    return false
   end
-end)
+  last_yield = r.time_precise()
+  local ok, res = coroutine.resume(worker)
+  if not ok then error(res, 0) end
+  if coroutine.status(worker) == "dead" then
+    results[status.job] = res
+    reader, worker = nil, nil
+    status.job, status.frac = status.job + 1, 0
+  end
+  return status.job > #jobs
+end
 
 local W, H = 380, 74
 gfx.init("Chord Detector", W, H)
@@ -185,14 +210,18 @@ end
 
 local function loop()
   local ch = gfx.getchar()
-  if ch == 27 or ch < 0 then gfx.quit(); return end    -- cancelled, nothing written
-  local ok, err = coroutine.resume(worker)
+  if ch == 27 or ch < 0 then                           -- cancelled, nothing written
+    if reader then reader:cancel() end
+    gfx.quit(); return
+  end
+  local ok, finished = pcall(work)
   if not ok then
+    if reader then reader:cancel() end
     gfx.quit()
-    r.ShowConsoleMsg("Chord Detector error: " .. tostring(err) .. "\n")
+    r.ShowConsoleMsg("Chord Detector error: " .. tostring(finished) .. "\n")
     return
   end
-  if coroutine.status(worker) == "dead" then finish(); return end
+  if finished then finish(); return end
   draw()
   r.defer(loop)
 end

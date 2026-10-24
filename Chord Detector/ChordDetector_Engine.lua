@@ -38,14 +38,14 @@ local LOG2 = log(2)
 M.QUALITIES = {
   { id = "maj",  suffix = "",     tones = { 0, 4, 7 },     prior = 0.0  },
   { id = "min",  suffix = "m",    tones = { 0, 3, 7 },     prior = 0.0  },
-  { id = "7",    suffix = "7",    tones = { 0, 4, 7, 10 }, prior = -0.6 },
-  { id = "maj7", suffix = "maj7", tones = { 0, 4, 7, 11 }, prior = -0.8 },
-  { id = "m7",   suffix = "m7",   tones = { 0, 3, 7, 10 }, prior = -0.8 },
-  { id = "dim",  suffix = "dim",  tones = { 0, 3, 6 },     prior = -1.2 },
-  { id = "aug",  suffix = "aug",  tones = { 0, 4, 8 },     prior = -1.8 },
-  { id = "sus2", suffix = "sus2", tones = { 0, 2, 7 },     prior = -1.5 },
-  { id = "sus4", suffix = "sus4", tones = { 0, 5, 7 },     prior = -1.3 },
-  { id = "m7b5", suffix = "m7b5", tones = { 0, 3, 6, 10 }, prior = -1.4 },
+  { id = "7",    suffix = "7",    tones = { 0, 4, 7, 10 }, prior = -0.6, beat = -0.08 },
+  { id = "maj7", suffix = "maj7", tones = { 0, 4, 7, 11 }, prior = -0.8, beat = -0.15 },
+  { id = "m7",   suffix = "m7",   tones = { 0, 3, 7, 10 }, prior = -0.8, beat = -0.12 },
+  { id = "dim",  suffix = "dim",  tones = { 0, 3, 6 },     prior = -1.2, beat = -0.15 },
+  { id = "aug",  suffix = "aug",  tones = { 0, 4, 8 },     prior = -1.8, beat = -0.25 },
+  { id = "sus2", suffix = "sus2", tones = { 0, 2, 7 },     prior = -1.5, beat = -0.3 },
+  { id = "sus4", suffix = "sus4", tones = { 0, 5, 7 },     prior = -1.3, beat = -0.25 },
+  { id = "m7b5", suffix = "m7b5", tones = { 0, 3, 6, 10 }, prior = -1.4, beat = -0.2 },
 }
 local QBYID = {}
 for i, q in ipairs(M.QUALITIES) do QBYID[q.id] = q; q.index = i end
@@ -869,7 +869,7 @@ function M.analyze(samples, samplerate, user_opts)
   local states = build_states(opts)
   local S = #states
   local NSTATE = S
-  local KAPPA, BETA, TAU_N = 10, 2.5, 0.55
+  local KAPPA, BETA, TAU_N = 10, 2.5, 0.5
   local E = {}
   local bnorm = {}
   local dbg_best, dbg_n, dbg_flat = {}, {}, {}
@@ -894,7 +894,7 @@ function M.analyze(samples, samplerate, user_opts)
         for i = 2, #st.tones do bt = bt + 0.35 * bn[st.tones[i] + 1] end
         v = v + BETA * (bt - 0.3)
       end
-      row[s] = v
+      row[s] = v + (st.q.beat or 0)
     end
     -- no-chord gets stronger the flatter (noisier) the chroma is
     local flat = 0
@@ -906,7 +906,9 @@ function M.analyze(samples, samplerate, user_opts)
       end
       flat = exp(lg / 12) / (am / 12)
     end
-    row[NSTATE] = silent[j] and KAPPA * 0.3 or KAPPA * (TAU_N + 0.45 * flat * flat)
+    -- dense mixes are fairly flat too, so only clearly noise-like chroma (> 0.75) favours it
+    local nf = flat > 0.75 and (flat - 0.75) * 2.4 or 0
+    row[NSTATE] = silent[j] and KAPPA * 0.3 or KAPPA * (TAU_N + nf)
     E[j] = row
     local bc = NEG
     for s = 1, S - 1 do if row[s] > bc then bc = row[s] end end
@@ -957,10 +959,14 @@ function M.analyze(samples, samplerate, user_opts)
       KE[j] = row
     end
     local path
-    if opts.key_changes and T > 2 * opts.min_key_beats then
+    local min_key = math.max(opts.min_key_beats, ceil(16 / period))
+    if opts.key_changes and T > 2 * min_key then
       path = viterbi_mindur(T, #KEYS, KE, function() return 0 end,
-        function(a, b) return -0.3 * fifths_distance(KEYS[a], KEYS[b]) end,
-        opts.min_key_beats, 10, true)
+        function(a, b)
+          local d = fifths_distance(KEYS[a], KEYS[b])
+          return -0.3 * d - (d == 0 and 4 or 0)   -- relative major/minor flips are usually ambiguity
+        end,
+        min_key, 10, true)
     else
       local tot = {}
       for k = 1, #KEYS do tot[k] = 0 end
@@ -1161,9 +1167,15 @@ end
 -- REAPER helpers
 ---------------------------------------------------------------------------
 
---- Read a take as mono samples at `sr` (default 11025 Hz).
--- Returns samples, sr, item_length. Item time 0 = item start.
-function M.read_take(take, sr, progress)
+-- NOTE: REAPER's GetAudioAccessorSamples returns silence when it is called
+-- inside a Lua coroutine. Read audio from the main script body or from a
+-- reaper.defer callback (take_reader below), then analyse in a coroutine.
+
+--- Incremental take reader for defer loops.
+--   local rd = CD.take_reader(take)        -- sr defaults to 11025
+--   repeat local done, frac = rd:step(0.03) until done   (one step per defer cycle)
+--   rd.samples, rd.sr, rd.t_start
+function M.take_reader(take, sr)
   local r = reaper
   sr = sr or 11025
   local src = r.GetMediaItemTake_Source(take)
@@ -1171,44 +1183,67 @@ function M.read_take(take, sr, progress)
   local acc = r.CreateTakeAudioAccessor(take)
   local t_start = r.GetAudioAccessorStartTime(acc)
   local t_end = r.GetAudioAccessorEndTime(acc)
-  local total = math.max(0, math.floor((t_end - t_start) * sr))
   local block = 8192
-  local buf = r.new_array(block * nch)
-  local out, n = {}, 0
-  local pos = 0
-  while pos < total do
-    local cnt = math.min(block, total - pos)
-    buf.clear()
-    r.GetAudioAccessorSamples(acc, sr, nch, t_start + pos / sr, cnt, buf)
-    local t = buf.table(1, cnt * nch)
-    if nch == 1 then
-      for i = 1, cnt do n = n + 1; out[n] = t[i] end
-    else
-      local inv = 1 / nch
-      for i = 0, cnt - 1 do
-        local s = 0
-        for c = 1, nch do s = s + t[i * nch + c] end
-        n = n + 1; out[n] = s * inv
+  local rd = {
+    samples = {}, sr = sr, t_start = t_start, nch = nch,
+    total = math.max(0, math.floor((t_end - t_start) * sr)), pos = 0, n = 0,
+    acc = acc, buf = r.new_array(block * nch), block = block,
+  }
+  function rd:step(budget)
+    local t0 = r.time_precise()
+    local out, nch_, buf = self.samples, self.nch, self.buf
+    while self.pos < self.total do
+      local cnt = math.min(self.block, self.total - self.pos)
+      buf.clear()
+      r.GetAudioAccessorSamples(self.acc, self.sr, nch_, self.t_start + self.pos / self.sr, cnt, buf)
+      local t = buf.table(1, cnt * nch_)
+      local n = self.n
+      if nch_ == 1 then
+        for i = 1, cnt do n = n + 1; out[n] = t[i] end
+      else
+        local inv = 1 / nch_
+        for i = 0, cnt - 1 do
+          local s = 0
+          for c = 1, nch_ do s = s + t[i * nch_ + c] end
+          n = n + 1; out[n] = s * inv
+        end
       end
+      self.n = n
+      self.pos = self.pos + cnt
+      if budget and r.time_precise() - t0 > budget then break end
     end
-    pos = pos + cnt
-    if progress then progress(pos / math.max(1, total)) end
+    local done = self.pos >= self.total
+    if done and self.acc then r.DestroyAudioAccessor(self.acc); self.acc = nil end
+    return done, self.pos / math.max(1, self.total)
   end
-  r.DestroyAudioAccessor(acc)
-  return out, sr, t_start
+  function rd:cancel()
+    if self.acc then r.DestroyAudioAccessor(self.acc); self.acc = nil end
+  end
+  return rd
 end
 
---- Analyse a REAPER take. Times in the result are item time (0 = item start).
--- opts.read_progress(fraction) is called while reading audio.
-function M.analyze_take(take, opts)
-  local samples, sr, t_start = M.read_take(take, 11025, opts and opts.read_progress)
-  local res = M.analyze(samples, sr, opts)
-  if t_start and t_start ~= 0 then
-    for _, c in ipairs(res.chords) do c.start = c.start + t_start; c.stop = c.stop + t_start end
-    for _, k in ipairs(res.keys) do k.start = k.start + t_start; k.stop = k.stop + t_start end
-    for i, b in ipairs(res.beats) do res.beats[i] = b + t_start end
-  end
+--- Read a whole take as mono samples at `sr` (default 11025 Hz), blocking.
+-- Returns samples, sr, t_start (item time). Not inside a coroutine (see above).
+function M.read_take(take, sr)
+  local rd = M.take_reader(take, sr)
+  rd:step(nil)
+  return rd.samples, rd.sr, rd.t_start
+end
+
+--- Move result times by `offset` seconds (e.g. accessor start time).
+function M.shift_result(res, offset)
+  if not offset or offset == 0 then return res end
+  for _, c in ipairs(res.chords) do c.start = c.start + offset; c.stop = c.stop + offset end
+  for _, k in ipairs(res.keys) do k.start = k.start + offset; k.stop = k.stop + offset end
+  for i, b in ipairs(res.beats) do res.beats[i] = b + offset end
   return res
+end
+
+--- Analyse a REAPER take, blocking. Times in the result are item time.
+-- Call it from the main script body, not from a coroutine (see above).
+function M.analyze_take(take, opts)
+  local samples, sr, t_start = M.read_take(take, 11025)
+  return M.shift_result(M.analyze(samples, sr, opts), t_start)
 end
 
 --- Convert item time to take source time for take markers.

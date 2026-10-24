@@ -67,6 +67,13 @@ Options (all optional, see `M.DEFAULTS`): `vocabulary`, `min_beats`,
 `coroutine.yield()` from it lets a script run the analysis in the background
 with `reaper.defer`, as the action does.
 
+Important: REAPER returns silence from `GetAudioAccessorSamples` when it is
+called inside a Lua coroutine. So read the audio outside the coroutine:
+`CD.analyze_take` / `CD.read_take` from the main script body (blocking), or
+`CD.take_reader(take)` with `rd:step(0.03)` once per defer cycle, then run
+`CD.analyze(rd.samples, rd.sr, opts)` in a coroutine and
+`CD.shift_result(res, rd.t_start)`.
+
 Pure Lua 5.4; it avoids math.pow / sinh / cosh / tanh, which REAPER lacks.
 Speed: about 12 s for a 4 minute song.
 
