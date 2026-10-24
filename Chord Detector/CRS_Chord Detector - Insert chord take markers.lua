@@ -166,6 +166,14 @@ local function finish()
       for _, k in ipairs(res.keys) do keys[#keys + 1] = k.name end
       summary[#summary + 1] = ("%s: %s, %d markers%s"):format(job.name, table.concat(keys, " -> "), n,
         res.tempo and (", %.0f BPM"):format(res.tempo) or "")
+      local any = false
+      for _, c in ipairs(res.chords) do if c.root then any = true end end
+      local st = res.stats
+      if not any and st then
+        r.ShowConsoleMsg(("Chord Detector: no chords found in %s. Audio peak %.4f, beats %d, silent %.0f%%, "
+          .. "best chord %.2f vs no-chord %.2f, flatness %.2f\n"):format(job.name, st.input_peak, st.beats,
+          100 * st.silent, st.best_chord, st.no_chord, st.flatness))
+      end
     elseif res then
       summary[#summary + 1] = ("%s: skipped (%s)"):format(job.name, res.error or "no audio")
     end

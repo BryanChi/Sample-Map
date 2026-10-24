@@ -480,6 +480,7 @@ local function extract_features(x, sr, opts, report)
     tre = tre, bas = bas, energy = energy,
     onset = onset, onset_dt = hop_o / sr,
     tuning = tuning, duration = n / sr,
+    input_peak = peak, peaks_per_frame = np / math.max(1, nframes),
   }
 end
 
@@ -871,6 +872,7 @@ function M.analyze(samples, samplerate, user_opts)
   local KAPPA, BETA, TAU_N = 10, 2.5, 0.55
   local E = {}
   local bnorm = {}
+  local dbg_best, dbg_n, dbg_flat = {}, {}, {}
   for j = 1, T do
     local row = {}
     local tj = btre[j]
@@ -906,6 +908,9 @@ function M.analyze(samples, samplerate, user_opts)
     end
     row[NSTATE] = silent[j] and KAPPA * 0.3 or KAPPA * (TAU_N + 0.45 * flat * flat)
     E[j] = row
+    local bc = NEG
+    for s = 1, S - 1 do if row[s] > bc then bc = row[s] end end
+    dbg_best[j], dbg_n[j], dbg_flat[j] = bc / KAPPA, row[NSTATE] / KAPPA, flat
   end
   report(0.75, "Finding the key")
 
@@ -1133,6 +1138,8 @@ function M.analyze(samples, samplerate, user_opts)
   local mname, mshort = M.key_name(mk, opts)
   for _, k in ipairs(keys) do k.k = nil end
 
+  local nsil = 0
+  for j = 1, T do if silent[j] then nsil = nsil + 1 end end
   report(1, "Done")
   return {
     key = { tonic = mk.tonic, mode = mk.mode, name = mname, short = mshort, confidence = kconf },
@@ -1141,6 +1148,11 @@ function M.analyze(samples, samplerate, user_opts)
     beats = beats,
     tempo = tempo,
     tuning_cents = floor(F.tuning * 100 + 0.5),
+    stats = {
+      input_peak = F.input_peak, beats = T, silent = nsil / math.max(1, T),
+      best_chord = percentile(dbg_best, 0.5), no_chord = percentile(dbg_n, 0.5),
+      flatness = percentile(dbg_flat, 0.5), peaks_per_frame = F.peaks_per_frame,
+    },
     duration = F.duration,
   }
 end

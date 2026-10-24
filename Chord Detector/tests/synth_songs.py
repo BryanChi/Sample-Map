@@ -139,6 +139,12 @@ def render(song):
         add(buf, T(total_beats) + 0.2, 0.05 * rng.standard_normal(int(song['noise_tail'] * SR)))
     if song.get('noise'):
         buf += song['noise'] * rng.standard_normal(len(buf)) * np.max(np.abs(buf)) * 0.1
+    if song.get('reverb'):
+        n = int(2.0 * SR); t = np.arange(n) / SR
+        ir = rng.standard_normal(n) * np.exp(-t * 3.0); ir[0] = 1.0
+        wet = np.fft.irfft(np.fft.rfft(buf, len(buf) + n) * np.fft.rfft(ir, len(buf) + n))[:len(buf)]
+        wet *= np.max(np.abs(buf)) / (np.max(np.abs(wet)) + 1e-9)
+        buf = buf + song['reverb'] * wet
     buf /= np.max(np.abs(buf)) * 1.1
     return buf, truth
 
@@ -162,6 +168,8 @@ SONGS = {
  'rubato': dict(bpm=72, drift=0.12, key='G minor', kind='piano', drums=False, prog=[(c, n) for c, n in [('Gm',4),('Cm',4),('D7',4),('Gm',4),('Eb',4),('Cm',2),('D7',2),('Gm',8)] * 2], melody=0.7, scale=sc(7, True)),
  'push': dict(bpm=118, push=0.5, key='A major', prog=[(c, 4) for c in ['A','F#m','D','E'] * 4], melody=0.8, scale=sc(9)),
  'waltz': dict(bpm=150, meter=3, key='F major', prog=[(c, 3) for c in ['F','F','Dm','Dm','Gm','C7','F','F','Bb','C','Am','Dm','Gm','C7','F','F']], melody=0.7, scale=sc(5)),
+ 'wet_mix': dict(bpm=100, key='Bb major', reverb=1.2, noise=0.6, drum_gain=1.5, prog=[(c, 4) for c in ['Bb','Gm','Eb','F7'] * 4], melody=1.5, scale=sc(10)),
+ 'wet_pad': dict(bpm=76, key='E minor', kind='pad', reverb=1.5, noise=0.4, drums=False, prog=[(c, 4) for c in ['Em','C','G','D','Em','Am','B7','Em'] * 2], melody=1.0, scale=sc(4, True)),
  'db_mixed': dict(bpm=104, key='Db major', prog=[(c, n) for c, n in [('Db',4),('Bbm',4),('Gbmaj7',4),('Ab7',4),('Fm',2),('Bbm',2),('Ebm7',2),('Ab7',2),('Db',8)] * 2], melody=0.8, scale=sc(1)),
 }
 

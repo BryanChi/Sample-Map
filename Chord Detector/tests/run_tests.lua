@@ -93,7 +93,7 @@ local REDUCE = { maj = "maj", ["7"] = "maj", maj7 = "maj", min = "min", m7 = "mi
 local songs = {}
 if #arg >= 2 then for i = 2, #arg do songs[#songs + 1] = arg[i] end
 else
-  for _, s in ipairs({ "pop_C", "eb_ballad", "a_minor", "fsharp", "jazz_C", "modulate", "bb_minor", "detuned_fast", "silence_noise", "db_mixed", "hard_pop", "arpeggio", "rubato", "push", "waltz" }) do songs[#songs + 1] = s end
+  for _, s in ipairs({ "pop_C", "eb_ballad", "a_minor", "fsharp", "jazz_C", "modulate", "bb_minor", "detuned_fast", "silence_noise", "db_mixed", "hard_pop", "arpeggio", "rubato", "push", "waltz", "wet_mix", "wet_pad" }) do songs[#songs + 1] = s end
 end
 
 local total_exact, total_mm, total_t = 0, 0, 0
