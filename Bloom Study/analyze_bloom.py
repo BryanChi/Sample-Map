@@ -113,6 +113,8 @@ def steady(x, y):
     bx, by = BM @ Sxx, BM @ Syy
     gain = db(by) - db(bx)
     H = Sxy / np.maximum(Sxx, 1e-20)
+    f = np.fft.rfftfreq(NFFT, 1 / SR)
+    H[(f < 30) | (f > 19000)] = 0               # the test noise has no energy there: H would be noise
     ir = np.fft.irfft(H)
     ir = np.roll(ir, NFFT // 2)                  # centre so pre-ringing is visible
     pk = int(np.argmax(np.abs(ir)))

@@ -25,12 +25,12 @@ local ROLES = {
   output     = { '^output', 'out gain' },
   quality    = { 'quality' },
   stereo     = { 'stereo mode', '^stereo' },
-  link       = { '^link', 'stereo link' },
-  tone1      = { 'tone 1 level', 'lows? level', 'tone ?1$', 'band 1 gain', 'low level' },
-  tone2      = { 'tone 2 level', 'lo%-?mids? level', 'tone ?2$', 'band 2 gain' },
-  tone3      = { 'tone 3 level', 'hi%-?mids? level', 'tone ?3$', 'band 3 gain' },
-  tone4      = { 'tone 4 level', 'highs? level', 'tone ?4$', 'band 4 gain' },
-  tone2_freq = { 'tone 2 freq', 'lo%-?mids? freq', 'band 2 freq' },
+  link       = { 'channel link', '^link', 'stereo link' },
+  tone1      = { '^level 1 %(main', 'tone 1 level', 'lows? level', 'tone ?1$', 'band 1 gain', 'low level' },
+  tone2      = { '^level 2 %(main', 'tone 2 level', 'lo%-?mids? level', 'tone ?2$', 'band 2 gain' },
+  tone3      = { '^level 3 %(main', 'tone 3 level', 'hi%-?mids? level', 'tone ?3$', 'band 3 gain' },
+  tone4      = { '^level 4 %(main', 'tone 4 level', 'highs? level', 'tone ?4$', 'band 4 gain' },
+  tone2_freq = { '^freq 2 %(main', 'tone 2 freq', 'lo%-?mids? freq', 'band 2 freq' },
 }
 
 -- A setting is: number = displayed value to reach (bisection on the formatted text),
@@ -263,6 +263,14 @@ local function main()
     if #missing == 0 then
       for _, sid in ipairs(c.sig) do
         local it, s = items[sid], sig_by_id[sid]
+        local done_file = out_dir .. SEP .. c.id .. '__' .. sid .. '.wav'
+        local fh = io.open(done_file, 'rb')
+        local done = fh and fh:seek('end') > 1000
+        if fh then fh:close() end
+        if done then                                     -- rendered by an earlier run: keep it
+          outputs[#outputs + 1] = { case = c.id, signal = sid, file = 'renders/' .. c.id .. '__' .. sid .. '.wav' }
+          goto next_signal
+        end
         r.Main_OnCommand(40289, 0)                       -- unselect all items
         r.SetMediaItemSelected(it, true)
         r.Main_OnCommand(s.channels == 2 and 40209 or 40361, 0)   -- apply track FX (stereo / mono output)
@@ -275,6 +283,7 @@ local function main()
           msg('  render failed for ' .. c.id .. ' / ' .. sid)
         end
         if fn ~= s.file then r.Main_OnCommand(40129, 0) end   -- delete the rendered take, keep the dry one
+        ::next_signal::
       end
       msg(('[%d/%d] %s done'):format(ci, #CASES, c.id))
     end
