@@ -195,11 +195,12 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone1": "10.0"
       },
       "id": "C14_tone1_up",
       "missing": [
-        "tone1"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -211,11 +212,12 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone1": "-10.0"
       },
       "id": "C15_tone1_dn",
       "missing": [
-        "tone1"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -227,11 +229,12 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone2": "10.0"
       },
       "id": "C16_tone2_up",
       "missing": [
-        "tone2"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -243,11 +246,12 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone2": "-10.0"
       },
       "id": "C17_tone2_dn",
       "missing": [
-        "tone2"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -259,11 +263,12 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone3": "10.0"
       },
       "id": "C18_tone3_up",
       "missing": [
-        "tone3"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -275,11 +280,12 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone3": "-10.0"
       },
       "id": "C19_tone3_dn",
       "missing": [
-        "tone3"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -291,11 +297,12 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone4": "10.0"
       },
       "id": "C20_tone4_up",
       "missing": [
-        "tone4"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -307,11 +314,12 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone4": "-10.0"
       },
       "id": "C21_tone4_dn",
       "missing": [
-        "tone4"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -323,12 +331,13 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone2": "10.0",
+        "tone2_freq": "180 Hz"
       },
       "id": "C22_t2f_low",
       "missing": [
-        "tone2_freq",
-        "tone2"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -343,12 +352,13 @@
     },
     {
       "achieved": {
-        "amount": "7.0"
+        "amount": "7.0",
+        "tone2": "10.0",
+        "tone2_freq": "610 Hz"
       },
       "id": "C23_t2f_high",
       "missing": [
-        "tone2_freq",
-        "tone2"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -404,7 +414,7 @@
       "missing": [
 
       ],
-      "pdc": 64,
+      "pdc": 1120,
       "requested": {
         "amount": 7,
         "stereo": {
@@ -415,11 +425,12 @@
     {
       "achieved": {
         "amount": "7.0",
+        "link": "0%",
         "stereo": "L/R split"
       },
       "id": "C27_st_lr",
       "missing": [
-        "link"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -435,11 +446,12 @@
     {
       "achieved": {
         "amount": "7.0",
+        "link": "0%",
         "stereo": "M/S split"
       },
       "id": "C28_st_ms",
       "missing": [
-        "link"
+
       ],
       "pdc": 1120,
       "requested": {
@@ -470,7 +482,7 @@
       }
     }
   ],
-  "created": "2026-10-24T07:29:11Z",
+  "created": "2026-10-24T07:40:38Z",
   "outputs": [
     {
       "case": "C01_amount0",
@@ -621,6 +633,11 @@
       "case": "C05_amount7",
       "file": "renders/C05_amount7__S02_white.wav",
       "signal": "S02_white"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S03_brown.wav",
+      "signal": "S03_brown"
     },
     {
       "case": "C05_amount7",
@@ -783,6 +800,96 @@
       "signal": "S11_clicks"
     },
     {
+      "case": "C14_tone1_up",
+      "file": "renders/C14_tone1_up__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C14_tone1_up",
+      "file": "renders/C14_tone1_up__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C15_tone1_dn",
+      "file": "renders/C15_tone1_dn__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C15_tone1_dn",
+      "file": "renders/C15_tone1_dn__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C16_tone2_up",
+      "file": "renders/C16_tone2_up__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C16_tone2_up",
+      "file": "renders/C16_tone2_up__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C17_tone2_dn",
+      "file": "renders/C17_tone2_dn__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C17_tone2_dn",
+      "file": "renders/C17_tone2_dn__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C18_tone3_up",
+      "file": "renders/C18_tone3_up__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C18_tone3_up",
+      "file": "renders/C18_tone3_up__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C19_tone3_dn",
+      "file": "renders/C19_tone3_dn__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C19_tone3_dn",
+      "file": "renders/C19_tone3_dn__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C20_tone4_up",
+      "file": "renders/C20_tone4_up__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C20_tone4_up",
+      "file": "renders/C20_tone4_up__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C21_tone4_dn",
+      "file": "renders/C21_tone4_dn__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C21_tone4_dn",
+      "file": "renders/C21_tone4_dn__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C22_t2f_low",
+      "file": "renders/C22_t2f_low__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C23_t2f_high",
+      "file": "renders/C23_t2f_high__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
       "case": "C24_q_high",
       "file": "renders/C24_q_high__S01_pink.wav",
       "signal": "S01_pink"
@@ -825,6 +932,16 @@
     {
       "case": "C26_st_linked",
       "file": "renders/C26_st_linked__S12_stereo.wav",
+      "signal": "S12_stereo"
+    },
+    {
+      "case": "C27_st_lr",
+      "file": "renders/C27_st_lr__S12_stereo.wav",
+      "signal": "S12_stereo"
+    },
+    {
+      "case": "C28_st_ms",
+      "file": "renders/C28_st_ms__S12_stereo.wav",
       "signal": "S12_stereo"
     },
     {
@@ -4894,85 +5011,79 @@
   "roles": {
     "amount": 0,
     "attack": 1,
+    "link": 31,
     "mix": 35,
     "output": 36,
     "quality": 40,
     "release": 2,
     "squash_cal": 33,
     "stereo": 30,
+    "tone1": 3,
+    "tone2": 5,
+    "tone2_freq": 6,
+    "tone3": 7,
+    "tone4": 9,
     "wet_trim": 34
   },
   "sample_rate": 48000,
   "signals": [
     {
       "channels": 1,
-      "desc": "Pink noise, -18 dBFS RMS, periodic 10.9 s",
       "file": "signals/S01_pink.wav",
       "id": "S01_pink"
     },
     {
       "channels": 1,
-      "desc": "White noise, -18 dBFS RMS",
       "file": "signals/S02_white.wav",
       "id": "S02_white"
     },
     {
       "channels": 1,
-      "desc": "Brown noise (-6 dB/oct), -18 dBFS RMS",
       "file": "signals/S03_brown.wav",
       "id": "S03_brown"
     },
     {
       "channels": 1,
-      "desc": "Pink tilted +1.5 dB/oct",
       "file": "signals/S04_bright.wav",
       "id": "S04_bright"
     },
     {
       "channels": 1,
-      "desc": "Pink tilted -1.5 dB/oct",
       "file": "signals/S05_dark.wav",
       "id": "S05_dark"
     },
     {
       "channels": 1,
-      "desc": "Pink + 9 dB bumps at 250 Hz and 4 kHz (1 oct wide)",
       "file": "signals/S06_bumps.wav",
       "id": "S06_bumps"
     },
     {
       "channels": 1,
-      "desc": "Pink with a -12 dB dip at 1 kHz (1 oct wide)",
       "file": "signals/S07_hole.wav",
       "id": "S07_hole"
     },
     {
       "channels": 1,
-      "desc": "Pink at -42, -30, -18, -12, -6 dBFS RMS, 5 s each",
       "file": "signals/S08_ladder.wav",
       "id": "S08_ladder"
     },
     {
       "channels": 1,
-      "desc": "Brown and white noise alternating every 3 s (4 cycles), equal RMS",
       "file": "signals/S09_switch.wav",
       "id": "S09_switch"
     },
     {
       "channels": 1,
-      "desc": "Pink bed -24 dBFS + 1 kHz third-octave noise bursts, 1 s on / 2 s off",
       "file": "signals/S10_burst.wav",
       "id": "S10_burst"
     },
     {
       "channels": 1,
-      "desc": "Pink bed -36 dBFS + one 0.5 impulse every second",
       "file": "signals/S11_clicks.wav",
       "id": "S11_clicks"
     },
     {
       "channels": 2,
-      "desc": "L = pink, R = bright pink (+1.5 dB/oct), uncorrelated",
       "file": "signals/S12_stereo.wav",
       "id": "S12_stereo"
     }
