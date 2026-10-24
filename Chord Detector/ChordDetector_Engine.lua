@@ -71,7 +71,7 @@ M.DEFAULTS = {
   key_changes    = true,     -- allow modulations
   min_key_beats  = 24,       -- shortest key area, in beats
   slash_chords   = false,    -- name inversions as C/E
-  nnls           = "key",    -- overtone-free NNLS chroma: "key" (key finding only), true (also chords), false
+  nnls           = false,    -- overtone-free NNLS chroma: "key" (key finding only), true (also chords), false (off)
   refine         = true,     -- allow changes a half beat early/late (pushes)
   no_chord       = "N.C.",   -- label for silence / noise, false = drop
   tuning         = nil,      -- force tuning offset in cents (nil = estimate)
@@ -947,7 +947,19 @@ function M.analyze(samples, samplerate, user_opts)
       ntre[j], nbas[j] = tc, bc
       if j % 32 == 0 then report(0.7 + 0.05 * j / T, "Finding notes") end
     end
-    ktre, kbas = ntre, nbas
+    -- key chroma: blend of the plain and the overtone-free chroma
+    ktre, kbas = {}, {}
+    for j = 1, T do
+      local a, b, c, d = btre[j], ntre[j], bbas[j], nbas[j]
+      local sa, sb, sc, sd = 0, 0, 0, 0
+      for i = 1, 12 do sa = sa + a[i]; sb = sb + b[i]; sc = sc + c[i]; sd = sd + d[i] end
+      local kt, kb = {}, {}
+      for i = 1, 12 do
+        kt[i] = (sa > 0 and a[i] / sa or 0) + (sb > 0 and b[i] / sb or 0)
+        kb[i] = (sc > 0 and c[i] / sc or 0) + (sd > 0 and d[i] / sd or 0)
+      end
+      ktre[j], kbas[j] = kt, kb
+    end
     if opts.nnls == true then btre, bbas = ntre, nbas end
   end
 
