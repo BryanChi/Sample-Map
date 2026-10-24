@@ -1,0 +1,44 @@
+  0  amount                           default 5.0           0:0.0  0.25:2.5  0.5:5.0  0.75:7.5  1:10.0
+  1  attack                           default 5.0           0:0.0  0.25:2.5  0.5:5.0  0.75:7.5  1:10.0
+  2  release                          default 3.0           0:0.0  0.25:2.5  0.5:5.0  0.75:7.5  1:10.0
+  3  level 1 (main/ch1)               default 0.0           0:-10.0  0.25:-5.0  0.5:0.0  0.75:5.0  1:10.0
+  4  freq 1 (main/ch1)                default 100 Hz        0:27 Hz  0.25:52 Hz  0.5:100 Hz  0.75:185 Hz  1:350 Hz
+  5  level 2 (main/ch1)               default 0.0           0:-10.0  0.25:-5.0  0.5:0.0  0.75:5.0  1:10.0
+  6  freq 2 (main/ch1)                default 350 Hz        0:62 Hz  0.25:180 Hz  0.5:350 Hz  0.75:610 Hz  1:1.0 kHz
+  7  level 3 (main/ch1)               default 0.0           0:-10.0  0.25:-5.0  0.5:0.0  0.75:5.0  1:10.0
+  8  freq 3 (main/ch1)                default 3.5 kHz       0:750 Hz  0.25:1.9 kHz  0.5:3.5 kHz  0.75:6.0 kHz  1:10.0 kHz
+  9  level 4 (main/ch1)               default 0.0           0:-10.0  0.25:-5.0  0.5:0.0  0.75:5.0  1:10.0
+ 10  freq 4 (main/ch1)                default 6.3 kHz       0:2.5 kHz  0.25:3.6 kHz  0.5:6.3 kHz  0.75:12.5 kHz  1:27.0 kHz
+ 11  level 1 (ch2)                    default 0.0           0:-10.0  0.25:-5.0  0.5:0.0  0.75:5.0  1:10.0
+ 12  freq 1 (ch2)                     default 100 Hz        0:27 Hz  0.25:52 Hz  0.5:100 Hz  0.75:185 Hz  1:350 Hz
+ 13  level 2 (ch2)                    default 0.0           0:-10.0  0.25:-5.0  0.5:0.0  0.75:5.0  1:10.0
+ 14  freq 2 (ch2)                     default 350 Hz        0:62 Hz  0.25:180 Hz  0.5:350 Hz  0.75:610 Hz  1:1.0 kHz
+ 15  level 3 (ch2)                    default 0.0           0:-10.0  0.25:-5.0  0.5:0.0  0.75:5.0  1:10.0
+ 16  freq 3 (ch2)                     default 3.5 kHz       0:750 Hz  0.25:1.9 kHz  0.5:3.5 kHz  0.75:6.0 kHz  1:10.0 kHz
+ 17  level 4 (ch2)                    default 0.0           0:-10.0  0.25:-5.0  0.5:0.0  0.75:5.0  1:10.0
+ 18  freq 4 (ch2)                     default 6.3 kHz       0:2.5 kHz  0.25:3.6 kHz  0.5:6.3 kHz  0.75:12.5 kHz  1:27.0 kHz
+ 19  band 1 on                        default On            0:Off  0.25:Off  0.5:On  0.75:On  1:On
+ 20  band 2 on                        default On            0:Off  0.25:Off  0.5:On  0.75:On  1:On
+ 21  band 3 on                        default On            0:Off  0.25:Off  0.5:On  0.75:On  1:On
+ 22  band 4 on                        default On            0:Off  0.25:Off  0.5:On  0.75:On  1:On
+ 23  band solo                        default off           0:off  0.25:band 1  0.5:band 2  0.75:band 3  1:band 4
+ 24  band solo ch                     default main/ch1      0:main/ch1  0.25:main/ch1  0.5:main/ch1  0.75:ch2  1:ch2
+ 25  freq lim lo                      default 20 Hz         0:20 Hz  0.25:160 Hz  0.5:680 Hz  0.75:2.6 kHz  1:10.0 kHz
+ 26  freq lim hi                      default 20.0 kHz      0:85 Hz  0.25:390 Hz  0.5:1.5 kHz  0.75:5.5 kHz  1:20.0 kHz
+ 27  freq lim flip                    default Off           0:Off  0.25:Off  0.5:On  0.75:On  1:On
+ 28  lo cut                           default 20 Hz         0:20 Hz  0.25:160 Hz  0.5:680 Hz  0.75:2.6 kHz  1:10.0 kHz
+ 29  hi cut                           default 20.0 kHz      0:85 Hz  0.25:390 Hz  0.5:1.5 kHz  0.75:5.5 kHz  1:20.0 kHz
+ 30  stereo mode                      default linked        0:linked  0.25:linked  0.5:M/S split  0.75:L/R split  1:L/R split
+ 31  channel link                     default 100%          0:0% %  0.25:25% %  0.5:50% %  0.75:75% %  1:100% %
+ 32  channel focus                    default 100 | 100     0:100 | 0 %  0.25:100 | 50 %  0.5:100 | 100 %  0.75:50 | 100 %  1:0 | 100 %
+ 33  squash cal                       default 0.0           0:-24.0  0.25:-12.0  0.5:0.0  0.75:12.0  1:24.0
+ 34  wet trim                         default 0.0           0:-24.0  0.25:-12.0  0.5:0.0  0.75:12.0  1:24.0
+ 35  mix                              default 100%          0:0% %  0.25:25% %  0.5:50% %  0.75:75% %  1:100% %
+ 36  output                           default 0.0           0:-24.0  0.25:-12.0  0.5:0.0  0.75:12.0  1:24.0
+ 37  sc enabled                       default Off           0:Off  0.25:Off  0.5:On  0.75:On  1:On
+ 38  sc listen                        default Off           0:Off  0.25:Off  0.5:On  0.75:On  1:On
+ 39  bypass                           default Off           0:Off  0.25:Off  0.5:On  0.75:On  1:On
+ 40  quality                          default normal        0:normal  0.25:normal  0.5:high  0.75:low latency  1:low latency
+ 41  Bypass                           default normal        0:normal  0.25:normal  0.5:bypassed  0.75:bypassed  1:bypassed
+ 42  Wet                              default 100           0:0%  0.25:25%  0.5:50%  0.75:75%  1:100%
+ 43  Delta                            default normal        0:normal  0.25:normal  0.5:normal  0.75:enabled  1:enabled

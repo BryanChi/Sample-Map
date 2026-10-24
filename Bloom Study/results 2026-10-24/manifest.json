@@ -1,0 +1,4980 @@
+{
+  "cases": [
+    {
+      "achieved": {
+        "amount": "0.0"
+      },
+      "id": "C01_amount0",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 0
+      }
+    },
+    {
+      "achieved": {
+        "amount": "1.0"
+      },
+      "id": "C02_amount1",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 1
+      }
+    },
+    {
+      "achieved": {
+        "amount": "2.9"
+      },
+      "id": "C03_amount3",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 3
+      }
+    },
+    {
+      "achieved": {
+        "amount": "5.0"
+      },
+      "id": "C04_amount5",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 5
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C05_amount7",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7
+      }
+    },
+    {
+      "achieved": {
+        "amount": "8.5"
+      },
+      "id": "C06_amount8_5",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 8.5
+      }
+    },
+    {
+      "achieved": {
+        "amount": "10.0"
+      },
+      "id": "C07_amount10",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 10
+      }
+    },
+    {
+      "achieved": {
+        "amount": "10.0",
+        "squash_cal": "24.0"
+      },
+      "id": "C08_sqcal_hi",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 10,
+        "squash_cal": {
+          "n": 1
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "10.0",
+        "squash_cal": "-24.0"
+      },
+      "id": "C09_sqcal_lo",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 10,
+        "squash_cal": {
+          "n": 0
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "attack": "0.0"
+      },
+      "id": "C10_att_min",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "attack": {
+          "n": 0
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "attack": "10.0"
+      },
+      "id": "C11_att_max",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "attack": {
+          "n": 1
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "release": "0.0"
+      },
+      "id": "C12_rel_min",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "release": {
+          "n": 0
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "release": "10.0"
+      },
+      "id": "C13_rel_max",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "release": {
+          "n": 1
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C14_tone1_up",
+      "missing": [
+        "tone1"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone1": {
+          "n": 1
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C15_tone1_dn",
+      "missing": [
+        "tone1"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone1": {
+          "n": 0
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C16_tone2_up",
+      "missing": [
+        "tone2"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone2": {
+          "n": 1
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C17_tone2_dn",
+      "missing": [
+        "tone2"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone2": {
+          "n": 0
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C18_tone3_up",
+      "missing": [
+        "tone3"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone3": {
+          "n": 1
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C19_tone3_dn",
+      "missing": [
+        "tone3"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone3": {
+          "n": 0
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C20_tone4_up",
+      "missing": [
+        "tone4"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone4": {
+          "n": 1
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C21_tone4_dn",
+      "missing": [
+        "tone4"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone4": {
+          "n": 0
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C22_t2f_low",
+      "missing": [
+        "tone2_freq",
+        "tone2"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone2": {
+          "n": 1
+        },
+        "tone2_freq": {
+          "n": 0.25
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0"
+      },
+      "id": "C23_t2f_high",
+      "missing": [
+        "tone2_freq",
+        "tone2"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "tone2": {
+          "n": 1
+        },
+        "tone2_freq": {
+          "n": 0.75
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "quality": "high"
+      },
+      "id": "C24_q_high",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "quality": {
+          "text": "high"
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "quality": "low latency"
+      },
+      "id": "C25_q_lowlat",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "quality": {
+          "text": "low"
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "stereo": "linked"
+      },
+      "id": "C26_st_linked",
+      "missing": [
+
+      ],
+      "pdc": 64,
+      "requested": {
+        "amount": 7,
+        "stereo": {
+          "text": "link"
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "stereo": "L/R split"
+      },
+      "id": "C27_st_lr",
+      "missing": [
+        "link"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "link": {
+          "n": 0
+        },
+        "stereo": {
+          "text": "l/r"
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "stereo": "M/S split"
+      },
+      "id": "C28_st_ms",
+      "missing": [
+        "link"
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "link": {
+          "n": 0
+        },
+        "stereo": {
+          "text": "m/s"
+        }
+      }
+    },
+    {
+      "achieved": {
+        "amount": "7.0",
+        "mix": "50%"
+      },
+      "id": "C29_mix50",
+      "missing": [
+
+      ],
+      "pdc": 1120,
+      "requested": {
+        "amount": 7,
+        "mix": {
+          "n": 0.5
+        }
+      }
+    }
+  ],
+  "created": "2026-10-24T07:29:11Z",
+  "outputs": [
+    {
+      "case": "C01_amount0",
+      "file": "renders/C01_amount0__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C01_amount0",
+      "file": "renders/C01_amount0__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C01_amount0",
+      "file": "renders/C01_amount0__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C02_amount1",
+      "file": "renders/C02_amount1__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C02_amount1",
+      "file": "renders/C02_amount1__S02_white.wav",
+      "signal": "S02_white"
+    },
+    {
+      "case": "C02_amount1",
+      "file": "renders/C02_amount1__S03_brown.wav",
+      "signal": "S03_brown"
+    },
+    {
+      "case": "C02_amount1",
+      "file": "renders/C02_amount1__S04_bright.wav",
+      "signal": "S04_bright"
+    },
+    {
+      "case": "C02_amount1",
+      "file": "renders/C02_amount1__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C02_amount1",
+      "file": "renders/C02_amount1__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C02_amount1",
+      "file": "renders/C02_amount1__S07_hole.wav",
+      "signal": "S07_hole"
+    },
+    {
+      "case": "C03_amount3",
+      "file": "renders/C03_amount3__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C03_amount3",
+      "file": "renders/C03_amount3__S02_white.wav",
+      "signal": "S02_white"
+    },
+    {
+      "case": "C03_amount3",
+      "file": "renders/C03_amount3__S03_brown.wav",
+      "signal": "S03_brown"
+    },
+    {
+      "case": "C03_amount3",
+      "file": "renders/C03_amount3__S04_bright.wav",
+      "signal": "S04_bright"
+    },
+    {
+      "case": "C03_amount3",
+      "file": "renders/C03_amount3__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C03_amount3",
+      "file": "renders/C03_amount3__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C03_amount3",
+      "file": "renders/C03_amount3__S07_hole.wav",
+      "signal": "S07_hole"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S02_white.wav",
+      "signal": "S02_white"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S03_brown.wav",
+      "signal": "S03_brown"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S04_bright.wav",
+      "signal": "S04_bright"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S07_hole.wav",
+      "signal": "S07_hole"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S08_ladder.wav",
+      "signal": "S08_ladder"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S09_switch.wav",
+      "signal": "S09_switch"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S10_burst.wav",
+      "signal": "S10_burst"
+    },
+    {
+      "case": "C04_amount5",
+      "file": "renders/C04_amount5__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S02_white.wav",
+      "signal": "S02_white"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S04_bright.wav",
+      "signal": "S04_bright"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S05_dark.wav",
+      "signal": "S05_dark"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S07_hole.wav",
+      "signal": "S07_hole"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S08_ladder.wav",
+      "signal": "S08_ladder"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S09_switch.wav",
+      "signal": "S09_switch"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S10_burst.wav",
+      "signal": "S10_burst"
+    },
+    {
+      "case": "C05_amount7",
+      "file": "renders/C05_amount7__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C06_amount8_5",
+      "file": "renders/C06_amount8_5__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C06_amount8_5",
+      "file": "renders/C06_amount8_5__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C06_amount8_5",
+      "file": "renders/C06_amount8_5__S08_ladder.wav",
+      "signal": "S08_ladder"
+    },
+    {
+      "case": "C06_amount8_5",
+      "file": "renders/C06_amount8_5__S10_burst.wav",
+      "signal": "S10_burst"
+    },
+    {
+      "case": "C06_amount8_5",
+      "file": "renders/C06_amount8_5__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C07_amount10",
+      "file": "renders/C07_amount10__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C07_amount10",
+      "file": "renders/C07_amount10__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C07_amount10",
+      "file": "renders/C07_amount10__S08_ladder.wav",
+      "signal": "S08_ladder"
+    },
+    {
+      "case": "C07_amount10",
+      "file": "renders/C07_amount10__S10_burst.wav",
+      "signal": "S10_burst"
+    },
+    {
+      "case": "C07_amount10",
+      "file": "renders/C07_amount10__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C08_sqcal_hi",
+      "file": "renders/C08_sqcal_hi__S08_ladder.wav",
+      "signal": "S08_ladder"
+    },
+    {
+      "case": "C09_sqcal_lo",
+      "file": "renders/C09_sqcal_lo__S08_ladder.wav",
+      "signal": "S08_ladder"
+    },
+    {
+      "case": "C10_att_min",
+      "file": "renders/C10_att_min__S09_switch.wav",
+      "signal": "S09_switch"
+    },
+    {
+      "case": "C10_att_min",
+      "file": "renders/C10_att_min__S10_burst.wav",
+      "signal": "S10_burst"
+    },
+    {
+      "case": "C10_att_min",
+      "file": "renders/C10_att_min__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C11_att_max",
+      "file": "renders/C11_att_max__S09_switch.wav",
+      "signal": "S09_switch"
+    },
+    {
+      "case": "C11_att_max",
+      "file": "renders/C11_att_max__S10_burst.wav",
+      "signal": "S10_burst"
+    },
+    {
+      "case": "C11_att_max",
+      "file": "renders/C11_att_max__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C12_rel_min",
+      "file": "renders/C12_rel_min__S09_switch.wav",
+      "signal": "S09_switch"
+    },
+    {
+      "case": "C12_rel_min",
+      "file": "renders/C12_rel_min__S10_burst.wav",
+      "signal": "S10_burst"
+    },
+    {
+      "case": "C12_rel_min",
+      "file": "renders/C12_rel_min__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C13_rel_max",
+      "file": "renders/C13_rel_max__S09_switch.wav",
+      "signal": "S09_switch"
+    },
+    {
+      "case": "C13_rel_max",
+      "file": "renders/C13_rel_max__S10_burst.wav",
+      "signal": "S10_burst"
+    },
+    {
+      "case": "C13_rel_max",
+      "file": "renders/C13_rel_max__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C24_q_high",
+      "file": "renders/C24_q_high__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C24_q_high",
+      "file": "renders/C24_q_high__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C24_q_high",
+      "file": "renders/C24_q_high__S09_switch.wav",
+      "signal": "S09_switch"
+    },
+    {
+      "case": "C24_q_high",
+      "file": "renders/C24_q_high__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C25_q_lowlat",
+      "file": "renders/C25_q_lowlat__S01_pink.wav",
+      "signal": "S01_pink"
+    },
+    {
+      "case": "C25_q_lowlat",
+      "file": "renders/C25_q_lowlat__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C25_q_lowlat",
+      "file": "renders/C25_q_lowlat__S09_switch.wav",
+      "signal": "S09_switch"
+    },
+    {
+      "case": "C25_q_lowlat",
+      "file": "renders/C25_q_lowlat__S11_clicks.wav",
+      "signal": "S11_clicks"
+    },
+    {
+      "case": "C26_st_linked",
+      "file": "renders/C26_st_linked__S12_stereo.wav",
+      "signal": "S12_stereo"
+    },
+    {
+      "case": "C29_mix50",
+      "file": "renders/C29_mix50__S06_bumps.wav",
+      "signal": "S06_bumps"
+    },
+    {
+      "case": "C29_mix50",
+      "file": "renders/C29_mix50__S11_clicks.wav",
+      "signal": "S11_clicks"
+    }
+  ],
+  "params": [
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "5.0",
+      "index": 0,
+      "name": "amount",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "0.0"
+        },
+        {
+          "n": 0.05,
+          "text": "0.5"
+        },
+        {
+          "n": 0.1,
+          "text": "1.0"
+        },
+        {
+          "n": 0.15,
+          "text": "1.5"
+        },
+        {
+          "n": 0.2,
+          "text": "2.0"
+        },
+        {
+          "n": 0.25,
+          "text": "2.5"
+        },
+        {
+          "n": 0.3,
+          "text": "3.0"
+        },
+        {
+          "n": 0.35,
+          "text": "3.5"
+        },
+        {
+          "n": 0.4,
+          "text": "4.0"
+        },
+        {
+          "n": 0.45,
+          "text": "4.5"
+        },
+        {
+          "n": 0.5,
+          "text": "5.0"
+        },
+        {
+          "n": 0.55,
+          "text": "5.5"
+        },
+        {
+          "n": 0.6,
+          "text": "6.0"
+        },
+        {
+          "n": 0.65,
+          "text": "6.5"
+        },
+        {
+          "n": 0.7,
+          "text": "7.0"
+        },
+        {
+          "n": 0.75,
+          "text": "7.5"
+        },
+        {
+          "n": 0.8,
+          "text": "8.0"
+        },
+        {
+          "n": 0.85,
+          "text": "8.5"
+        },
+        {
+          "n": 0.9,
+          "text": "9.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.5"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "5.0",
+      "index": 1,
+      "name": "attack",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "0.0"
+        },
+        {
+          "n": 0.05,
+          "text": "0.5"
+        },
+        {
+          "n": 0.1,
+          "text": "1.0"
+        },
+        {
+          "n": 0.15,
+          "text": "1.5"
+        },
+        {
+          "n": 0.2,
+          "text": "2.0"
+        },
+        {
+          "n": 0.25,
+          "text": "2.5"
+        },
+        {
+          "n": 0.3,
+          "text": "3.0"
+        },
+        {
+          "n": 0.35,
+          "text": "3.5"
+        },
+        {
+          "n": 0.4,
+          "text": "4.0"
+        },
+        {
+          "n": 0.45,
+          "text": "4.5"
+        },
+        {
+          "n": 0.5,
+          "text": "5.0"
+        },
+        {
+          "n": 0.55,
+          "text": "5.5"
+        },
+        {
+          "n": 0.6,
+          "text": "6.0"
+        },
+        {
+          "n": 0.65,
+          "text": "6.5"
+        },
+        {
+          "n": 0.7,
+          "text": "7.0"
+        },
+        {
+          "n": 0.75,
+          "text": "7.5"
+        },
+        {
+          "n": 0.8,
+          "text": "8.0"
+        },
+        {
+          "n": 0.85,
+          "text": "8.5"
+        },
+        {
+          "n": 0.9,
+          "text": "9.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.5"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.30000004172325,
+      "default_text": "3.0",
+      "index": 2,
+      "name": "release",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "0.0"
+        },
+        {
+          "n": 0.05,
+          "text": "0.5"
+        },
+        {
+          "n": 0.1,
+          "text": "1.0"
+        },
+        {
+          "n": 0.15,
+          "text": "1.5"
+        },
+        {
+          "n": 0.2,
+          "text": "2.0"
+        },
+        {
+          "n": 0.25,
+          "text": "2.5"
+        },
+        {
+          "n": 0.3,
+          "text": "3.0"
+        },
+        {
+          "n": 0.35,
+          "text": "3.5"
+        },
+        {
+          "n": 0.4,
+          "text": "4.0"
+        },
+        {
+          "n": 0.45,
+          "text": "4.5"
+        },
+        {
+          "n": 0.5,
+          "text": "5.0"
+        },
+        {
+          "n": 0.55,
+          "text": "5.5"
+        },
+        {
+          "n": 0.6,
+          "text": "6.0"
+        },
+        {
+          "n": 0.65,
+          "text": "6.5"
+        },
+        {
+          "n": 0.7,
+          "text": "7.0"
+        },
+        {
+          "n": 0.75,
+          "text": "7.5"
+        },
+        {
+          "n": 0.8,
+          "text": "8.0"
+        },
+        {
+          "n": 0.85,
+          "text": "8.5"
+        },
+        {
+          "n": 0.9,
+          "text": "9.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.5"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50005030632019,
+      "default_text": "0.0",
+      "index": 3,
+      "name": "level 1 (main/ch1)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-10.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-9.0"
+        },
+        {
+          "n": 0.1,
+          "text": "-8.0"
+        },
+        {
+          "n": 0.15,
+          "text": "-7.0"
+        },
+        {
+          "n": 0.2,
+          "text": "-6.0"
+        },
+        {
+          "n": 0.25,
+          "text": "-5.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-4.0"
+        },
+        {
+          "n": 0.35,
+          "text": "-3.0"
+        },
+        {
+          "n": 0.4,
+          "text": "-2.0"
+        },
+        {
+          "n": 0.45,
+          "text": "-1.0"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "1.0"
+        },
+        {
+          "n": 0.6,
+          "text": "2.0"
+        },
+        {
+          "n": 0.65,
+          "text": "3.0"
+        },
+        {
+          "n": 0.7,
+          "text": "4.0"
+        },
+        {
+          "n": 0.75,
+          "text": "5.0"
+        },
+        {
+          "n": 0.8,
+          "text": "6.0"
+        },
+        {
+          "n": 0.85,
+          "text": "7.0"
+        },
+        {
+          "n": 0.9,
+          "text": "8.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.0"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "100 Hz",
+      "index": 4,
+      "name": "freq 1 (main/ch1)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "27 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "31 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "35 Hz"
+        },
+        {
+          "n": 0.15,
+          "text": "40 Hz"
+        },
+        {
+          "n": 0.2,
+          "text": "46 Hz"
+        },
+        {
+          "n": 0.25,
+          "text": "52 Hz"
+        },
+        {
+          "n": 0.3,
+          "text": "59 Hz"
+        },
+        {
+          "n": 0.35,
+          "text": "68 Hz"
+        },
+        {
+          "n": 0.4,
+          "text": "77 Hz"
+        },
+        {
+          "n": 0.45,
+          "text": "88 Hz"
+        },
+        {
+          "n": 0.5,
+          "text": "100 Hz"
+        },
+        {
+          "n": 0.55,
+          "text": "115 Hz"
+        },
+        {
+          "n": 0.6,
+          "text": "130 Hz"
+        },
+        {
+          "n": 0.65,
+          "text": "145 Hz"
+        },
+        {
+          "n": 0.7,
+          "text": "165 Hz"
+        },
+        {
+          "n": 0.75,
+          "text": "185 Hz"
+        },
+        {
+          "n": 0.8,
+          "text": "210 Hz"
+        },
+        {
+          "n": 0.85,
+          "text": "240 Hz"
+        },
+        {
+          "n": 0.9,
+          "text": "270 Hz"
+        },
+        {
+          "n": 0.95,
+          "text": "310 Hz"
+        },
+        {
+          "n": 1.0,
+          "text": "350 Hz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50005030632019,
+      "default_text": "0.0",
+      "index": 5,
+      "name": "level 2 (main/ch1)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-10.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-9.0"
+        },
+        {
+          "n": 0.1,
+          "text": "-8.0"
+        },
+        {
+          "n": 0.15,
+          "text": "-7.0"
+        },
+        {
+          "n": 0.2,
+          "text": "-6.0"
+        },
+        {
+          "n": 0.25,
+          "text": "-5.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-4.0"
+        },
+        {
+          "n": 0.35,
+          "text": "-3.0"
+        },
+        {
+          "n": 0.4,
+          "text": "-2.0"
+        },
+        {
+          "n": 0.45,
+          "text": "-1.0"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "1.0"
+        },
+        {
+          "n": 0.6,
+          "text": "2.0"
+        },
+        {
+          "n": 0.65,
+          "text": "3.0"
+        },
+        {
+          "n": 0.7,
+          "text": "4.0"
+        },
+        {
+          "n": 0.75,
+          "text": "5.0"
+        },
+        {
+          "n": 0.8,
+          "text": "6.0"
+        },
+        {
+          "n": 0.85,
+          "text": "7.0"
+        },
+        {
+          "n": 0.9,
+          "text": "8.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.0"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "350 Hz",
+      "index": 6,
+      "name": "freq 2 (main/ch1)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "62 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "89 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "110 Hz"
+        },
+        {
+          "n": 0.15,
+          "text": "135 Hz"
+        },
+        {
+          "n": 0.2,
+          "text": "155 Hz"
+        },
+        {
+          "n": 0.25,
+          "text": "180 Hz"
+        },
+        {
+          "n": 0.3,
+          "text": "210 Hz"
+        },
+        {
+          "n": 0.35,
+          "text": "240 Hz"
+        },
+        {
+          "n": 0.4,
+          "text": "270 Hz"
+        },
+        {
+          "n": 0.45,
+          "text": "310 Hz"
+        },
+        {
+          "n": 0.5,
+          "text": "350 Hz"
+        },
+        {
+          "n": 0.55,
+          "text": "390 Hz"
+        },
+        {
+          "n": 0.6,
+          "text": "440 Hz"
+        },
+        {
+          "n": 0.65,
+          "text": "490 Hz"
+        },
+        {
+          "n": 0.7,
+          "text": "550 Hz"
+        },
+        {
+          "n": 0.75,
+          "text": "610 Hz"
+        },
+        {
+          "n": 0.8,
+          "text": "670 Hz"
+        },
+        {
+          "n": 0.85,
+          "text": "750 Hz"
+        },
+        {
+          "n": 0.9,
+          "text": "820 Hz"
+        },
+        {
+          "n": 0.95,
+          "text": "910 Hz"
+        },
+        {
+          "n": 1.0,
+          "text": "1.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50005030632019,
+      "default_text": "0.0",
+      "index": 7,
+      "name": "level 3 (main/ch1)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-10.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-9.0"
+        },
+        {
+          "n": 0.1,
+          "text": "-8.0"
+        },
+        {
+          "n": 0.15,
+          "text": "-7.0"
+        },
+        {
+          "n": 0.2,
+          "text": "-6.0"
+        },
+        {
+          "n": 0.25,
+          "text": "-5.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-4.0"
+        },
+        {
+          "n": 0.35,
+          "text": "-3.0"
+        },
+        {
+          "n": 0.4,
+          "text": "-2.0"
+        },
+        {
+          "n": 0.45,
+          "text": "-1.0"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "1.0"
+        },
+        {
+          "n": 0.6,
+          "text": "2.0"
+        },
+        {
+          "n": 0.65,
+          "text": "3.0"
+        },
+        {
+          "n": 0.7,
+          "text": "4.0"
+        },
+        {
+          "n": 0.75,
+          "text": "5.0"
+        },
+        {
+          "n": 0.8,
+          "text": "6.0"
+        },
+        {
+          "n": 0.85,
+          "text": "7.0"
+        },
+        {
+          "n": 0.9,
+          "text": "8.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.0"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "3.5 kHz",
+      "index": 8,
+      "name": "freq 3 (main/ch1)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "750 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "990 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "1.2 kHz"
+        },
+        {
+          "n": 0.15,
+          "text": "1.4 kHz"
+        },
+        {
+          "n": 0.2,
+          "text": "1.6 kHz"
+        },
+        {
+          "n": 0.25,
+          "text": "1.9 kHz"
+        },
+        {
+          "n": 0.3,
+          "text": "2.1 kHz"
+        },
+        {
+          "n": 0.35,
+          "text": "2.4 kHz"
+        },
+        {
+          "n": 0.4,
+          "text": "2.8 kHz"
+        },
+        {
+          "n": 0.45,
+          "text": "3.1 kHz"
+        },
+        {
+          "n": 0.5,
+          "text": "3.5 kHz"
+        },
+        {
+          "n": 0.55,
+          "text": "3.9 kHz"
+        },
+        {
+          "n": 0.6,
+          "text": "4.4 kHz"
+        },
+        {
+          "n": 0.65,
+          "text": "4.9 kHz"
+        },
+        {
+          "n": 0.7,
+          "text": "5.4 kHz"
+        },
+        {
+          "n": 0.75,
+          "text": "6.0 kHz"
+        },
+        {
+          "n": 0.8,
+          "text": "6.7 kHz"
+        },
+        {
+          "n": 0.85,
+          "text": "7.4 kHz"
+        },
+        {
+          "n": 0.9,
+          "text": "8.2 kHz"
+        },
+        {
+          "n": 0.95,
+          "text": "9.1 kHz"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50005030632019,
+      "default_text": "0.0",
+      "index": 9,
+      "name": "level 4 (main/ch1)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-10.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-9.0"
+        },
+        {
+          "n": 0.1,
+          "text": "-8.0"
+        },
+        {
+          "n": 0.15,
+          "text": "-7.0"
+        },
+        {
+          "n": 0.2,
+          "text": "-6.0"
+        },
+        {
+          "n": 0.25,
+          "text": "-5.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-4.0"
+        },
+        {
+          "n": 0.35,
+          "text": "-3.0"
+        },
+        {
+          "n": 0.4,
+          "text": "-2.0"
+        },
+        {
+          "n": 0.45,
+          "text": "-1.0"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "1.0"
+        },
+        {
+          "n": 0.6,
+          "text": "2.0"
+        },
+        {
+          "n": 0.65,
+          "text": "3.0"
+        },
+        {
+          "n": 0.7,
+          "text": "4.0"
+        },
+        {
+          "n": 0.75,
+          "text": "5.0"
+        },
+        {
+          "n": 0.8,
+          "text": "6.0"
+        },
+        {
+          "n": 0.85,
+          "text": "7.0"
+        },
+        {
+          "n": 0.9,
+          "text": "8.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.0"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "6.3 kHz",
+      "index": 10,
+      "name": "freq 4 (main/ch1)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "2.5 kHz"
+        },
+        {
+          "n": 0.05,
+          "text": "2.6 kHz"
+        },
+        {
+          "n": 0.1,
+          "text": "2.8 kHz"
+        },
+        {
+          "n": 0.15,
+          "text": "3.0 kHz"
+        },
+        {
+          "n": 0.2,
+          "text": "3.3 kHz"
+        },
+        {
+          "n": 0.25,
+          "text": "3.6 kHz"
+        },
+        {
+          "n": 0.3,
+          "text": "4.0 kHz"
+        },
+        {
+          "n": 0.35,
+          "text": "4.4 kHz"
+        },
+        {
+          "n": 0.4,
+          "text": "4.9 kHz"
+        },
+        {
+          "n": 0.45,
+          "text": "5.6 kHz"
+        },
+        {
+          "n": 0.5,
+          "text": "6.3 kHz"
+        },
+        {
+          "n": 0.55,
+          "text": "7.2 kHz"
+        },
+        {
+          "n": 0.6,
+          "text": "8.2 kHz"
+        },
+        {
+          "n": 0.65,
+          "text": "9.4 kHz"
+        },
+        {
+          "n": 0.7,
+          "text": "10.8 kHz"
+        },
+        {
+          "n": 0.75,
+          "text": "12.5 kHz"
+        },
+        {
+          "n": 0.8,
+          "text": "14.5 kHz"
+        },
+        {
+          "n": 0.85,
+          "text": "16.8 kHz"
+        },
+        {
+          "n": 0.9,
+          "text": "19.6 kHz"
+        },
+        {
+          "n": 0.95,
+          "text": "23.0 kHz"
+        },
+        {
+          "n": 1.0,
+          "text": "27.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "0.0",
+      "index": 11,
+      "name": "level 1 (ch2)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-10.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-9.0"
+        },
+        {
+          "n": 0.1,
+          "text": "-8.0"
+        },
+        {
+          "n": 0.15,
+          "text": "-7.0"
+        },
+        {
+          "n": 0.2,
+          "text": "-6.0"
+        },
+        {
+          "n": 0.25,
+          "text": "-5.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-4.0"
+        },
+        {
+          "n": 0.35,
+          "text": "-3.0"
+        },
+        {
+          "n": 0.4,
+          "text": "-2.0"
+        },
+        {
+          "n": 0.45,
+          "text": "-1.0"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "1.0"
+        },
+        {
+          "n": 0.6,
+          "text": "2.0"
+        },
+        {
+          "n": 0.65,
+          "text": "3.0"
+        },
+        {
+          "n": 0.7,
+          "text": "4.0"
+        },
+        {
+          "n": 0.75,
+          "text": "5.0"
+        },
+        {
+          "n": 0.8,
+          "text": "6.0"
+        },
+        {
+          "n": 0.85,
+          "text": "7.0"
+        },
+        {
+          "n": 0.9,
+          "text": "8.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.0"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "100 Hz",
+      "index": 12,
+      "name": "freq 1 (ch2)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "27 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "31 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "35 Hz"
+        },
+        {
+          "n": 0.15,
+          "text": "40 Hz"
+        },
+        {
+          "n": 0.2,
+          "text": "46 Hz"
+        },
+        {
+          "n": 0.25,
+          "text": "52 Hz"
+        },
+        {
+          "n": 0.3,
+          "text": "59 Hz"
+        },
+        {
+          "n": 0.35,
+          "text": "68 Hz"
+        },
+        {
+          "n": 0.4,
+          "text": "77 Hz"
+        },
+        {
+          "n": 0.45,
+          "text": "88 Hz"
+        },
+        {
+          "n": 0.5,
+          "text": "100 Hz"
+        },
+        {
+          "n": 0.55,
+          "text": "115 Hz"
+        },
+        {
+          "n": 0.6,
+          "text": "130 Hz"
+        },
+        {
+          "n": 0.65,
+          "text": "145 Hz"
+        },
+        {
+          "n": 0.7,
+          "text": "165 Hz"
+        },
+        {
+          "n": 0.75,
+          "text": "185 Hz"
+        },
+        {
+          "n": 0.8,
+          "text": "210 Hz"
+        },
+        {
+          "n": 0.85,
+          "text": "240 Hz"
+        },
+        {
+          "n": 0.9,
+          "text": "270 Hz"
+        },
+        {
+          "n": 0.95,
+          "text": "310 Hz"
+        },
+        {
+          "n": 1.0,
+          "text": "350 Hz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "0.0",
+      "index": 13,
+      "name": "level 2 (ch2)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-10.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-9.0"
+        },
+        {
+          "n": 0.1,
+          "text": "-8.0"
+        },
+        {
+          "n": 0.15,
+          "text": "-7.0"
+        },
+        {
+          "n": 0.2,
+          "text": "-6.0"
+        },
+        {
+          "n": 0.25,
+          "text": "-5.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-4.0"
+        },
+        {
+          "n": 0.35,
+          "text": "-3.0"
+        },
+        {
+          "n": 0.4,
+          "text": "-2.0"
+        },
+        {
+          "n": 0.45,
+          "text": "-1.0"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "1.0"
+        },
+        {
+          "n": 0.6,
+          "text": "2.0"
+        },
+        {
+          "n": 0.65,
+          "text": "3.0"
+        },
+        {
+          "n": 0.7,
+          "text": "4.0"
+        },
+        {
+          "n": 0.75,
+          "text": "5.0"
+        },
+        {
+          "n": 0.8,
+          "text": "6.0"
+        },
+        {
+          "n": 0.85,
+          "text": "7.0"
+        },
+        {
+          "n": 0.9,
+          "text": "8.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.0"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "350 Hz",
+      "index": 14,
+      "name": "freq 2 (ch2)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "62 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "89 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "110 Hz"
+        },
+        {
+          "n": 0.15,
+          "text": "135 Hz"
+        },
+        {
+          "n": 0.2,
+          "text": "155 Hz"
+        },
+        {
+          "n": 0.25,
+          "text": "180 Hz"
+        },
+        {
+          "n": 0.3,
+          "text": "210 Hz"
+        },
+        {
+          "n": 0.35,
+          "text": "240 Hz"
+        },
+        {
+          "n": 0.4,
+          "text": "270 Hz"
+        },
+        {
+          "n": 0.45,
+          "text": "310 Hz"
+        },
+        {
+          "n": 0.5,
+          "text": "350 Hz"
+        },
+        {
+          "n": 0.55,
+          "text": "390 Hz"
+        },
+        {
+          "n": 0.6,
+          "text": "440 Hz"
+        },
+        {
+          "n": 0.65,
+          "text": "490 Hz"
+        },
+        {
+          "n": 0.7,
+          "text": "550 Hz"
+        },
+        {
+          "n": 0.75,
+          "text": "610 Hz"
+        },
+        {
+          "n": 0.8,
+          "text": "670 Hz"
+        },
+        {
+          "n": 0.85,
+          "text": "750 Hz"
+        },
+        {
+          "n": 0.9,
+          "text": "820 Hz"
+        },
+        {
+          "n": 0.95,
+          "text": "910 Hz"
+        },
+        {
+          "n": 1.0,
+          "text": "1.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "0.0",
+      "index": 15,
+      "name": "level 3 (ch2)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-10.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-9.0"
+        },
+        {
+          "n": 0.1,
+          "text": "-8.0"
+        },
+        {
+          "n": 0.15,
+          "text": "-7.0"
+        },
+        {
+          "n": 0.2,
+          "text": "-6.0"
+        },
+        {
+          "n": 0.25,
+          "text": "-5.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-4.0"
+        },
+        {
+          "n": 0.35,
+          "text": "-3.0"
+        },
+        {
+          "n": 0.4,
+          "text": "-2.0"
+        },
+        {
+          "n": 0.45,
+          "text": "-1.0"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "1.0"
+        },
+        {
+          "n": 0.6,
+          "text": "2.0"
+        },
+        {
+          "n": 0.65,
+          "text": "3.0"
+        },
+        {
+          "n": 0.7,
+          "text": "4.0"
+        },
+        {
+          "n": 0.75,
+          "text": "5.0"
+        },
+        {
+          "n": 0.8,
+          "text": "6.0"
+        },
+        {
+          "n": 0.85,
+          "text": "7.0"
+        },
+        {
+          "n": 0.9,
+          "text": "8.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.0"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "3.5 kHz",
+      "index": 16,
+      "name": "freq 3 (ch2)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "750 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "990 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "1.2 kHz"
+        },
+        {
+          "n": 0.15,
+          "text": "1.4 kHz"
+        },
+        {
+          "n": 0.2,
+          "text": "1.6 kHz"
+        },
+        {
+          "n": 0.25,
+          "text": "1.9 kHz"
+        },
+        {
+          "n": 0.3,
+          "text": "2.1 kHz"
+        },
+        {
+          "n": 0.35,
+          "text": "2.4 kHz"
+        },
+        {
+          "n": 0.4,
+          "text": "2.8 kHz"
+        },
+        {
+          "n": 0.45,
+          "text": "3.1 kHz"
+        },
+        {
+          "n": 0.5,
+          "text": "3.5 kHz"
+        },
+        {
+          "n": 0.55,
+          "text": "3.9 kHz"
+        },
+        {
+          "n": 0.6,
+          "text": "4.4 kHz"
+        },
+        {
+          "n": 0.65,
+          "text": "4.9 kHz"
+        },
+        {
+          "n": 0.7,
+          "text": "5.4 kHz"
+        },
+        {
+          "n": 0.75,
+          "text": "6.0 kHz"
+        },
+        {
+          "n": 0.8,
+          "text": "6.7 kHz"
+        },
+        {
+          "n": 0.85,
+          "text": "7.4 kHz"
+        },
+        {
+          "n": 0.9,
+          "text": "8.2 kHz"
+        },
+        {
+          "n": 0.95,
+          "text": "9.1 kHz"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "0.0",
+      "index": 17,
+      "name": "level 4 (ch2)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-10.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-9.0"
+        },
+        {
+          "n": 0.1,
+          "text": "-8.0"
+        },
+        {
+          "n": 0.15,
+          "text": "-7.0"
+        },
+        {
+          "n": 0.2,
+          "text": "-6.0"
+        },
+        {
+          "n": 0.25,
+          "text": "-5.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-4.0"
+        },
+        {
+          "n": 0.35,
+          "text": "-3.0"
+        },
+        {
+          "n": 0.4,
+          "text": "-2.0"
+        },
+        {
+          "n": 0.45,
+          "text": "-1.0"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "1.0"
+        },
+        {
+          "n": 0.6,
+          "text": "2.0"
+        },
+        {
+          "n": 0.65,
+          "text": "3.0"
+        },
+        {
+          "n": 0.7,
+          "text": "4.0"
+        },
+        {
+          "n": 0.75,
+          "text": "5.0"
+        },
+        {
+          "n": 0.8,
+          "text": "6.0"
+        },
+        {
+          "n": 0.85,
+          "text": "7.0"
+        },
+        {
+          "n": 0.9,
+          "text": "8.0"
+        },
+        {
+          "n": 0.95,
+          "text": "9.0"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "6.3 kHz",
+      "index": 18,
+      "name": "freq 4 (ch2)",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "2.5 kHz"
+        },
+        {
+          "n": 0.05,
+          "text": "2.6 kHz"
+        },
+        {
+          "n": 0.1,
+          "text": "2.8 kHz"
+        },
+        {
+          "n": 0.15,
+          "text": "3.0 kHz"
+        },
+        {
+          "n": 0.2,
+          "text": "3.3 kHz"
+        },
+        {
+          "n": 0.25,
+          "text": "3.6 kHz"
+        },
+        {
+          "n": 0.3,
+          "text": "4.0 kHz"
+        },
+        {
+          "n": 0.35,
+          "text": "4.4 kHz"
+        },
+        {
+          "n": 0.4,
+          "text": "4.9 kHz"
+        },
+        {
+          "n": 0.45,
+          "text": "5.6 kHz"
+        },
+        {
+          "n": 0.5,
+          "text": "6.3 kHz"
+        },
+        {
+          "n": 0.55,
+          "text": "7.2 kHz"
+        },
+        {
+          "n": 0.6,
+          "text": "8.2 kHz"
+        },
+        {
+          "n": 0.65,
+          "text": "9.4 kHz"
+        },
+        {
+          "n": 0.7,
+          "text": "10.8 kHz"
+        },
+        {
+          "n": 0.75,
+          "text": "12.5 kHz"
+        },
+        {
+          "n": 0.8,
+          "text": "14.5 kHz"
+        },
+        {
+          "n": 0.85,
+          "text": "16.8 kHz"
+        },
+        {
+          "n": 0.9,
+          "text": "19.6 kHz"
+        },
+        {
+          "n": 0.95,
+          "text": "23.0 kHz"
+        },
+        {
+          "n": 1.0,
+          "text": "27.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "On",
+      "index": 19,
+      "name": "band 1 on",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "Off"
+        },
+        {
+          "n": 0.05,
+          "text": "Off"
+        },
+        {
+          "n": 0.1,
+          "text": "Off"
+        },
+        {
+          "n": 0.15,
+          "text": "Off"
+        },
+        {
+          "n": 0.2,
+          "text": "Off"
+        },
+        {
+          "n": 0.25,
+          "text": "Off"
+        },
+        {
+          "n": 0.3,
+          "text": "Off"
+        },
+        {
+          "n": 0.35,
+          "text": "Off"
+        },
+        {
+          "n": 0.4,
+          "text": "Off"
+        },
+        {
+          "n": 0.45,
+          "text": "Off"
+        },
+        {
+          "n": 0.5,
+          "text": "On"
+        },
+        {
+          "n": 0.55,
+          "text": "On"
+        },
+        {
+          "n": 0.6,
+          "text": "On"
+        },
+        {
+          "n": 0.65,
+          "text": "On"
+        },
+        {
+          "n": 0.7,
+          "text": "On"
+        },
+        {
+          "n": 0.75,
+          "text": "On"
+        },
+        {
+          "n": 0.8,
+          "text": "On"
+        },
+        {
+          "n": 0.85,
+          "text": "On"
+        },
+        {
+          "n": 0.9,
+          "text": "On"
+        },
+        {
+          "n": 0.95,
+          "text": "On"
+        },
+        {
+          "n": 1.0,
+          "text": "On"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "On",
+      "index": 20,
+      "name": "band 2 on",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "Off"
+        },
+        {
+          "n": 0.05,
+          "text": "Off"
+        },
+        {
+          "n": 0.1,
+          "text": "Off"
+        },
+        {
+          "n": 0.15,
+          "text": "Off"
+        },
+        {
+          "n": 0.2,
+          "text": "Off"
+        },
+        {
+          "n": 0.25,
+          "text": "Off"
+        },
+        {
+          "n": 0.3,
+          "text": "Off"
+        },
+        {
+          "n": 0.35,
+          "text": "Off"
+        },
+        {
+          "n": 0.4,
+          "text": "Off"
+        },
+        {
+          "n": 0.45,
+          "text": "Off"
+        },
+        {
+          "n": 0.5,
+          "text": "On"
+        },
+        {
+          "n": 0.55,
+          "text": "On"
+        },
+        {
+          "n": 0.6,
+          "text": "On"
+        },
+        {
+          "n": 0.65,
+          "text": "On"
+        },
+        {
+          "n": 0.7,
+          "text": "On"
+        },
+        {
+          "n": 0.75,
+          "text": "On"
+        },
+        {
+          "n": 0.8,
+          "text": "On"
+        },
+        {
+          "n": 0.85,
+          "text": "On"
+        },
+        {
+          "n": 0.9,
+          "text": "On"
+        },
+        {
+          "n": 0.95,
+          "text": "On"
+        },
+        {
+          "n": 1.0,
+          "text": "On"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "On",
+      "index": 21,
+      "name": "band 3 on",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "Off"
+        },
+        {
+          "n": 0.05,
+          "text": "Off"
+        },
+        {
+          "n": 0.1,
+          "text": "Off"
+        },
+        {
+          "n": 0.15,
+          "text": "Off"
+        },
+        {
+          "n": 0.2,
+          "text": "Off"
+        },
+        {
+          "n": 0.25,
+          "text": "Off"
+        },
+        {
+          "n": 0.3,
+          "text": "Off"
+        },
+        {
+          "n": 0.35,
+          "text": "Off"
+        },
+        {
+          "n": 0.4,
+          "text": "Off"
+        },
+        {
+          "n": 0.45,
+          "text": "Off"
+        },
+        {
+          "n": 0.5,
+          "text": "On"
+        },
+        {
+          "n": 0.55,
+          "text": "On"
+        },
+        {
+          "n": 0.6,
+          "text": "On"
+        },
+        {
+          "n": 0.65,
+          "text": "On"
+        },
+        {
+          "n": 0.7,
+          "text": "On"
+        },
+        {
+          "n": 0.75,
+          "text": "On"
+        },
+        {
+          "n": 0.8,
+          "text": "On"
+        },
+        {
+          "n": 0.85,
+          "text": "On"
+        },
+        {
+          "n": 0.9,
+          "text": "On"
+        },
+        {
+          "n": 0.95,
+          "text": "On"
+        },
+        {
+          "n": 1.0,
+          "text": "On"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "On",
+      "index": 22,
+      "name": "band 4 on",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "Off"
+        },
+        {
+          "n": 0.05,
+          "text": "Off"
+        },
+        {
+          "n": 0.1,
+          "text": "Off"
+        },
+        {
+          "n": 0.15,
+          "text": "Off"
+        },
+        {
+          "n": 0.2,
+          "text": "Off"
+        },
+        {
+          "n": 0.25,
+          "text": "Off"
+        },
+        {
+          "n": 0.3,
+          "text": "Off"
+        },
+        {
+          "n": 0.35,
+          "text": "Off"
+        },
+        {
+          "n": 0.4,
+          "text": "Off"
+        },
+        {
+          "n": 0.45,
+          "text": "Off"
+        },
+        {
+          "n": 0.5,
+          "text": "On"
+        },
+        {
+          "n": 0.55,
+          "text": "On"
+        },
+        {
+          "n": 0.6,
+          "text": "On"
+        },
+        {
+          "n": 0.65,
+          "text": "On"
+        },
+        {
+          "n": 0.7,
+          "text": "On"
+        },
+        {
+          "n": 0.75,
+          "text": "On"
+        },
+        {
+          "n": 0.8,
+          "text": "On"
+        },
+        {
+          "n": 0.85,
+          "text": "On"
+        },
+        {
+          "n": 0.9,
+          "text": "On"
+        },
+        {
+          "n": 0.95,
+          "text": "On"
+        },
+        {
+          "n": 1.0,
+          "text": "On"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "off",
+      "index": 23,
+      "name": "band solo",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "off"
+        },
+        {
+          "n": 0.05,
+          "text": "off"
+        },
+        {
+          "n": 0.1,
+          "text": "off"
+        },
+        {
+          "n": 0.15,
+          "text": "band 1"
+        },
+        {
+          "n": 0.2,
+          "text": "band 1"
+        },
+        {
+          "n": 0.25,
+          "text": "band 1"
+        },
+        {
+          "n": 0.3,
+          "text": "band 1"
+        },
+        {
+          "n": 0.35,
+          "text": "band 1"
+        },
+        {
+          "n": 0.4,
+          "text": "band 2"
+        },
+        {
+          "n": 0.45,
+          "text": "band 2"
+        },
+        {
+          "n": 0.5,
+          "text": "band 2"
+        },
+        {
+          "n": 0.55,
+          "text": "band 2"
+        },
+        {
+          "n": 0.6,
+          "text": "band 2"
+        },
+        {
+          "n": 0.65,
+          "text": "band 3"
+        },
+        {
+          "n": 0.7,
+          "text": "band 3"
+        },
+        {
+          "n": 0.75,
+          "text": "band 3"
+        },
+        {
+          "n": 0.8,
+          "text": "band 3"
+        },
+        {
+          "n": 0.85,
+          "text": "band 3"
+        },
+        {
+          "n": 0.9,
+          "text": "band 4"
+        },
+        {
+          "n": 0.95,
+          "text": "band 4"
+        },
+        {
+          "n": 1.0,
+          "text": "band 4"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "main/ch1",
+      "index": 24,
+      "name": "band solo ch",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.05,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.1,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.15,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.2,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.25,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.3,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.35,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.4,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.45,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.5,
+          "text": "main/ch1"
+        },
+        {
+          "n": 0.55,
+          "text": "ch2"
+        },
+        {
+          "n": 0.6,
+          "text": "ch2"
+        },
+        {
+          "n": 0.65,
+          "text": "ch2"
+        },
+        {
+          "n": 0.7,
+          "text": "ch2"
+        },
+        {
+          "n": 0.75,
+          "text": "ch2"
+        },
+        {
+          "n": 0.8,
+          "text": "ch2"
+        },
+        {
+          "n": 0.85,
+          "text": "ch2"
+        },
+        {
+          "n": 0.9,
+          "text": "ch2"
+        },
+        {
+          "n": 0.95,
+          "text": "ch2"
+        },
+        {
+          "n": 1.0,
+          "text": "ch2"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "20 Hz",
+      "index": 25,
+      "name": "freq lim lo",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "20 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "35 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "54 Hz"
+        },
+        {
+          "n": 0.15,
+          "text": "80 Hz"
+        },
+        {
+          "n": 0.2,
+          "text": "115 Hz"
+        },
+        {
+          "n": 0.25,
+          "text": "160 Hz"
+        },
+        {
+          "n": 0.3,
+          "text": "215 Hz"
+        },
+        {
+          "n": 0.35,
+          "text": "290 Hz"
+        },
+        {
+          "n": 0.4,
+          "text": "390 Hz"
+        },
+        {
+          "n": 0.45,
+          "text": "510 Hz"
+        },
+        {
+          "n": 0.5,
+          "text": "680 Hz"
+        },
+        {
+          "n": 0.55,
+          "text": "890 Hz"
+        },
+        {
+          "n": 0.6,
+          "text": "1.2 kHz"
+        },
+        {
+          "n": 0.65,
+          "text": "1.5 kHz"
+        },
+        {
+          "n": 0.7,
+          "text": "2.0 kHz"
+        },
+        {
+          "n": 0.75,
+          "text": "2.6 kHz"
+        },
+        {
+          "n": 0.8,
+          "text": "3.4 kHz"
+        },
+        {
+          "n": 0.85,
+          "text": "4.5 kHz"
+        },
+        {
+          "n": 0.9,
+          "text": "5.9 kHz"
+        },
+        {
+          "n": 0.95,
+          "text": "7.7 kHz"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "20.0 kHz",
+      "index": 26,
+      "name": "freq lim hi",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "85 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "120 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "160 Hz"
+        },
+        {
+          "n": 0.15,
+          "text": "220 Hz"
+        },
+        {
+          "n": 0.2,
+          "text": "290 Hz"
+        },
+        {
+          "n": 0.25,
+          "text": "390 Hz"
+        },
+        {
+          "n": 0.3,
+          "text": "510 Hz"
+        },
+        {
+          "n": 0.35,
+          "text": "670 Hz"
+        },
+        {
+          "n": 0.4,
+          "text": "880 Hz"
+        },
+        {
+          "n": 0.45,
+          "text": "1.1 kHz"
+        },
+        {
+          "n": 0.5,
+          "text": "1.5 kHz"
+        },
+        {
+          "n": 0.55,
+          "text": "1.9 kHz"
+        },
+        {
+          "n": 0.6,
+          "text": "2.5 kHz"
+        },
+        {
+          "n": 0.65,
+          "text": "3.3 kHz"
+        },
+        {
+          "n": 0.7,
+          "text": "4.2 kHz"
+        },
+        {
+          "n": 0.75,
+          "text": "5.5 kHz"
+        },
+        {
+          "n": 0.8,
+          "text": "7.1 kHz"
+        },
+        {
+          "n": 0.85,
+          "text": "9.2 kHz"
+        },
+        {
+          "n": 0.9,
+          "text": "11.9 kHz"
+        },
+        {
+          "n": 0.95,
+          "text": "15.4 kHz"
+        },
+        {
+          "n": 1.0,
+          "text": "20.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "Off",
+      "index": 27,
+      "name": "freq lim flip",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "Off"
+        },
+        {
+          "n": 0.05,
+          "text": "Off"
+        },
+        {
+          "n": 0.1,
+          "text": "Off"
+        },
+        {
+          "n": 0.15,
+          "text": "Off"
+        },
+        {
+          "n": 0.2,
+          "text": "Off"
+        },
+        {
+          "n": 0.25,
+          "text": "Off"
+        },
+        {
+          "n": 0.3,
+          "text": "Off"
+        },
+        {
+          "n": 0.35,
+          "text": "Off"
+        },
+        {
+          "n": 0.4,
+          "text": "Off"
+        },
+        {
+          "n": 0.45,
+          "text": "Off"
+        },
+        {
+          "n": 0.5,
+          "text": "On"
+        },
+        {
+          "n": 0.55,
+          "text": "On"
+        },
+        {
+          "n": 0.6,
+          "text": "On"
+        },
+        {
+          "n": 0.65,
+          "text": "On"
+        },
+        {
+          "n": 0.7,
+          "text": "On"
+        },
+        {
+          "n": 0.75,
+          "text": "On"
+        },
+        {
+          "n": 0.8,
+          "text": "On"
+        },
+        {
+          "n": 0.85,
+          "text": "On"
+        },
+        {
+          "n": 0.9,
+          "text": "On"
+        },
+        {
+          "n": 0.95,
+          "text": "On"
+        },
+        {
+          "n": 1.0,
+          "text": "On"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "20 Hz",
+      "index": 28,
+      "name": "lo cut",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "20 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "35 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "54 Hz"
+        },
+        {
+          "n": 0.15,
+          "text": "80 Hz"
+        },
+        {
+          "n": 0.2,
+          "text": "115 Hz"
+        },
+        {
+          "n": 0.25,
+          "text": "160 Hz"
+        },
+        {
+          "n": 0.3,
+          "text": "215 Hz"
+        },
+        {
+          "n": 0.35,
+          "text": "290 Hz"
+        },
+        {
+          "n": 0.4,
+          "text": "390 Hz"
+        },
+        {
+          "n": 0.45,
+          "text": "510 Hz"
+        },
+        {
+          "n": 0.5,
+          "text": "680 Hz"
+        },
+        {
+          "n": 0.55,
+          "text": "890 Hz"
+        },
+        {
+          "n": 0.6,
+          "text": "1.2 kHz"
+        },
+        {
+          "n": 0.65,
+          "text": "1.5 kHz"
+        },
+        {
+          "n": 0.7,
+          "text": "2.0 kHz"
+        },
+        {
+          "n": 0.75,
+          "text": "2.6 kHz"
+        },
+        {
+          "n": 0.8,
+          "text": "3.4 kHz"
+        },
+        {
+          "n": 0.85,
+          "text": "4.5 kHz"
+        },
+        {
+          "n": 0.9,
+          "text": "5.9 kHz"
+        },
+        {
+          "n": 0.95,
+          "text": "7.7 kHz"
+        },
+        {
+          "n": 1.0,
+          "text": "10.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "20.0 kHz",
+      "index": 29,
+      "name": "hi cut",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "85 Hz"
+        },
+        {
+          "n": 0.05,
+          "text": "120 Hz"
+        },
+        {
+          "n": 0.1,
+          "text": "160 Hz"
+        },
+        {
+          "n": 0.15,
+          "text": "220 Hz"
+        },
+        {
+          "n": 0.2,
+          "text": "290 Hz"
+        },
+        {
+          "n": 0.25,
+          "text": "390 Hz"
+        },
+        {
+          "n": 0.3,
+          "text": "510 Hz"
+        },
+        {
+          "n": 0.35,
+          "text": "670 Hz"
+        },
+        {
+          "n": 0.4,
+          "text": "880 Hz"
+        },
+        {
+          "n": 0.45,
+          "text": "1.1 kHz"
+        },
+        {
+          "n": 0.5,
+          "text": "1.5 kHz"
+        },
+        {
+          "n": 0.55,
+          "text": "1.9 kHz"
+        },
+        {
+          "n": 0.6,
+          "text": "2.5 kHz"
+        },
+        {
+          "n": 0.65,
+          "text": "3.3 kHz"
+        },
+        {
+          "n": 0.7,
+          "text": "4.2 kHz"
+        },
+        {
+          "n": 0.75,
+          "text": "5.5 kHz"
+        },
+        {
+          "n": 0.8,
+          "text": "7.1 kHz"
+        },
+        {
+          "n": 0.85,
+          "text": "9.2 kHz"
+        },
+        {
+          "n": 0.9,
+          "text": "11.9 kHz"
+        },
+        {
+          "n": 0.95,
+          "text": "15.4 kHz"
+        },
+        {
+          "n": 1.0,
+          "text": "20.0 kHz"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "linked",
+      "index": 30,
+      "name": "stereo mode",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "linked"
+        },
+        {
+          "n": 0.05,
+          "text": "linked"
+        },
+        {
+          "n": 0.1,
+          "text": "linked"
+        },
+        {
+          "n": 0.15,
+          "text": "linked"
+        },
+        {
+          "n": 0.2,
+          "text": "linked"
+        },
+        {
+          "n": 0.25,
+          "text": "linked"
+        },
+        {
+          "n": 0.3,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.35,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.4,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.45,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.5,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.55,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.6,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.65,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.7,
+          "text": "M/S split"
+        },
+        {
+          "n": 0.75,
+          "text": "L/R split"
+        },
+        {
+          "n": 0.8,
+          "text": "L/R split"
+        },
+        {
+          "n": 0.85,
+          "text": "L/R split"
+        },
+        {
+          "n": 0.9,
+          "text": "L/R split"
+        },
+        {
+          "n": 0.95,
+          "text": "L/R split"
+        },
+        {
+          "n": 1.0,
+          "text": "L/R split"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "100%",
+      "index": 31,
+      "name": "channel link",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "0% %"
+        },
+        {
+          "n": 0.05,
+          "text": "5% %"
+        },
+        {
+          "n": 0.1,
+          "text": "10% %"
+        },
+        {
+          "n": 0.15,
+          "text": "15% %"
+        },
+        {
+          "n": 0.2,
+          "text": "20% %"
+        },
+        {
+          "n": 0.25,
+          "text": "25% %"
+        },
+        {
+          "n": 0.3,
+          "text": "30% %"
+        },
+        {
+          "n": 0.35,
+          "text": "35% %"
+        },
+        {
+          "n": 0.4,
+          "text": "40% %"
+        },
+        {
+          "n": 0.45,
+          "text": "45% %"
+        },
+        {
+          "n": 0.5,
+          "text": "50% %"
+        },
+        {
+          "n": 0.55,
+          "text": "55% %"
+        },
+        {
+          "n": 0.6,
+          "text": "60% %"
+        },
+        {
+          "n": 0.65,
+          "text": "65% %"
+        },
+        {
+          "n": 0.7,
+          "text": "70% %"
+        },
+        {
+          "n": 0.75,
+          "text": "75% %"
+        },
+        {
+          "n": 0.8,
+          "text": "80% %"
+        },
+        {
+          "n": 0.85,
+          "text": "85% %"
+        },
+        {
+          "n": 0.9,
+          "text": "90% %"
+        },
+        {
+          "n": 0.95,
+          "text": "95% %"
+        },
+        {
+          "n": 1.0,
+          "text": "100% %"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "100 | 100",
+      "index": 32,
+      "name": "channel focus",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "100 | 0 %"
+        },
+        {
+          "n": 0.05,
+          "text": "100 | 10 %"
+        },
+        {
+          "n": 0.1,
+          "text": "100 | 20 %"
+        },
+        {
+          "n": 0.15,
+          "text": "100 | 30 %"
+        },
+        {
+          "n": 0.2,
+          "text": "100 | 40 %"
+        },
+        {
+          "n": 0.25,
+          "text": "100 | 50 %"
+        },
+        {
+          "n": 0.3,
+          "text": "100 | 60 %"
+        },
+        {
+          "n": 0.35,
+          "text": "100 | 70 %"
+        },
+        {
+          "n": 0.4,
+          "text": "100 | 80 %"
+        },
+        {
+          "n": 0.45,
+          "text": "100 | 90 %"
+        },
+        {
+          "n": 0.5,
+          "text": "100 | 100 %"
+        },
+        {
+          "n": 0.55,
+          "text": "90 | 100 %"
+        },
+        {
+          "n": 0.6,
+          "text": "80 | 100 %"
+        },
+        {
+          "n": 0.65,
+          "text": "70 | 100 %"
+        },
+        {
+          "n": 0.7,
+          "text": "60 | 100 %"
+        },
+        {
+          "n": 0.75,
+          "text": "50 | 100 %"
+        },
+        {
+          "n": 0.8,
+          "text": "40 | 100 %"
+        },
+        {
+          "n": 0.85,
+          "text": "30 | 100 %"
+        },
+        {
+          "n": 0.9,
+          "text": "20 | 100 %"
+        },
+        {
+          "n": 0.95,
+          "text": "10 | 100 %"
+        },
+        {
+          "n": 1.0,
+          "text": "0 | 100 %"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "0.0",
+      "index": 33,
+      "name": "squash cal",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-24.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-21.6"
+        },
+        {
+          "n": 0.1,
+          "text": "-19.2"
+        },
+        {
+          "n": 0.15,
+          "text": "-16.8"
+        },
+        {
+          "n": 0.2,
+          "text": "-14.4"
+        },
+        {
+          "n": 0.25,
+          "text": "-12.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-9.6"
+        },
+        {
+          "n": 0.35,
+          "text": "-7.2"
+        },
+        {
+          "n": 0.4,
+          "text": "-4.8"
+        },
+        {
+          "n": 0.45,
+          "text": "-2.4"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "2.4"
+        },
+        {
+          "n": 0.6,
+          "text": "4.8"
+        },
+        {
+          "n": 0.65,
+          "text": "7.2"
+        },
+        {
+          "n": 0.7,
+          "text": "9.6"
+        },
+        {
+          "n": 0.75,
+          "text": "12.0"
+        },
+        {
+          "n": 0.8,
+          "text": "14.4"
+        },
+        {
+          "n": 0.85,
+          "text": "16.8"
+        },
+        {
+          "n": 0.9,
+          "text": "19.2"
+        },
+        {
+          "n": 0.95,
+          "text": "21.6"
+        },
+        {
+          "n": 1.0,
+          "text": "24.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "0.0",
+      "index": 34,
+      "name": "wet trim",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-24.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-21.6"
+        },
+        {
+          "n": 0.1,
+          "text": "-19.2"
+        },
+        {
+          "n": 0.15,
+          "text": "-16.8"
+        },
+        {
+          "n": 0.2,
+          "text": "-14.4"
+        },
+        {
+          "n": 0.25,
+          "text": "-12.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-9.6"
+        },
+        {
+          "n": 0.35,
+          "text": "-7.2"
+        },
+        {
+          "n": 0.4,
+          "text": "-4.8"
+        },
+        {
+          "n": 0.45,
+          "text": "-2.4"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "2.4"
+        },
+        {
+          "n": 0.6,
+          "text": "4.8"
+        },
+        {
+          "n": 0.65,
+          "text": "7.2"
+        },
+        {
+          "n": 0.7,
+          "text": "9.6"
+        },
+        {
+          "n": 0.75,
+          "text": "12.0"
+        },
+        {
+          "n": 0.8,
+          "text": "14.4"
+        },
+        {
+          "n": 0.85,
+          "text": "16.8"
+        },
+        {
+          "n": 0.9,
+          "text": "19.2"
+        },
+        {
+          "n": 0.95,
+          "text": "21.6"
+        },
+        {
+          "n": 1.0,
+          "text": "24.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "100%",
+      "index": 35,
+      "name": "mix",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "0% %"
+        },
+        {
+          "n": 0.05,
+          "text": "5% %"
+        },
+        {
+          "n": 0.1,
+          "text": "10% %"
+        },
+        {
+          "n": 0.15,
+          "text": "15% %"
+        },
+        {
+          "n": 0.2,
+          "text": "20% %"
+        },
+        {
+          "n": 0.25,
+          "text": "25% %"
+        },
+        {
+          "n": 0.3,
+          "text": "30% %"
+        },
+        {
+          "n": 0.35,
+          "text": "35% %"
+        },
+        {
+          "n": 0.4,
+          "text": "40% %"
+        },
+        {
+          "n": 0.45,
+          "text": "45% %"
+        },
+        {
+          "n": 0.5,
+          "text": "50% %"
+        },
+        {
+          "n": 0.55,
+          "text": "55% %"
+        },
+        {
+          "n": 0.6,
+          "text": "60% %"
+        },
+        {
+          "n": 0.65,
+          "text": "65% %"
+        },
+        {
+          "n": 0.7,
+          "text": "70% %"
+        },
+        {
+          "n": 0.75,
+          "text": "75% %"
+        },
+        {
+          "n": 0.8,
+          "text": "80% %"
+        },
+        {
+          "n": 0.85,
+          "text": "85% %"
+        },
+        {
+          "n": 0.9,
+          "text": "90% %"
+        },
+        {
+          "n": 0.95,
+          "text": "95% %"
+        },
+        {
+          "n": 1.0,
+          "text": "100% %"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.50000029802322,
+      "default_text": "0.0",
+      "index": 36,
+      "name": "output",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "-24.0"
+        },
+        {
+          "n": 0.05,
+          "text": "-21.6"
+        },
+        {
+          "n": 0.1,
+          "text": "-19.2"
+        },
+        {
+          "n": 0.15,
+          "text": "-16.8"
+        },
+        {
+          "n": 0.2,
+          "text": "-14.4"
+        },
+        {
+          "n": 0.25,
+          "text": "-12.0"
+        },
+        {
+          "n": 0.3,
+          "text": "-9.6"
+        },
+        {
+          "n": 0.35,
+          "text": "-7.2"
+        },
+        {
+          "n": 0.4,
+          "text": "-4.8"
+        },
+        {
+          "n": 0.45,
+          "text": "-2.4"
+        },
+        {
+          "n": 0.5,
+          "text": "0.0"
+        },
+        {
+          "n": 0.55,
+          "text": "2.4"
+        },
+        {
+          "n": 0.6,
+          "text": "4.8"
+        },
+        {
+          "n": 0.65,
+          "text": "7.2"
+        },
+        {
+          "n": 0.7,
+          "text": "9.6"
+        },
+        {
+          "n": 0.75,
+          "text": "12.0"
+        },
+        {
+          "n": 0.8,
+          "text": "14.4"
+        },
+        {
+          "n": 0.85,
+          "text": "16.8"
+        },
+        {
+          "n": 0.9,
+          "text": "19.2"
+        },
+        {
+          "n": 0.95,
+          "text": "21.6"
+        },
+        {
+          "n": 1.0,
+          "text": "24.0"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "Off",
+      "index": 37,
+      "name": "sc enabled",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "Off"
+        },
+        {
+          "n": 0.05,
+          "text": "Off"
+        },
+        {
+          "n": 0.1,
+          "text": "Off"
+        },
+        {
+          "n": 0.15,
+          "text": "Off"
+        },
+        {
+          "n": 0.2,
+          "text": "Off"
+        },
+        {
+          "n": 0.25,
+          "text": "Off"
+        },
+        {
+          "n": 0.3,
+          "text": "Off"
+        },
+        {
+          "n": 0.35,
+          "text": "Off"
+        },
+        {
+          "n": 0.4,
+          "text": "Off"
+        },
+        {
+          "n": 0.45,
+          "text": "Off"
+        },
+        {
+          "n": 0.5,
+          "text": "On"
+        },
+        {
+          "n": 0.55,
+          "text": "On"
+        },
+        {
+          "n": 0.6,
+          "text": "On"
+        },
+        {
+          "n": 0.65,
+          "text": "On"
+        },
+        {
+          "n": 0.7,
+          "text": "On"
+        },
+        {
+          "n": 0.75,
+          "text": "On"
+        },
+        {
+          "n": 0.8,
+          "text": "On"
+        },
+        {
+          "n": 0.85,
+          "text": "On"
+        },
+        {
+          "n": 0.9,
+          "text": "On"
+        },
+        {
+          "n": 0.95,
+          "text": "On"
+        },
+        {
+          "n": 1.0,
+          "text": "On"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "Off",
+      "index": 38,
+      "name": "sc listen",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "Off"
+        },
+        {
+          "n": 0.05,
+          "text": "Off"
+        },
+        {
+          "n": 0.1,
+          "text": "Off"
+        },
+        {
+          "n": 0.15,
+          "text": "Off"
+        },
+        {
+          "n": 0.2,
+          "text": "Off"
+        },
+        {
+          "n": 0.25,
+          "text": "Off"
+        },
+        {
+          "n": 0.3,
+          "text": "Off"
+        },
+        {
+          "n": 0.35,
+          "text": "Off"
+        },
+        {
+          "n": 0.4,
+          "text": "Off"
+        },
+        {
+          "n": 0.45,
+          "text": "Off"
+        },
+        {
+          "n": 0.5,
+          "text": "On"
+        },
+        {
+          "n": 0.55,
+          "text": "On"
+        },
+        {
+          "n": 0.6,
+          "text": "On"
+        },
+        {
+          "n": 0.65,
+          "text": "On"
+        },
+        {
+          "n": 0.7,
+          "text": "On"
+        },
+        {
+          "n": 0.75,
+          "text": "On"
+        },
+        {
+          "n": 0.8,
+          "text": "On"
+        },
+        {
+          "n": 0.85,
+          "text": "On"
+        },
+        {
+          "n": 0.9,
+          "text": "On"
+        },
+        {
+          "n": 0.95,
+          "text": "On"
+        },
+        {
+          "n": 1.0,
+          "text": "On"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "Off",
+      "index": 39,
+      "name": "bypass",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "Off"
+        },
+        {
+          "n": 0.05,
+          "text": "Off"
+        },
+        {
+          "n": 0.1,
+          "text": "Off"
+        },
+        {
+          "n": 0.15,
+          "text": "Off"
+        },
+        {
+          "n": 0.2,
+          "text": "Off"
+        },
+        {
+          "n": 0.25,
+          "text": "Off"
+        },
+        {
+          "n": 0.3,
+          "text": "Off"
+        },
+        {
+          "n": 0.35,
+          "text": "Off"
+        },
+        {
+          "n": 0.4,
+          "text": "Off"
+        },
+        {
+          "n": 0.45,
+          "text": "Off"
+        },
+        {
+          "n": 0.5,
+          "text": "On"
+        },
+        {
+          "n": 0.55,
+          "text": "On"
+        },
+        {
+          "n": 0.6,
+          "text": "On"
+        },
+        {
+          "n": 0.65,
+          "text": "On"
+        },
+        {
+          "n": 0.7,
+          "text": "On"
+        },
+        {
+          "n": 0.75,
+          "text": "On"
+        },
+        {
+          "n": 0.8,
+          "text": "On"
+        },
+        {
+          "n": 0.85,
+          "text": "On"
+        },
+        {
+          "n": 0.9,
+          "text": "On"
+        },
+        {
+          "n": 0.95,
+          "text": "On"
+        },
+        {
+          "n": 1.0,
+          "text": "On"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "normal",
+      "index": 40,
+      "name": "quality",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "normal"
+        },
+        {
+          "n": 0.05,
+          "text": "normal"
+        },
+        {
+          "n": 0.1,
+          "text": "normal"
+        },
+        {
+          "n": 0.15,
+          "text": "normal"
+        },
+        {
+          "n": 0.2,
+          "text": "normal"
+        },
+        {
+          "n": 0.25,
+          "text": "normal"
+        },
+        {
+          "n": 0.3,
+          "text": "high"
+        },
+        {
+          "n": 0.35,
+          "text": "high"
+        },
+        {
+          "n": 0.4,
+          "text": "high"
+        },
+        {
+          "n": 0.45,
+          "text": "high"
+        },
+        {
+          "n": 0.5,
+          "text": "high"
+        },
+        {
+          "n": 0.55,
+          "text": "high"
+        },
+        {
+          "n": 0.6,
+          "text": "high"
+        },
+        {
+          "n": 0.65,
+          "text": "high"
+        },
+        {
+          "n": 0.7,
+          "text": "high"
+        },
+        {
+          "n": 0.75,
+          "text": "low latency"
+        },
+        {
+          "n": 0.8,
+          "text": "low latency"
+        },
+        {
+          "n": 0.85,
+          "text": "low latency"
+        },
+        {
+          "n": 0.9,
+          "text": "low latency"
+        },
+        {
+          "n": 0.95,
+          "text": "low latency"
+        },
+        {
+          "n": 1.0,
+          "text": "low latency"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "normal",
+      "index": 41,
+      "name": "Bypass",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "normal"
+        },
+        {
+          "n": 0.05,
+          "text": "normal"
+        },
+        {
+          "n": 0.1,
+          "text": "normal"
+        },
+        {
+          "n": 0.15,
+          "text": "normal"
+        },
+        {
+          "n": 0.2,
+          "text": "normal"
+        },
+        {
+          "n": 0.25,
+          "text": "normal"
+        },
+        {
+          "n": 0.3,
+          "text": "normal"
+        },
+        {
+          "n": 0.35,
+          "text": "normal"
+        },
+        {
+          "n": 0.4,
+          "text": "normal"
+        },
+        {
+          "n": 0.45,
+          "text": "normal"
+        },
+        {
+          "n": 0.5,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.55,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.6,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.65,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.7,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.75,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.8,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.85,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.9,
+          "text": "bypassed"
+        },
+        {
+          "n": 0.95,
+          "text": "bypassed"
+        },
+        {
+          "n": 1.0,
+          "text": "bypassed"
+        }
+      ]
+    },
+    {
+      "default_norm": 1.0,
+      "default_text": "100",
+      "index": 42,
+      "name": "Wet",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "0%"
+        },
+        {
+          "n": 0.05,
+          "text": "5%"
+        },
+        {
+          "n": 0.1,
+          "text": "10%"
+        },
+        {
+          "n": 0.15,
+          "text": "15%"
+        },
+        {
+          "n": 0.2,
+          "text": "20%"
+        },
+        {
+          "n": 0.25,
+          "text": "25%"
+        },
+        {
+          "n": 0.3,
+          "text": "30%"
+        },
+        {
+          "n": 0.35,
+          "text": "35%"
+        },
+        {
+          "n": 0.4,
+          "text": "40%"
+        },
+        {
+          "n": 0.45,
+          "text": "45%"
+        },
+        {
+          "n": 0.5,
+          "text": "50%"
+        },
+        {
+          "n": 0.55,
+          "text": "55%"
+        },
+        {
+          "n": 0.6,
+          "text": "60%"
+        },
+        {
+          "n": 0.65,
+          "text": "65%"
+        },
+        {
+          "n": 0.7,
+          "text": "70%"
+        },
+        {
+          "n": 0.75,
+          "text": "75%"
+        },
+        {
+          "n": 0.8,
+          "text": "80%"
+        },
+        {
+          "n": 0.85,
+          "text": "85%"
+        },
+        {
+          "n": 0.9,
+          "text": "90%"
+        },
+        {
+          "n": 0.95,
+          "text": "95%"
+        },
+        {
+          "n": 1.0,
+          "text": "100%"
+        }
+      ]
+    },
+    {
+      "default_norm": 0.0,
+      "default_text": "normal",
+      "index": 43,
+      "name": "Delta",
+      "steps": [
+        {
+          "n": 0.0,
+          "text": "normal"
+        },
+        {
+          "n": 0.05,
+          "text": "normal"
+        },
+        {
+          "n": 0.1,
+          "text": "normal"
+        },
+        {
+          "n": 0.15,
+          "text": "normal"
+        },
+        {
+          "n": 0.2,
+          "text": "normal"
+        },
+        {
+          "n": 0.25,
+          "text": "normal"
+        },
+        {
+          "n": 0.3,
+          "text": "normal"
+        },
+        {
+          "n": 0.35,
+          "text": "normal"
+        },
+        {
+          "n": 0.4,
+          "text": "normal"
+        },
+        {
+          "n": 0.45,
+          "text": "normal"
+        },
+        {
+          "n": 0.5,
+          "text": "normal"
+        },
+        {
+          "n": 0.55,
+          "text": "enabled"
+        },
+        {
+          "n": 0.6,
+          "text": "enabled"
+        },
+        {
+          "n": 0.65,
+          "text": "enabled"
+        },
+        {
+          "n": 0.7,
+          "text": "enabled"
+        },
+        {
+          "n": 0.75,
+          "text": "enabled"
+        },
+        {
+          "n": 0.8,
+          "text": "enabled"
+        },
+        {
+          "n": 0.85,
+          "text": "enabled"
+        },
+        {
+          "n": 0.9,
+          "text": "enabled"
+        },
+        {
+          "n": 0.95,
+          "text": "enabled"
+        },
+        {
+          "n": 1.0,
+          "text": "enabled"
+        }
+      ]
+    }
+  ],
+  "pdc_default": 1120,
+  "plugin": "VST3: bloom (oeksound)",
+  "reaper": "7.79/OSX64",
+  "roles": {
+    "amount": 0,
+    "attack": 1,
+    "mix": 35,
+    "output": 36,
+    "quality": 40,
+    "release": 2,
+    "squash_cal": 33,
+    "stereo": 30,
+    "wet_trim": 34
+  },
+  "sample_rate": 48000,
+  "signals": [
+    {
+      "channels": 1,
+      "desc": "Pink noise, -18 dBFS RMS, periodic 10.9 s",
+      "file": "signals/S01_pink.wav",
+      "id": "S01_pink"
+    },
+    {
+      "channels": 1,
+      "desc": "White noise, -18 dBFS RMS",
+      "file": "signals/S02_white.wav",
+      "id": "S02_white"
+    },
+    {
+      "channels": 1,
+      "desc": "Brown noise (-6 dB/oct), -18 dBFS RMS",
+      "file": "signals/S03_brown.wav",
+      "id": "S03_brown"
+    },
+    {
+      "channels": 1,
+      "desc": "Pink tilted +1.5 dB/oct",
+      "file": "signals/S04_bright.wav",
+      "id": "S04_bright"
+    },
+    {
+      "channels": 1,
+      "desc": "Pink tilted -1.5 dB/oct",
+      "file": "signals/S05_dark.wav",
+      "id": "S05_dark"
+    },
+    {
+      "channels": 1,
+      "desc": "Pink + 9 dB bumps at 250 Hz and 4 kHz (1 oct wide)",
+      "file": "signals/S06_bumps.wav",
+      "id": "S06_bumps"
+    },
+    {
+      "channels": 1,
+      "desc": "Pink with a -12 dB dip at 1 kHz (1 oct wide)",
+      "file": "signals/S07_hole.wav",
+      "id": "S07_hole"
+    },
+    {
+      "channels": 1,
+      "desc": "Pink at -42, -30, -18, -12, -6 dBFS RMS, 5 s each",
+      "file": "signals/S08_ladder.wav",
+      "id": "S08_ladder"
+    },
+    {
+      "channels": 1,
+      "desc": "Brown and white noise alternating every 3 s (4 cycles), equal RMS",
+      "file": "signals/S09_switch.wav",
+      "id": "S09_switch"
+    },
+    {
+      "channels": 1,
+      "desc": "Pink bed -24 dBFS + 1 kHz third-octave noise bursts, 1 s on / 2 s off",
+      "file": "signals/S10_burst.wav",
+      "id": "S10_burst"
+    },
+    {
+      "channels": 1,
+      "desc": "Pink bed -36 dBFS + one 0.5 impulse every second",
+      "file": "signals/S11_clicks.wav",
+      "id": "S11_clicks"
+    },
+    {
+      "channels": 2,
+      "desc": "L = pink, R = bright pink (+1.5 dB/oct), uncorrelated",
+      "file": "signals/S12_stereo.wav",
+      "id": "S12_stereo"
+    }
+  ]
+}
