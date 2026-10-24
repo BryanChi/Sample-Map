@@ -48,23 +48,26 @@ def sensitivity_db(f):
     return -(10 * np.log10(1 + (120 / f) ** 2.2) + 6 * np.log10(1 + (f / 9000) ** 3)) + 3 * np.exp(-0.5 * (np.log2(f / 3200) / 0.8) ** 2)
 
 
-DEFAULT_TONES = [(100, 0.0), (500, 0.0), (2500, 0.0), (10000, 0.0)]
+DEFAULT_TONES = [(100, 0.0), (350, 0.0), (3500, 0.0), (6300, 0.0)]
 
 
 class Poise:
-    def __init__(self, amount=5.0, attack=0.5, release=0.5, tones=None, mix=1.0, squash_cal=0.0, sr=SR):
+    def __init__(self, amount=5.0, attack=0.5, release=0.3, tones=None, mix=1.0, squash_cal=0.0, sr=SR):
         self.sr = sr
         self.W, self.f = band_weights(N, sr)
         self.Wn = self.W / self.W.sum(axis=1, keepdims=True)
         self.amount, self.mix, self.squash_cal = amount, mix, squash_cal
-        # attack 0..1 -> 30..600 ms, release 0..1 -> 80..2000 ms (per-frame one-pole)
+        # attack 0..1 -> 40..480 ms, release 0..1 -> 20..280 ms one-pole (plus frame lag: lands near the bloom study's 63 % times)
         fr = sr / HOP
-        ta = 0.03 * 20 ** attack; trl = 0.08 * 25 ** release
+        ta = 0.04 * 12 ** attack; trl = 0.02 * 14 ** release
         self.ca, self.cr = math.exp(-1 / (ta * fr)), math.exp(-1 / (trl * fr))
-        tones = tones or DEFAULT_TONES
-        # target: pink with a gentle presence scoop, plus tone offsets (broad, ~1 oct sigma)
-        self.target = -1.0 * gauss_oct(1800, 1.0) + sum(g * gauss_oct(fc, 0.9) for fc, g in tones)
+        self.tones = tones or DEFAULT_TONES
+        # house curve: a gentle loudness "smile" the correction leans toward (a user-selectable Voice later)
+        self.house = 1.2 * gauss_oct(70, 1.2) - 1.0 * gauss_oct(2500, 0.9)
         self.sens = sensitivity_db(FB)
+        sw = np.exp(-0.5 * (np.log2(FB / 3000) / 1.5) ** 2)
+        self.mid_w = 0.6 + 0.4 * sw                              # correct mid-scale lumps more where the ear is sensitive
+        self.tone_curve = self.tone_eq(self.tones)
         self.level = None
         self.win = np.sqrt(np.hanning(N + 1)[:N])
         # dB offset from 'trend' (mean bin power + 10log10 f) to band RMS in dBFS
@@ -72,9 +75,25 @@ class Poise:
         self.cal = 10 * math.log10(math.log(2) * step * N / sr) + 10 * math.log10(2 / (N * np.sum(self.win ** 2)))
         self.gain_hist = []
 
-    def alpha(self):
-        a = min(self.amount, 7.0) / 7.0
-        return 0.85 * a ** 1.3                                  # fraction of the deviation corrected
+    @staticmethod
+    def tone_eq(tones):
+        """Static broad EQ from the four tone controls (level -10..10 ~ dB at the centre), slightly level-compensated."""
+        lf = np.log2(FB)
+        G = np.zeros(NB)
+        for i, (fc, lv) in enumerate(tones):
+            d = lf - math.log2(fc)
+            if i == 0:   shape = 0.75 / (1 + np.exp((d - 0.4) / 0.45))     # low shelf
+            elif i == 3: shape = 1.3 / (1 + np.exp(-(d + 0.3) / 0.6))      # high shelf, keeps rising
+            else:        shape = np.exp(-0.5 * (d / 0.85) ** 2)             # bell
+            G += lv * (shape - 0.06)
+        return G
+
+    @staticmethod
+    def smooth(v, sigma_oct):
+        ob = math.log2(FB[1] / FB[0])
+        h = int(math.ceil(3 * sigma_oct / ob))
+        k = np.arange(-h, h + 1); g = np.exp(-0.5 * (k * ob / sigma_oct) ** 2); g /= g.sum()
+        return np.convolve(np.pad(v, h, mode='edge'), g, mode='same')[h:-h]
 
     def band_gains(self, P):
         bl = 10 * np.log10(self.Wn @ P + 1e-20) + 10 * np.log10(FB)   # power per octave: pink reads flat
@@ -82,26 +101,22 @@ class Poise:
         rise = bl > self.level
         c = np.where(rise, self.ca, self.cr)
         self.level = c * self.level + (1 - c) * bl
-        # trend across frequency: Gaussian smoothing over ~0.67 oct in band index space
-        oct_per_band = math.log2(FB[1] / FB[0])
-        k = np.arange(-8, 9); g = np.exp(-0.5 * (k * oct_per_band / 0.67) ** 2); g /= g.sum()
-        pad = np.pad(self.level, 8, mode='edge')
-        trend = np.convolve(pad, g, mode='same')[8:-8]
-        # loudness weights: input energy share times hearing sensitivity
-        w = 10 ** ((trend + self.sens) / 10); w /= w.sum()
-        dev = self.target - trend
-        dev -= np.sum(w * dev)
-        G = np.clip(self.alpha() * dev, -12, 12)
+        # two scales: broad tilt (2 oct) and mid-scale lumps (0.5 oct minus 2 oct)
+        fine, broad = self.smooth(self.level, 0.5), self.smooth(self.level, 2.0)
+        w = 10 ** ((broad + self.sens) / 10); w /= w.sum()          # loudness weights
+        tilt = broad - np.sum(w * broad)
+        lump = fine - broad
+        a = min(self.amount, 7.0) / 7.0
+        G = a * (self.house - 0.12 * tilt - 0.65 * self.mid_w * lump)
+        G = G - np.sum(w * G)                                          # level neutral
+        G = np.clip(G, -12, 12) + self.tone_curve
         if self.amount > 7:                                     # squash: up/down compression per band
-            s = (self.amount - 7) / 3
-            ratio = 1 + 3 * s
-            thr = -36 + self.squash_cal - 0.5 * self.sens       # lower threshold where the ear is sensitive
-            lvl = trend + self.cal                              # band RMS in dBFS
-            over = lvl - thr
-            knee = 6 + 0.6 * (-self.sens)                       # harder knee where the ear is less sensitive
-            soft = over * np.abs(over) / (np.abs(over) + knee)  # smooth knee around the threshold
-            G = G - soft * (1 - 1 / ratio)
-            G = np.clip(G, -18, 12)
+            inv_r = max(0.1, 1 - 0.4 * (self.amount - 7))     # 1/ratio: 1 at 7, 0.4 at 8.5, 0.1 at 10
+            thr = -33 - 10 * math.log10(NB) - self.squash_cal + 10 * np.log10(1 + (120 / FB) ** 2.2)  # higher at the low end
+            over = (fine + self.cal) - thr                      # band RMS in dBFS above the threshold
+            knee = 6 + 0.3 * (-self.sens)                       # harder knee where the ear is less sensitive
+            soft = over * np.abs(over) / (np.abs(over) + knee)
+            G = np.clip(G - soft * (1 - inv_r), -30, 24)
         self.gain_hist.append(G)
         return G
 
@@ -135,17 +150,18 @@ CASE_MAP = {           # case id -> prototype settings (mirrors the Lua kit's ca
     'C07_amount10': dict(amount=10),
     'C10_att_min': dict(amount=7, attack=0), 'C11_att_max': dict(amount=7, attack=1),
     'C12_rel_min': dict(amount=7, release=0), 'C13_rel_max': dict(amount=7, release=1),
-    'C14_tone1_up': dict(amount=7, tones=[(100, 6), (500, 0), (2500, 0), (10000, 0)]),
-    'C16_tone2_up': dict(amount=7, tones=[(100, 0), (500, 6), (2500, 0), (10000, 0)]),
-    'C18_tone3_up': dict(amount=7, tones=[(100, 0), (500, 0), (2500, 6), (10000, 0)]),
-    'C20_tone4_up': dict(amount=7, tones=[(100, 0), (500, 0), (2500, 0), (10000, 6)]),
+    **{'C%02d_tone%d_%s' % (12 + 2 * k + (d < 0), k, 'up' if d > 0 else 'dn'):
+       dict(amount=7, tones=[(fc, d if j == k - 1 else 0) for j, fc in enumerate((100, 350, 3500, 6300))])
+       for k in range(1, 5) for d in (10, -10)},
     'C29_mix50': dict(amount=7, mix=0.5),
+    'C08_sqcal_hi': dict(amount=10, squash_cal=24), 'C09_sqcal_lo': dict(amount=10, squash_cal=-24),
 }
 CASE_SIGS = {
     'C01_amount0': ['S01_pink', 'S06_bumps', 'S11_clicks'],
     'C06_amount8_5': ['S01_pink', 'S06_bumps', 'S08_ladder', 'S10_burst', 'S11_clicks'],
     'C07_amount10': ['S01_pink', 'S06_bumps', 'S08_ladder', 'S10_burst', 'S11_clicks'],
     'C29_mix50': ['S06_bumps', 'S11_clicks'],
+    'C08_sqcal_hi': ['S08_ladder'], 'C09_sqcal_lo': ['S08_ladder'],
 }
 ST = ['S01_pink', 'S02_white', 'S03_brown', 'S04_bright', 'S05_dark', 'S06_bumps', 'S07_hole']
 DYN = ['S08_ladder', 'S09_switch', 'S10_burst', 'S11_clicks']
