@@ -93,7 +93,7 @@ local REDUCE = { maj = "maj", ["7"] = "maj", maj7 = "maj", min = "min", m7 = "mi
 local songs = {}
 if #arg >= 2 then for i = 2, #arg do songs[#songs + 1] = arg[i] end
 else
-  for _, s in ipairs({ "pop_C", "eb_ballad", "a_minor", "fsharp", "jazz_C", "modulate", "bb_minor", "detuned_fast", "silence_noise", "db_mixed", "hard_pop", "arpeggio", "rubato", "push", "waltz", "wet_mix", "wet_pad" }) do songs[#songs + 1] = s end
+  for _, s in ipairs({ "pop_C", "eb_ballad", "a_minor", "fsharp", "jazz_C", "modulate", "bb_minor", "detuned_fast", "silence_noise", "db_mixed", "hard_pop", "arpeggio", "rubato", "push", "waltz", "wet_mix", "wet_pad", "bright_saw" }) do songs[#songs + 1] = s end
 end
 
 local total_exact, total_mm, total_t = 0, 0, 0
@@ -101,7 +101,7 @@ for _, song in ipairs(songs) do
   local x, sr = read_wav(dir .. "/" .. song .. ".wav")
   local truth = dofile(dir .. "/" .. song .. ".truth.lua")
   local t0 = os.clock()
-  local res = CD.analyze(x, sr, { vocabulary = os.getenv("CD_VOCAB") or "full", slash_chords = os.getenv("CD_SLASH") and true })
+  local res = CD.analyze(x, sr, { vocabulary = os.getenv("CD_VOCAB") or "full", slash_chords = os.getenv("CD_SLASH") and true, nnls = os.getenv("CD_NNLS") ~= "0" })
   local el = os.clock() - t0
   local function truth_at(t)
     for _, c in ipairs(truth.chords) do if t >= c[1] and t < c[2] then return c end end

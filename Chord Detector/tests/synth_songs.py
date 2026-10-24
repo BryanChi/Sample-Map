@@ -44,6 +44,12 @@ def note(midi, dur, tune_cents=0.0, kind='piano', amp=1.0):
         for h in range(1, 6):
             out += (1 / h ** 1.6) * np.sin(2 * np.pi * f * h * t)
         out *= np.exp(-t * 2.0)
+    elif kind == 'bright':
+        for h in range(1, 16):
+            fh = f * h
+            if fh > SR / 2.2: break
+            out += (1 / h) * np.sin(2 * np.pi * fh * t)
+        out *= np.minimum(1, t / 0.01) * np.exp(-t * 1.5)
     elif kind == 'lead':
         for h in range(1, 7):
             out += (1 / h) * np.sin(2 * np.pi * f * h * t)
@@ -108,7 +114,7 @@ def render(song):
             hits = [sb] + [float(x) for x in range(int(np.ceil(sb + 1e-6)), int(np.ceil(eb - 1e-6)))]
             for h in hits:
                 for m in voicing(root, iv):
-                    add(buf, T(h) + rng.random() * 0.01, note(m, 0.6, tune, 'piano', 0.33))
+                    add(buf, T(h) + rng.random() * 0.01, note(m, 0.6, tune, 'bright' if kind == 'bright' else 'piano', 0.33))
         bnote = (bass if bass is not None else root)
         bm = 36 + ((bnote - 36) % 12)
         b = sb
@@ -170,6 +176,7 @@ SONGS = {
  'waltz': dict(bpm=150, meter=3, key='F major', prog=[(c, 3) for c in ['F','F','Dm','Dm','Gm','C7','F','F','Bb','C','Am','Dm','Gm','C7','F','F']], melody=0.7, scale=sc(5)),
  'wet_mix': dict(bpm=100, key='Bb major', reverb=1.2, noise=0.6, drum_gain=1.5, prog=[(c, 4) for c in ['Bb','Gm','Eb','F7'] * 4], melody=1.5, scale=sc(10)),
  'wet_pad': dict(bpm=76, key='E minor', kind='pad', reverb=1.5, noise=0.4, drums=False, prog=[(c, 4) for c in ['Em','C','G','D','Em','Am','B7','Em'] * 2], melody=1.0, scale=sc(4, True)),
+ 'bright_saw': dict(bpm=96, key='C major', kind='bright', reverb=0.8, prog=[(c, 4) for c in ['C','F','G','C','Am','F','G','C'] * 2], melody=0.8, scale=sc(0)),
  'db_mixed': dict(bpm=104, key='Db major', prog=[(c, n) for c, n in [('Db',4),('Bbm',4),('Gbmaj7',4),('Ab7',4),('Fm',2),('Bbm',2),('Ebm7',2),('Ab7',2),('Db',8)] * 2], melody=0.8, scale=sc(1)),
 }
 

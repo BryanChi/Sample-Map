@@ -66,6 +66,7 @@ M.DEFAULTS = {
   key_changes    = true,     -- allow modulations
   min_key_beats  = 24,       -- shortest key area, in beats
   slash_chords   = false,    -- name inversions as C/E
+  nnls           = true,     -- remove overtones before chroma (approximate transcription)
   refine         = true,     -- allow changes a half beat early/late (pushes)
   no_chord       = "N.C.",   -- label for silence / noise, false = drop
   tuning         = nil,      -- force tuning offset in cents (nil = estimate)
@@ -408,6 +409,7 @@ local function extract_features(x, sr, opts, report)
 
   -- pass 2: semitone spectrum -> log -> whitening -> chroma
   local notes = {}                  -- [f] = {NNOTES}
+  local lin = {}                    -- linear copy for the NNLS transcription
   local fmaxes = {}
   for f = 1, nframes do
     local S = {}
@@ -423,6 +425,9 @@ local function extract_features(x, sr, opts, report)
     local mx = 0
     for m = 1, NNOTES do if S[m] > mx then mx = S[m] end end
     notes[f] = S; fmaxes[f] = mx
+    local L = {}
+    for m = 1, NNOTES do L[m] = S[m] end
+    lin[f] = L
   end
   local ref = percentile(fmaxes, 0.95)
   if ref <= 0 then ref = 1 end
@@ -477,7 +482,7 @@ local function extract_features(x, sr, opts, report)
 
   return {
     sr = sr, hop = hop, N = N, nframes = nframes, frame_dt = hop / sr,
-    tre = tre, bas = bas, energy = energy,
+    tre = tre, bas = bas, energy = energy, lin = lin, wt = wt, wb = wb,
     onset = onset, onset_dt = hop_o / sr,
     tuning = tuning, duration = n / sr,
     input_peak = peak, peaks_per_frame = np / math.max(1, nframes),
@@ -582,15 +587,16 @@ end
 -- Templates, emissions and priors
 ---------------------------------------------------------------------------
 
-local function chord_template(root, tones)
+local function chord_template(root, tones, harm)
+  harm = harm or 1
   local t = {}
   for i = 1, 12 do t[i] = 0 end
   for idx, iv in ipairs(tones) do
     local pc = (root + iv) % 12
     local w = (idx == 1) and 1.1 or 1.0
     t[pc + 1] = t[pc + 1] + w
-    t[(pc + 7) % 12 + 1] = t[(pc + 7) % 12 + 1] + 0.12 * w    -- 3rd harmonic
-    t[(pc + 4) % 12 + 1] = t[(pc + 4) % 12 + 1] + 0.04 * w    -- 5th harmonic
+    t[(pc + 7) % 12 + 1] = t[(pc + 7) % 12 + 1] + 0.12 * w * harm    -- 3rd harmonic
+    t[(pc + 4) % 12 + 1] = t[(pc + 4) % 12 + 1] + 0.04 * w * harm    -- 5th harmonic
   end
   local s = 0
   for i = 1, 12 do s = s + t[i] * t[i] end
@@ -610,7 +616,7 @@ local function build_states(opts)
         local tones = {}
         for i, iv in ipairs(q.tones) do tones[i] = (root + iv) % 12 end
         states[#states + 1] = { root = root, quality = q.id, q = q, tones = tones,
-                                template = chord_template(root, q.tones) }
+                                template = chord_template(root, q.tones, opts.nnls and 0.3 or 1) }
       end
     end
   end
@@ -861,6 +867,81 @@ function M.analyze(samples, samplerate, user_opts)
     for i = 1, 12 do t[i] = t[i] / cnt; b[i] = b[i] / cnt end
     btre[j], bbas[j], benergy[j] = t, b, e / cnt
   end
+  -- approximate transcription per beat (non-negative least squares, as in
+  -- Mauch & Dixon's NNLS Chroma): explain the spectrum as notes with decaying
+  -- overtones, so a note's 3rd/5th harmonics stop looking like chord tones
+  if opts.nnls then
+    local H = { 0, 12, 19, 24, 28, 31, 34, 36 }
+    local D = {}                       -- D[note] = list of {bin, weight}
+    for i = 1, NNOTES do
+      local col, w = {}, 1
+      for _, off in ipairs(H) do
+        if i + off <= NNOTES then col[#col + 1] = { i + off, w } end
+        w = w * 0.6
+      end
+      D[i] = col
+    end
+    local DtD = {}
+    for i = 1, NNOTES do
+      local row = {}
+      for k = 1, NNOTES do row[k] = 0 end
+      local acc = {}
+      for _, e in ipairs(D[i]) do acc[e[1]] = e[2] end
+      for k = 1, NNOTES do
+        local v = 0
+        for _, e in ipairs(D[k]) do local a = acc[e[1]]; if a then v = v + a * e[2] end end
+        row[k] = v
+      end
+      DtD[i] = row
+    end
+    for j = 1, T do
+      local t0, t1 = bounds[j], bounds[j + 1]
+      local f0 = math.max(1, ceil(t0 / fdt - 1e-9) + 1)
+      local f1 = math.min(F.nframes, ceil(t1 / fdt - 1e-9))
+      if f1 < f0 then f0 = math.min(F.nframes, floor(0.5 * (t0 + t1) / fdt + 0.5) + 1); f1 = f0 end
+      local v = {}
+      for i = 1, NNOTES do v[i] = 0 end
+      for f = f0, f1 do local L = F.lin[f]; for i = 1, NNOTES do v[i] = v[i] + L[i] end end
+      local vmax = 0
+      for i = 1, NNOTES do if v[i] > vmax then vmax = v[i] end end
+      local tc, bc = {}, {}
+      for i = 1, 12 do tc[i] = 0; bc[i] = 0 end
+      if vmax > 0 then
+        -- remove the broadband floor (drums, noise): median of the surrounding octave
+        local w, tmpm = {}, {}
+        for i = 1, NNOTES do
+          local cnt = 0
+          for k = math.max(1, i - 12), math.min(NNOTES, i + 12) do cnt = cnt + 1; tmpm[cnt] = v[k] end
+          for k = cnt + 1, #tmpm do tmpm[k] = nil end
+          local fl = median_of(tmpm, cnt)
+          w[i] = v[i] > fl and (v[i] - fl) / vmax or 0
+        end
+        v = w
+        local Dtv, a = {}, {}
+        for i = 1, NNOTES do
+          local x = 0
+          for _, e in ipairs(D[i]) do x = x + e[2] * v[e[1]] end
+          Dtv[i] = x; a[i] = v[i] + 1e-3
+        end
+        for _ = 1, 40 do              -- multiplicative updates keep a >= 0
+          for i = 1, NNOTES do
+            local row, den = DtD[i], 1e-9
+            for k = 1, NNOTES do den = den + row[k] * a[k] end
+            a[i] = a[i] * Dtv[i] / den
+          end
+        end
+        for i = 1, NNOTES do
+          local x = sqrt(a[i])
+          local pc = (NOTE_LO + i - 1) % 12 + 1
+          tc[pc] = tc[pc] + F.wt[i] * x
+          bc[pc] = bc[pc] + F.wb[i] * x
+        end
+      end
+      btre[j], bbas[j] = tc, bc
+      if j % 32 == 0 then report(0.7 + 0.05 * j / T, "Finding notes") end
+    end
+  end
+
   local e90 = percentile(benergy, 0.9)
   local silent = {}
   for j = 1, T do silent[j] = benergy[j] < 0.06 * e90 end
