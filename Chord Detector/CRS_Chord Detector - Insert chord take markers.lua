@@ -27,7 +27,7 @@ local function get_setting(key, default)
 end
 
 local settings = {
-  vocabulary     = get_setting("vocabulary", "full"),
+  vocabulary     = get_setting("vocabulary", "standard"),
   min_beats      = get_setting("min_beats", 2),
   change_penalty = get_setting("change_penalty", 2.0),
   key_changes    = get_setting("key_changes", true),

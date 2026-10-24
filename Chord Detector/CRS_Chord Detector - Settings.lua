@@ -6,7 +6,7 @@ local r = reaper
 local EXT = "CRS_ChordDetector"
 
 local fields = {
-  { key = "vocabulary",     label = "Chord types (triads/basic/full)", default = "full" },
+  { key = "vocabulary",     label = "Chord types (triads/standard/full)", default = "standard" },
   { key = "min_beats",      label = "Shortest chord (beats)",          default = "2" },
   { key = "change_penalty", label = "Change resistance (0.5-6)",       default = "2" },
   { key = "key_changes",    label = "Detect key changes (y/n)",        default = "y" },
@@ -38,7 +38,7 @@ for i, f in ipairs(fields) do
     v = (v:lower():sub(1, 1) == "y") and "1" or "0"
   elseif f.key == "vocabulary" then
     v = v:lower()
-    if v ~= "triads" and v ~= "basic" and v ~= "full" then v = "full" end
+    if v ~= "triads" and v ~= "standard" and v ~= "basic" and v ~= "full" then v = "standard" end
   else
     local n = tonumber(v) or tonumber(f.default)
     if f.key == "min_beats" then n = math.max(1, math.min(16, math.floor(n + 0.5))) end

@@ -10,7 +10,7 @@ D#m in F# major, E7 in A minor).
   take of every selected audio item. A small window shows progress (Esc
   cancels, nothing is written). Re-running replaces the markers it wrote
   before and leaves your own markers alone. One undo step.
-- **CRS_Chord Detector - Settings.lua**: chord types (triads / basic / full),
+- **CRS_Chord Detector - Settings.lua**: chord types (triads / standard / full),
   shortest chord in beats, change resistance, key changes, slash chords,
   key name in the marker, N.C. markers.
 
@@ -36,7 +36,9 @@ The detector does not label each moment on its own. It
    (anticipated chords),
 6. names each chord in its local key.
 
-Vocabulary: major, minor, 7, maj7, m7, dim, aug, sus2, sus4, m7b5, plus N.C.
+Vocabulary: by default major, minor, 7, dim and sus4 ("standard"), plus N.C.
+Settings can switch to "full" (adds maj7, m7, aug, sus2, m7b5) or "triads".
+On real recordings "full" tends to label melody notes as maj7/sus2, so it is opt-in.
 
 ## Using the engine in other scripts
 

@@ -58,11 +58,12 @@ end
 M.VOCABULARIES = {
   triads = { "maj", "min" },
   basic  = { "maj", "min", "dim", "aug", "sus2", "sus4" },
+  standard = { "maj", "min", "7", "dim", "sus4" },
   full   = { "maj", "min", "7", "maj7", "m7", "dim", "aug", "sus2", "sus4", "m7b5" },
 }
 
 M.DEFAULTS = {
-  vocabulary     = "full",   -- "triads" | "basic" | "full" | list of quality ids
+  vocabulary     = "standard", -- "triads" | "standard" | "basic" | "full" | list of quality ids
   min_beats      = 2,        -- shortest chord, in beats (beat_sync = true)
   beat_sync      = true,     -- chords change on beats (or half beats with refine)
   min_seconds    = 0.6,      -- shortest chord when beat_sync = false
