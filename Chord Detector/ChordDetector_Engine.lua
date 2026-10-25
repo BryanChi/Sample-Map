@@ -824,8 +824,15 @@ end
 function M.analyze(samples, samplerate, user_opts)
   local opts = merge_opts(user_opts)
   local last_p = -1
-  local function report(p, label)
+  local function raw_report(p, label)
     if opts.progress and p - last_p >= 0.01 then last_p = p; opts.progress(p, label) end
+  end
+  -- with the neural model most of the time goes to it (0.3 - 0.9)
+  local report = raw_report
+  if opts.btc then
+    report = function(p, label)
+      raw_report(p <= 0.7 and p * 0.3 / 0.7 or 0.9 + (p - 0.7) / 3, label)
+    end
   end
 
   local x, sr = downsample(samples, samplerate, 11025)
@@ -833,6 +840,30 @@ function M.analyze(samples, samplerate, user_opts)
     return { key = nil, keys = {}, chords = {}, beats = {}, tempo = nil, duration = #x / sr, error = "too short" }
   end
   local F = extract_features(x, sr, opts, report)
+
+  -- neural chord probabilities (BTC), per 10/108 s frame
+  local btc_probs, btc_time
+  if opts.btc then
+    local lib, W = opts.btc.lib, opts.btc.weights
+    local y = x
+    if sr ~= 11025 then                  -- BTC needs exactly 11025 Hz: linear resample
+      y = {}
+      local ratio = sr / 11025
+      local n = floor((#x - 1) / ratio) + 1
+      for i = 1, n do
+        local pos = (i - 1) * ratio + 1
+        local i0 = floor(pos)
+        local fr = pos - i0
+        y[i] = x[i0] * (1 - fr) + (x[i0 + 1] or x[i0]) * fr
+      end
+    end
+    local feats = lib.features(W, y, function(q) raw_report(0.3 + 0.05 * q, "Listening for chords") end)
+    btc_probs = lib.run(W, feats, function(q) raw_report(0.35 + 0.55 * q, "Listening for chords") end)
+    btc_time = function(i)             -- frame centre; features restart every 10 s chunk
+      local c, j = (i - 1) // 108, (i - 1) % 108
+      return c * 10 + j * 1024 / 11025
+    end
+  end
   report(0.7, "Finding beats")
 
   -- grid: beats, or fixed steps when beat_sync is off
@@ -1034,6 +1065,56 @@ function M.analyze(samples, samplerate, user_opts)
     for s = 1, S - 1 do if row[s] > bc then bc = row[s] end end
     dbg_best[j], dbg_n[j], dbg_flat[j] = bc / KAPPA, row[NSTATE] / KAPPA, flat
   end
+  -- neural emissions replace the chroma ones (silence still means N.C.)
+  if btc_probs then
+    local lib = opts.btc.lib
+    local FALLBACK = {
+      min = { "min" }, maj = { "maj" }, dim = { "dim", "min" }, aug = { "aug", "maj" },
+      min6 = { "min" }, maj6 = { "maj" }, min7 = { "m7", "min" }, minmaj7 = { "min" },
+      maj7 = { "maj7", "maj" }, ["7"] = { "7", "maj" }, dim7 = { "dim", "min" },
+      hdim7 = { "m7b5", "dim", "min" }, sus2 = { "sus2", "maj" }, sus4 = { "sus4", "maj" },
+    }
+    local index = {}                   -- "root:quality" -> state
+    for s_ = 1, S - 1 do index[states[s_].root .. ":" .. states[s_].quality] = s_ end
+    local map = {}                     -- BTC class -> state
+    for c = 1, 170 do
+      local root, q = lib.class(c)
+      if root then
+        for _, cand in ipairs(FALLBACK[q]) do
+          local st = index[root .. ":" .. cand]
+          if st then map[c] = st; break end
+        end
+      else
+        map[c] = NSTATE
+      end
+    end
+    local nf = #btc_probs
+    local fi = 1
+    local KB = 1.5
+    for j = 1, T do
+      local t0, t1 = bounds[j], bounds[j + 1]
+      local acc = {}
+      for s_ = 1, S do acc[s_] = 0 end
+      local cnt = 0
+      while fi <= nf and btc_time(fi) < t0 do fi = fi + 1 end
+      local f = fi
+      while f <= nf and btc_time(f) < t1 do
+        local p = btc_probs[f]
+        for c = 1, 170 do local st = map[c]; if st then acc[st] = acc[st] + p[c] end end
+        cnt = cnt + 1; f = f + 1
+      end
+      if cnt == 0 then                 -- short beat: nearest frame
+        local g = math.min(nf, math.max(1, fi))
+        local p = btc_probs[g]
+        for c = 1, 170 do local st = map[c]; if st then acc[st] = acc[st] + p[c] end end
+        cnt = 1
+      end
+      local row = E[j]
+      for s_ = 1, S do row[s_] = KB * log(acc[s_] / cnt + 1e-4) end
+      if silent[j] then row[NSTATE] = row[NSTATE] + 5 end
+    end
+  end
+
   report(0.75, "Finding the key")
 
   -- key areas

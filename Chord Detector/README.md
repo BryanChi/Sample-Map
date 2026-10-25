@@ -18,6 +18,21 @@ The first chord of each key area carries the key, e.g. `Cm  (key Eb major)`.
 The full result is also stored in the take's `P_EXT:CRS_ChordDetector`
 (tab-separated lines `key`, `area`, `chord`, `tempo`) for other scripts.
 
+## High accuracy mode (neural)
+
+On by default (Settings: "High accuracy, slower"). The chord evidence then
+comes from BTC, a small transformer network trained on real songs
+(Park et al., ISMIR 2019, MIT License, see LICENSE-BTC.txt), ported to pure
+Lua in `ChordDetector_BTC.lua` with its original weights in
+`ChordDetector_BTC.bin` (12 MB, 170 chord classes). Nothing to install.
+The key, beats, minimum chord length and spelling still come from the
+decoder below. It takes roughly 1-2 s of computing per second of audio, in
+the background with a progress bar. Without the two BTC files the script
+falls back to the fast chroma detector.
+
+Other scripts: `opts.btc = { lib = BTC, weights = BTC.load(path) }` with
+`local BTC = dofile(dir .. "ChordDetector_BTC.lua")`.
+
 ## How it decides
 
 The detector does not label each moment on its own. It

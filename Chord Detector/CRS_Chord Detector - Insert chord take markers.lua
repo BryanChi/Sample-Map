@@ -34,6 +34,7 @@ local settings = {
   slash_chords   = get_setting("slash_chords", false),
   key_in_marker  = get_setting("key_in_marker", true),
   mark_no_chord  = get_setting("mark_no_chord", true),
+  neural         = get_setting("neural", true),
 }
 
 -- collect takes
@@ -49,6 +50,16 @@ end
 if #jobs == 0 then
   r.MB("Select one or more audio items first.", "Chord Detector", 0)
   return
+end
+
+-- high-accuracy mode: the BTC neural chord model (pure Lua, slower)
+local BTC_OPT
+if settings.neural then
+  local ok, lib = pcall(dofile, script_dir .. "ChordDetector_BTC.lua")
+  local okw, weights = false, nil
+  if ok then okw, weights = pcall(lib.load, script_dir .. "ChordDetector_BTC.bin") end
+  if ok and okw then BTC_OPT = { lib = lib, weights = weights }
+  else r.ShowConsoleMsg("Chord Detector: neural model not found, using the fast detector\n") end
 end
 
 ---------------------------------------------------------------------------
@@ -128,6 +139,7 @@ local function analysis_opts()
     key_changes = settings.key_changes,
     slash_chords = settings.slash_chords,
     no_chord = settings.mark_no_chord and "N.C." or false,
+    btc = BTC_OPT,
     progress = function(p, label) status.frac = 0.15 + 0.85 * p; status.label = label; maybe_yield() end,
   }
 end
