@@ -58,6 +58,7 @@ function sm_loop_frame()
   -- A project tab switch above swaps the tempo map.
   seq_region_len_cache_reset()
   sm_pcall("ingest_seq_from_arrange", ingest_seq_from_arrange)
+  sm_pcall("seq_band_tick", seq_band_tick)
   sm_pcall("seq_stem_import_poll_external_request", seq_stem_import_poll_external_request)
   sm_pcall("seq_stem_import_tick", seq_stem_import_tick)
   if state.seq_random_sync_run and not state.seq_random_knob_drag then

@@ -847,6 +847,10 @@ function render_seq_top_toolbar()
   end
   render_seq_kit_random_popup()
 
+  if seq_band_toolbar_button then
+    seq_band_toolbar_button(btn_h)
+  end
+
   toolbar_divider()
   render_seq_grid_bar(btn_h)
 

@@ -3445,6 +3445,12 @@ local function ss_window_body(st)
   if not r.ImGui_IsMouseDown(ctx, 0) then
     st._add_dragged = nil
   end
+  r.ImGui_SameLine(ctx, 0, 6)
+  if ss_btn("##ss_open_seq", "OPEN IN SEQUENCER", nil, 26, false,
+      "Band lanes in the Sequencer: one lane per slot under the drum tracks (drums stay the sequencer's),"
+      .. "\nits loop in every region the role plays, locked slots locked, this key") and band_from_song_starter then
+    band_from_song_starter()
+  end
   r.ImGui_SameLine(ctx, 0, 10)
   local tc, tv = r.ImGui_Checkbox(ctx, "Set project tempo", st.set_tempo == true)
   if tc then

@@ -660,7 +660,7 @@ function seq_undo_values_equal(a, b)
   return seq_undo_tables_equal(a, b)
 end
 
-SEQ_UNDO_SNAPSHOT_TABLES = { "seq_tracks", "seq_regions", "seq_kit_history", "seq_razors" }
+SEQ_UNDO_SNAPSHOT_TABLES = { "seq_tracks", "seq_regions", "seq_kit_history", "seq_razors", "seq_band" }
 SEQ_UNDO_SNAPSHOT_SCALARS = {
   "selected_seq_track", "seq_track_next_id", "seq_region_next_id", "seq_pattern_next_id",
   "seq_pool_next_id", "selected_seq_region_id", "seq_kit_history_next_id",
@@ -761,6 +761,9 @@ function restore_seq_document_snapshot(snap, same)
   state.seq_kit_history = clone_table_deep(snap.seq_kit_history) or {}
   state.seq_kit_history_next_id = snap.seq_kit_history_next_id or 1
   state.seq_razors = clone_table_deep(snap.seq_razors) or {}
+  if snap.seq_band ~= nil then
+    state.seq_band = clone_table_deep(snap.seq_band)
+  end
   state.selected_seq_note = nil
   state.seq_note_drag = nil
   state.seq_param_drag = nil
@@ -1016,6 +1019,10 @@ function seq_apply_undo_snapshot_body(snap, label, guard)
     r.PreventUIRefresh(-1)
   end
   guard.refresh = false
+  if seq_band_after_undo then
+    -- Band lane tracks and items follow the restored band state.
+    seq_band_after_undo()
+  end
   r.UpdateArrange()
   guard.block = false
   seq_undo_end_reaper(label or "Sample Map undo")

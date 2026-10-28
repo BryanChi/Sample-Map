@@ -37,7 +37,9 @@ function render_sequencer_map()
     rows_h = rows_h + row.h
   end
   local add_track_row_h = 28.0
-  local map_body_h = rows_h + add_track_row_h
+  -- Band lanes (42d_band_lanes) sit under the "+" row.
+  local band_h = seq_band_height and seq_band_height() or 0
+  local map_body_h = rows_h + add_track_row_h + band_h
 
   local child_flags = 0
   child_flags = sm_child_border_flag()
@@ -800,6 +802,14 @@ function render_sequencer_map()
     r.ImGui_SetItemAllowOverlap(ctx)
   end
   body_y1 = body_y0 + map_body_h
+  -- The band takes its own input; the drum grid ends above it.
+  local band_y0 = body_y1 - band_h
+  if band_h > 0 then
+    body_y1 = band_y0
+    if my >= band_y0 then
+      hovered, left_clicked, right_clicked = false, false, false
+    end
+  end
 
   -- "Fill" chip on the razor area (drawn last frame) opens the fill designer.
   if left_clicked and seq_fill_razor_chip_hit(mx, my) then
@@ -2416,6 +2426,14 @@ function render_sequencer_map()
       end_seq_undo()
     end
     seq_undo_commit_on_release = false
+  end
+
+  if band_h > 0 and seq_band_draw then
+    seq_band_draw({
+      x0 = x0, w = width, tx0 = timeline_x0, tx1 = timeline_x1, y0 = band_y0,
+      view_qn0 = view_start_qn, qn_span = qn_span, qn_to_x = qn_to_x, region = region,
+      playhead_qn = playhead_time and time_to_qn(playhead_time) or nil,
+    })
   end
 
   r.ImGui_SetCursorScreenPos(ctx, x0, add_row_y0)
