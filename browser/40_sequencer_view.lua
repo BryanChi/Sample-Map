@@ -126,7 +126,7 @@ function render_sequencer_map()
   local cb_x0, cb_y0, cb_x1, cb_y1
   if show_confirm then
     local cb_h = 34.0
-    local cb_w = 240.0
+    local cb_w = 330.0
     local confirm_region = region
     if state.seq_pattern_confirm.region_id then
       confirm_region = get_seq_region_by_id(state.seq_pattern_confirm.region_id) or region
