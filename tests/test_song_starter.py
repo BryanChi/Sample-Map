@@ -1835,3 +1835,135 @@ def test_add_button_click_vs_drag_threshold_and_overlay_rects():
     assert n_rects == 1 + n and strip == "NEW FOLDER"
     assert label == "%d TRACKS · 8 BARS · 0:16" % n
     assert x0 == 300 and x1 == 1100 and y0 == 66   # 6..22 s on a 0..20 s view of 1000 px; lane of track 2
+
+
+# --- Search chips ---------------------------------------------------------------
+
+def test_search_chips_enter_backspace_and_x():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.open = true
+      imgui_text_input_active = function() return false end
+      reaper.ImGui_InputTextFlags_EnterReturnsTrue = function() return 32 end
+      ENTER, TEXT = false, ""
+      reaper.ImGui_InputTextWithHint = function(_, id, hint, val, flags)
+        if id == "##ss_search" then return ENTER, TEXT end
+        return false, val
+      end
+      ACTIVE = false
+      reaper.ImGui_IsItemActive = function() return ACTIVE end
+      reaper.ImGui_Key_Backspace = function() return 8 end
+      BACK = false
+      reaper.ImGui_IsKeyPressed = function(_, k) return k == 8 and BACK end
+      -- type "drum" + Enter, then "bass loop" + Enter, then "Drum" again (duplicate)
+      TEXT, ENTER = "drum", true
+      render_song_starter_window()
+      local cleared = st._search_text
+      TEXT = "bass loop"
+      render_song_starter_window()
+      TEXT = "Drum"
+      render_song_starter_window()
+      local n2 = #st.search_chips
+      -- Backspace in the empty field removes the last chip
+      ENTER, TEXT, ACTIVE, BACK = false, "", true, true
+      render_song_starter_window()
+      local after_back = table.concat(st.search_chips, ",")
+      ACTIVE, BACK = false, false
+      -- the chip's x removes it
+      reaper.ImGui_InvisibleButton = function(_, id) return id == "##ss_chip_1" end
+      render_song_starter_window()
+      return cleared, n2, after_back, #st.search_chips, #ERRORS, ERRORS[1]
+    ''')
+    cleared, n2, after_back, n_end, n_err, first = got
+    assert n_err == 0, first
+    assert cleared == "" and n2 == 2 and after_back == "drum" and n_end == 0
+
+
+def test_search_any_all_and_rolls_only_pick_matching():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 1.0, false, "Am"
+      local function names(pool)
+        local t = {}
+        for _, s in ipairs(pool) do t[#t + 1] = s.name end
+        table.sort(t)
+        return table.concat(t, "|")
+      end
+      ss_search_add(st, "drum loop")         -- both words: Drum Loop 120, plus folder /lib/Drums/ "loop"? no: words in name/path
+      local a = names(ss_loop_pool(st))
+      ss_search_add(st, "chords")
+      st.search_mode = "any"
+      local any = #ss_loop_pool(st)
+      st.search_mode = "all"
+      local all = #ss_loop_pool(st)
+      st.search_mode = "any"
+      -- rolls: every filled slot holds a matching loop
+      ss_do_reroll("batch")
+      local ok = true
+      for _, s in ipairs(st.slots) do
+        if s.path and not s.no_match then
+          local smp = find_sample_by_path(s.path)
+          if not ss_search_match(st, smp) then ok = false end
+        end
+      end
+      local bass = nil
+      for _, s in ipairs(st.slots) do if s.role == "bass" then bass = s end end
+      return a, any, all, ok, bass.no_match, ss_search_count(st)
+    ''')
+    a, n_any, n_all, ok, bass_no_match, count = got
+    names = a.split("|")
+    assert "Drum Loop 120bpm.wav" in names and "Bass Loop 120bpm Am.wav" not in names
+    assert n_any > len(names) and n_all == 0
+    assert ok and bass_no_match is True and count == n_any
+
+
+def test_no_match_keeps_current_loop_and_marks_it():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 0.0, false, "Am"
+      ss_do_reroll("batch")
+      local bass
+      for _, s in ipairs(st.slots) do if s.role == "bass" then bass = s end end
+      local before = bass.path
+      ss_search_add(st, "zzz-nothing")
+      ss_do_reroll(bass)
+      local kept, marked = bass.path == before, bass.no_match
+      local note = NOTES[#NOTES]
+      -- the marker shows on the row
+      local texts = {}
+      reaper.ImGui_DrawList_AddText = function(_, x, y, c, s) texts[#texts + 1] = s end
+      st.open = true
+      render_song_starter_window()
+      local shown = table.concat(texts, "|"):find("(no match for search)", 1, true) ~= nil
+      -- removing the search and rolling clears the marker
+      ss_search_remove(st, 1)
+      ss_do_reroll(bass)
+      return kept, marked, note, shown, bass.no_match
+    ''')
+    kept, marked, note, shown, after = got
+    assert kept and marked is True and "match the search" in note and shown and after is None
+
+
+def test_search_persists_and_rides_in_history():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 1.0, false, "Am"
+      ss_search_add(st, "drum")
+      ss_search_add(st, "perc")
+      ss_do_reroll("batch")              -- ANY: drums or perc loops
+      st.search_mode = "all"
+      ss_history_push(st, false)
+      local h = st.history[1]
+      ss_save_now()
+      state.song_starter = nil
+      local st2 = ss_state()
+      local chips, mode = table.concat(st2.search_chips, ","), st2.search_mode
+      st2.search_chips, st2.search_mode = {}, "any"
+      ss_history_recall(st2, st2.history[1])
+      return chips, mode, table.concat(h.search_chips or {}, ","), table.concat(st2.search_chips, ","), st2.search_mode
+    ''')
+    assert got == ("drum,perc", "all", "drum,perc", "drum,perc", "all")

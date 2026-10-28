@@ -430,6 +430,7 @@ function ss_slot_take(slot, c)
   slot.dur = s and tonumber(s.duration) or slot.dur
   slot.from_role = (c.role ~= slot.role) and c.role or nil
   slot.relaxed = c.relaxed or nil
+  slot.no_match = nil
   slot.recent = slot.recent or {}
   table.insert(slot.recent, 1, c.path)
   while #slot.recent > SS_RECENT_PER_SLOT do
@@ -505,6 +506,9 @@ function ss_reroll(st, pool, which)
         st.target_key = ss_norm_key(pick.key)
         slot.shift = 0
       end
+    elseif ss_search_active(st) then
+      -- the search found nothing for this slot: keep what it has, say so
+      slot.no_match = true
     else
       slot.path, slot.name, slot.src_bpm, slot.src_key = nil, nil, nil, nil
     end
@@ -808,6 +812,7 @@ function ss_state()
     open = false, target_bpm = nil, target_key = nil, key_auto = true, chaos = 0.25, scope = "library",
     bars = 8, set_tempo = false, slots = {}, history = {}, next_id = 0,
     mode = "loop", template = "club", arr = nil, hist_filter = "all",
+    search_chips = {}, search_mode = "any",
   }
   state.song_starter = st
   local content = sm_read_nonempty_file and sm_read_nonempty_file(SS_FILE)
@@ -826,6 +831,11 @@ function ss_state()
     st.set_tempo = cfg.set_tempo == true
     st.mode = (cfg.mode == "arrange") and "arrange" or "loop"
     st.hist_filter = (cfg.hist_filter == "liked") and "liked" or "all"
+    st.search_mode = (cfg.search_mode == "all") and "all" or "any"
+    st.search_chips = {}
+    for _, q in ipairs(type(cfg.search_chips) == "table" and cfg.search_chips or {}) do
+      if type(q) == "string" and q ~= "" then st.search_chips[#st.search_chips + 1] = q end
+    end
     st.template = SS_TEMPLATE[cfg.template] and cfg.template or "club"
     if ss_arr_valid(cfg.arr) then st.arr = cfg.arr end
     for _, sl in ipairs(type(cfg.slots) == "table" and cfg.slots or {}) do
@@ -871,6 +881,7 @@ function ss_save_now()
     key_auto = st.key_auto ~= false, chaos = st.chaos, scope = st.scope, bars = st.bars,
     set_tempo = st.set_tempo == true, slots = slots, history = st.history,
     mode = st.mode, template = st.template, arr = st.arr, hist_filter = st.hist_filter,
+    search_chips = st.search_chips, search_mode = st.search_mode,
   }
   local ok, json = pcall(json_encode, cfg)
   if ok and type(json) == "string" then
@@ -897,6 +908,10 @@ function ss_snapshot(st)
   end
   local h = { t = os.time(), bpm = st.target_bpm, key = st.target_key, slots = slots, mode = st.mode,
     template = st.template }
+  if ss_search_active(st) then
+    h.search_chips = { table.unpack(st.search_chips) }
+    h.search_mode = st.search_mode
+  end
   if st.mode == "arrange" and ss_arr_valid(st.arr) then
     h.arr = st.arr
   end
@@ -977,6 +992,11 @@ function ss_history_recall(st, h)
   if SS_TEMPLATE[h.template] then
     st.template = h.template
   end
+  if type(h.search_chips) == "table" then
+    st.search_chips = { table.unpack(h.search_chips) }
+    st.search_mode = (h.search_mode == "all") and "all" or "any"
+    st._search_count = nil
+  end
   if ss_arr_valid(h.arr) then
     st.arr = h.arr
   end
@@ -999,6 +1019,74 @@ function ss_project_bpm()
 end
 
 -- Loops in scope: the whole library, or what the map shows now.
+-- --- Search chips: rolls pick only loops matching them ------------------------
+
+function ss_search_active(st)
+  return type(st.search_chips) == "table" and #st.search_chips > 0
+end
+
+-- One query: every word in the name, folder path or tags (case-insensitive).
+function ss_query_matches(s, q)
+  local any = false
+  for w in tostring(q or ""):lower():gmatch("%S+") do
+    any = true
+    local hit = sample_matches_filter_text and sample_matches_filter_text(s, w)
+    if not hit then
+      for _, t in ipairs(type(s.tags) == "table" and s.tags or {}) do
+        if tostring(t):lower():find(w, 1, true) then hit = true break end
+      end
+    end
+    if not hit then return false end
+  end
+  return any
+end
+
+-- The chips together: ANY (default) or ALL of them.
+function ss_search_match(st, s)
+  if not ss_search_active(st) then return true end
+  local all = st.search_mode == "all"
+  for _, q in ipairs(st.search_chips) do
+    local m = ss_query_matches(s, q)
+    if m and not all then return true end
+    if not m and all then return false end
+  end
+  return all
+end
+
+-- Add / remove chips (Enter / x or Backspace on an empty field).
+function ss_search_add(st, q)
+  q = tostring(q or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if q == "" then return false end
+  st.search_chips = st.search_chips or {}
+  for _, c in ipairs(st.search_chips) do
+    if c:lower() == q:lower() then return false end
+  end
+  st.search_chips[#st.search_chips + 1] = q
+  st._search_count = nil
+  ss_save()
+  return true
+end
+
+function ss_search_remove(st, i)
+  if not (st.search_chips and st.search_chips[i]) then return false end
+  table.remove(st.search_chips, i)
+  st._search_count = nil
+  ss_save()
+  return true
+end
+
+-- Loops in scope matching the search, cached until chips / scope / library change.
+function ss_search_count(st)
+  local sig = table.concat(st.search_chips or {}, "\1") .. "|" .. tostring(st.search_mode) .. "|" .. tostring(st.scope)
+    .. "|" .. tostring(#(state.samples or {}))
+  if st._search_count and st._search_count_sig == sig then
+    return st._search_count
+  end
+  st._search_count = #ss_loop_pool(st)
+  st._search_count_sig = sig
+  return st._search_count
+end
+
 function ss_loop_pool(st)
   local list = state.samples or {}
   if st.scope == "map" and map_cache and rebuild_map_filtered_cache then
@@ -1014,7 +1102,8 @@ function ss_loop_pool(st)
   local out = {}
   for i = 1, #list do
     local s = list[i]
-    if ss_is_loop(s) and not (sample_scan_folder_unavailable and sample_scan_folder_unavailable(s)) then
+    if ss_is_loop(s) and not (sample_scan_folder_unavailable and sample_scan_folder_unavailable(s))
+        and ss_search_match(st, s) then
       out[#out + 1] = s
     end
   end
@@ -1032,6 +1121,13 @@ function ss_do_reroll(which)
   ss_number_slots(st)
   local pool = ss_loop_pool(st)
   if #pool == 0 then
+    if ss_search_active(st) then
+      for _, slot in ipairs(st.slots) do
+        if type(which) ~= "table" and not slot.locked or slot == which then slot.no_match = true end
+      end
+      sm_notify("Song Starter: no loops match the search.", "warn")
+      return 0
+    end
     sm_notify(st.scope == "map" and "Song Starter: no loops in the current map view." or
       "Song Starter: no loops in the library yet (loops are files tagged Loop).", "warn")
     return 0
@@ -1043,7 +1139,7 @@ function ss_do_reroll(which)
   end
   local empty = {}
   for _, slot in ipairs(st.slots) do
-    if not slot.path and (type(which) ~= "table" or slot == which) then
+    if (not slot.path or slot.no_match) and (type(which) ~= "table" or slot == which) then
       empty[#empty + 1] = SS_ROLE[slot.role] and SS_ROLE[slot.role].label or slot.role
     end
   end
@@ -2699,11 +2795,14 @@ local function ss_slot_row(st, slot, i, row_w)
     if slot.relaxed then
       info = info .. "  (looser match)"
     end
+    if slot.no_match then
+      info = "(no match for search)  " .. info
+    end
     if slot.from_role and SS_ROLE[slot.from_role] then
       info = info .. "  [" .. string.upper(SS_ROLE[slot.from_role].label) .. "]"
     end
   else
-    info = "empty: Re-roll to fill"
+    info = slot.no_match and "(no match for search)" or "empty: Re-roll to fill"
   end
   if seq_truncate_text_to_width then
     info = seq_truncate_text_to_width(info, name_w) or info
@@ -3122,6 +3221,54 @@ function ss_handle_row_keys(st)
   return did
 end
 
+-- Search field + chips + ANY / ALL + live loop count.
+function ss_draw_search_row(st, avail_w)
+  ss_label("Search")
+  r.ImGui_SameLine(ctx)
+  local flags = r.ImGui_InputTextFlags_EnterReturnsTrue and r.ImGui_InputTextFlags_EnterReturnsTrue() or 0
+  r.ImGui_SetNextItemWidth(ctx, 160)
+  local entered, txt = r.ImGui_InputTextWithHint(ctx, "##ss_search", "Search, then Enter", st._search_text or "", flags)
+  if type(txt) == "string" then st._search_text = txt end
+  local active = r.ImGui_IsItemActive(ctx)
+  if entered then
+    if ss_search_add(st, st._search_text) then
+      st._search_text = ""
+    end
+    if r.ImGui_SetKeyboardFocusHere then r.ImGui_SetKeyboardFocusHere(ctx, -1) end
+  elseif active and (st._search_text or "") == "" and r.ImGui_Key_Backspace
+      and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Backspace(), false) and ss_search_active(st) then
+    ss_search_remove(st, #st.search_chips)
+  end
+  if r.ImGui_IsItemHovered(ctx) then
+    r.ImGui_SetTooltip(ctx, "Type and press Enter to add a search: rolls then pick only matching loops."
+      .. "\nAll words of a search must appear in the name, folder or tags."
+      .. "\nBackspace in the empty field removes the last one.")
+  end
+  local remove
+  for i, q in ipairs(st.search_chips or {}) do
+    r.ImGui_SameLine(ctx, 0, 4)
+    if ss_btn("##ss_chip_" .. i, string.upper(q) .. "  ×", nil, 20, true, "Remove this search") then
+      remove = i
+    end
+  end
+  if remove then ss_search_remove(st, remove) end
+  if ss_search_active(st) then
+    if #st.search_chips > 1 then
+      r.ImGui_SameLine(ctx, 0, 8)
+      if ss_btn("##ss_search_mode", st.search_mode == "all" and "ALL" or "ANY", 36, 20, false,
+          st.search_mode == "all" and "Loops must match every search (click: any)" or "Loops may match any search (click: all)") then
+        st.search_mode = (st.search_mode == "all") and "any" or "all"
+        st._search_count = nil
+        ss_save()
+      end
+    end
+    r.ImGui_SameLine(ctx, 0, 8)
+    local n = ss_search_count(st)
+    local txt_n = tostring(n):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    r.ImGui_TextColored(ctx, n > 0 and SS_COL.dim or SS_COL.warn, txt_n .. (n == 1 and " LOOP" or " LOOPS"))
+  end
+end
+
 local function ss_window_body(st)
   local avail_w = r.ImGui_GetContentRegionAvail(ctx) or 600
   local dl = r.ImGui_GetWindowDrawList(ctx)
@@ -3175,6 +3322,9 @@ local function ss_window_body(st)
     st.scope = "map"
     ss_save()
   end
+
+  -- Search: Enter adds the query as a chip; rolls pick only matching loops.
+  ss_draw_search_row(st, avail_w)
 
   -- Safe <-> Chaos.
   ss_label("Safe")
