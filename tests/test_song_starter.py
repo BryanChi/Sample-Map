@@ -816,3 +816,123 @@ def test_add_to_project_rebuilds_peaks_for_added_items_only():
       return #RUNS, c1, e1, r1, c2, e2, r2, #ITEMS - n > 6
     ''')
     assert got == (2, 40441, True, True, 40441, True, True, True)
+
+
+# --- Mixed loop lengths ---------------------------------------------------------
+
+def test_loops_of_other_bar_lengths_are_eligible():
+    L = _runtime()
+    got = L.execute(r'''
+      mk("/lib/Drums/Long Drum Loop 120bpm.wav", 32.0, { "drum", "loop" })   -- 16 bars
+      mk("/lib/Drums/Short Drum Loop 120bpm.wav", 2.0, { "drum", "loop" })   -- 1 bar
+      local st = ss_state()
+      st.bars = 8
+      local names = {}
+      for _, c in ipairs(ss_candidates(ss_loop_pool(st), "drums", 120, nil, ss_chaos_params(0))) do
+        local s = { dur = c.sample.duration, rate = c.rate }
+        names[c.sample.name] = ss_slot_bars(s, 120)
+      end
+      return names["Long Drum Loop 120bpm.wav"], names["Short Drum Loop 120bpm.wav"], names["Drum Loop 120bpm.wav"]
+    ''')
+    assert got == (16, 1, 4)
+
+
+def test_per_voice_phase_short_repeats_long_continues():
+    L = _runtime()
+    got = L.execute(r'''
+      local bar = 2.0  -- seconds at 120 bpm
+      local short = { dur = 8.0, rate = 1.0 }    -- 4 bars
+      local long = { dur = 32.0, rate = 1.0 }    -- 16 bars
+      local odd = { dur = 31.9, rate = 1.0 }     -- a hair short of 16 bars: still on the grid
+      local out = {}
+      -- bar 10 of the song (2nd cycle of an 8-bar set): short is at bar 2 of its 4,
+      -- long keeps going at bar 10 of its 16
+      out[1] = ss_loop_phase(short, 10 * bar, 120)
+      out[2] = ss_loop_phase(long, 10 * bar, 120)
+      out[3] = ss_loop_phase(odd, 16 * bar, 120)
+      out[4] = select(1, ss_slot_bar_at(long, 10.5 * bar, 120))
+      out[5] = ss_slot_bars(long, 120)
+      out[6] = ss_slot_bars({ dur = 4.0, rate = 0.5 }, 120)  -- stretched to 8 s = 4 bars
+      return table.unpack(out)
+    ''')
+    short_pos, long_pos, odd_pos, long_bar, long_bars, stretched = got
+    assert abs(short_pos - 4.0) < 1e-9
+    assert abs(long_pos - 20.0) < 1e-9
+    assert abs(odd_pos) < 1e-9
+    assert abs(long_bar - 10.5) < 1e-9 and long_bars == 16 and stretched == 4
+
+
+def test_add_to_project_offsets_for_long_loop():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key, st.bars = 120, 0.0, false, "Am", 8
+      ss_do_reroll("batch")
+      local drums
+      for _, s in ipairs(st.slots) do if s.role == "drums" then drums = s end end
+      drums.dur, drums.rate = 32.0, 1.0      -- 16-bar loop in an 8-bar set
+      -- LOOP: one 8-bar item from the start of the loop
+      st.mode = "loop"
+      ss_add_to_project()
+      local loop_item
+      for _, it in ipairs(ITEMS) do if it.tr.P_NAME == "Drums" then loop_item = it end end
+      local n = #ITEMS
+      -- ARRANGE: each drums item starts where the 16-bar loop is at that bar
+      st.mode, st.template = "arrange", "club"
+      ss_arrangement(st, true)
+      ss_add_to_project()
+      local ok, count = true, 0
+      for i = n + 1, #ITEMS do
+        local it = ITEMS[i]
+        if it.tr.P_NAME == "Drums" then
+          count = count + 1
+          local bar = (it.D_POSITION - 10.0) / 2.0
+          local expect = ((bar % 16) / 16) * 32.0
+          if math.abs((it.take.D_STARTOFFS or -1) - expect) > 1e-9 then ok = false end
+        end
+      end
+      return loop_item.D_LENGTH, loop_item.take.D_STARTOFFS or 0, ok, count
+    ''')
+    length, offs, ok, count = got
+    assert abs(length - 16.0) < 1e-9 and offs == 0
+    assert ok and count == 5
+
+
+def test_draws_cycle_timeline_and_own_playheads():
+    L = _runtime()
+    got = L.execute(r'''
+      reaper.PCM_Source_CreateFromFile = function(p) return { path = p } end
+      reaper.PCM_Source_Destroy = function() end
+      reaper.CF_CreatePreview = function(src) return { vals = {} } end
+      reaper.CF_Preview_SetValue = function(o, k, v) o.vals[k] = v; return true end
+      reaper.CF_Preview_GetValue = function(o, k) return true, 0 end
+      reaper.CF_Preview_Play = function() return true end
+      reaper.CF_Preview_Stop = function() end
+      reaper.CF_Preview_StopAll = function() end
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key, st.bars, st.open = 120, 0.0, false, "Am", 8, true
+      ss_do_reroll("batch")
+      local drums, bass
+      for _, s in ipairs(st.slots) do
+        if s.role == "drums" then drums = s elseif s.role == "bass" then bass = s end
+      end
+      drums.dur, drums.rate = 32.0, 1.0   -- 16 bars: own playhead
+      bass.dur, bass.rate = 16.0, 1.0     -- 8 bars: matches the set, none
+      ss_preview_play()
+      NOW = NOW + 21.0                     -- bar 10.5
+      local texts = {}
+      reaper.ImGui_DrawList_AddText = function(_, x, y, c, s) texts[#texts + 1] = s end
+      render_song_starter_window()
+      local tl = ss_draw_cycle_timeline(st, 720)
+      local own = ss_draw_slot_playhead(st, drums, {}, 0, 0, 300)
+      local none = ss_draw_slot_playhead(st, bass, {}, 0, 0, 300)
+      local joined = table.concat(texts, "|")
+      return #ERRORS, ERRORS[1], tl.bars, math.abs(tl.now - 2.5) < 1e-9, own.label, none == nil,
+             joined:find("11/16", 1, true) ~= nil, joined:find("16 BAR", 1, true) ~= nil
+    ''')
+    n_err, first, bars, now_ok, label, none, drew_counter, drew_bars = got
+    assert n_err == 0, first
+    assert bars == 8 and now_ok
+    assert label == "11/16" and none
+    assert drew_counter and drew_bars

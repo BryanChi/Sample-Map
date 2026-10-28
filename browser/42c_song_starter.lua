@@ -534,14 +534,47 @@ function ss_slot_len(slot)
   return dur / math.max(0.05, tonumber(slot.rate) or 1.0)
 end
 
--- Source position (seconds) at which a loop rejoins playback `elapsed` seconds in.
-function ss_loop_phase(slot, elapsed)
+-- Length of a slot's loop in bars at bpm (its own length, not the set's):
+-- whole bars, or quarters below one bar. nil when the length is unknown.
+function ss_slot_bars(slot, bpm)
+  local len = ss_slot_len(slot)
+  bpm = tonumber(bpm)
+  if not len or not bpm or bpm <= 0 then
+    return nil
+  end
+  local bars = len * bpm / 240.0
+  if bars >= 0.875 then
+    return math.max(1, math.floor(bars + 0.5))
+  end
+  return math.max(0.25, math.floor(bars * 4 + 0.5) / 4)
+end
+
+-- Source position (seconds) at which a loop rejoins playback `elapsed` seconds
+-- in. With bpm: global bar position mod the loop's own bar count, so a 4-bar
+-- loop repeats inside an 8-bar set and a 16-bar loop runs on across cycles,
+-- locked to the bar grid even when the file is a hair off its bar length.
+function ss_loop_phase(slot, elapsed, bpm)
   local dur = tonumber(slot.dur)
   if not dur or dur <= 0 then
     return 0
   end
+  elapsed = math.max(0, elapsed or 0)
+  local own = ss_slot_bars(slot, bpm)
+  if own then
+    local bar = elapsed * bpm / 240.0
+    return ((bar % own) / own) * dur
+  end
   local rate = tonumber(slot.rate) or 1.0
-  return (math.max(0, elapsed) * rate) % dur
+  return (elapsed * rate) % dur
+end
+
+-- Bar (0-based, fractional) within the loop's own length `elapsed` seconds in. -> bar, own bars.
+function ss_slot_bar_at(slot, elapsed, bpm)
+  local own = ss_slot_bars(slot, bpm)
+  if not own then
+    return nil
+  end
+  return (math.max(0, elapsed or 0) * bpm / 240.0) % own, own
 end
 
 ---------------------------------------------------------------------------
@@ -1073,7 +1106,7 @@ local function ss_voice_make(st, slot, elapsed)
   r.CF_Preview_SetValue(obj, "D_PLAYRATE", tonumber(slot.rate) or 1.0)
   r.CF_Preview_SetValue(obj, "D_PITCH", tonumber(slot.shift) or 0)
   r.CF_Preview_SetValue(obj, "D_VOLUME", ss_voice_volume(st, slot, elapsed or 0))
-  local pos = ss_loop_phase(slot, elapsed or 0)
+  local pos = ss_loop_phase(slot, elapsed or 0, st.target_bpm)
   if pos > 0 then
     r.CF_Preview_SetValue(obj, "D_POSITION", pos)
   end
@@ -1239,7 +1272,7 @@ function ss_arrangement_items(st, arr, bpm)
           local t0 = (sec.start + part.from) * bar_s
           local t1 = (sec.start + part.to) * bar_s
           out[#out + 1] = { slot = slot, sec = sec, part = part, t0 = t0, t1 = t1,
-            offs = ss_loop_phase(slot, t0), rise = part.rise }
+            offs = ss_loop_phase(slot, t0, bpm), rise = part.rise }
         end
       end
     end
@@ -1539,6 +1572,84 @@ local function ss_key_combo(st)
   end
 end
 
+-- Bars in the set's cycle: the bar setting (LOOP) or the whole arrangement.
+function ss_cycle_bars(st)
+  if st.mode == "arrange" and ss_arr_valid(st.arr) then
+    return st.arr.total
+  end
+  return st.bars or 8
+end
+
+-- Playback position in bars within the cycle, or nil when stopped.
+function ss_cycle_bar_now(st)
+  if not SS_PLAY then
+    return nil
+  end
+  local elapsed = r.time_precise() - SS_PLAY.t0
+  if st.mode == "arrange" and ss_arr_valid(st.arr) then
+    return ss_arr_bar_at(st, elapsed)
+  end
+  return (math.max(0, elapsed) * (st.target_bpm or 120) / 240.0) % (st.bars or 8)
+end
+
+-- A slot gets its own playhead when its loop is not the bar setting's length.
+function ss_slot_shows_own(st, slot)
+  local own = slot.path and ss_slot_bars(slot, st.target_bpm)
+  return own ~= nil and own ~= (st.bars or 8)
+end
+
+-- Cycle timeline at the top: hairline box, a tick per bar (taller every 4),
+-- green playhead while previewing. -> { x0, y0, w, h, bars }.
+function ss_draw_cycle_timeline(st, w)
+  local bars = math.max(1, ss_cycle_bars(st))
+  local h = 12
+  local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
+  r.ImGui_Dummy(ctx, math.max(1, w), h)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  r.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h, SS_COL.line, 0, 0, 1)
+  local px = w / bars
+  local step = bars > 64 and 4 or 1
+  for b = step, bars - 1, step do
+    local tx = x0 + b * px
+    local tall = b % 4 == 0
+    r.ImGui_DrawList_AddLine(dl, tx, y0 + (tall and 2 or 7), tx, y0 + h, tall and SS_COL.line_hi or SS_COL.line, 1)
+  end
+  local now = ss_cycle_bar_now(st)
+  if now then
+    local hx = x0 + now * px
+    r.ImGui_DrawList_AddRectFilled(dl, x0 + 1, y0 + 1, hx, y0 + h - 1, SS_COL.accent_d, 0)
+    r.ImGui_DrawList_AddLine(dl, hx, y0 - 2, hx, y0 + h + 2, SS_COL.accent, 1)
+  end
+  return { x0 = x0, y0 = y0, w = w, h = h, bars = bars, now = now }
+end
+
+-- Slot's own position in its own length (e.g. bar 11 of a 16-bar loop) as a
+-- thin line across the name column, and "11/16" at its right end while playing.
+function ss_draw_slot_playhead(st, slot, dl, x, y, w)
+  if not ss_slot_shows_own(st, slot) then
+    return nil
+  end
+  local own = ss_slot_bars(slot, st.target_bpm)
+  r.ImGui_DrawList_AddLine(dl, x, y, x + w, y, SS_COL.line, 1)
+  if own >= 1 and own <= 32 then
+    for b = 1, own - 1 do
+      local tx = x + w * b / own
+      r.ImGui_DrawList_AddLine(dl, tx, y - 2, tx, y, SS_COL.line, 1)
+    end
+  end
+  if not (SS_PLAY and SS_PLAY.voices[slot.id]) then
+    return { own = own }
+  end
+  local bar = ss_slot_bar_at(slot, r.time_precise() - SS_PLAY.t0, st.target_bpm)
+  local hx = x + w * bar / own
+  r.ImGui_DrawList_AddLine(dl, x, y, hx, y, SS_COL.accent_m, 1)
+  r.ImGui_DrawList_AddLine(dl, hx, y - 3, hx, y + 1, SS_COL.accent, 1)
+  local label = string.format("%d/%s", math.floor(bar) + 1, own == math.floor(own) and tostring(math.floor(own)) or tostring(own))
+  local lw = r.ImGui_CalcTextSize(ctx, label) or 0
+  ss_text(dl, x + w - lw, y - 29, SS_COL.accent, label)
+  return { own = own, bar = bar, label = label }
+end
+
 local function ss_slot_row(st, slot, i, row_w)
   local role = SS_ROLE[slot.role] or SS_ROLES[1]
   local row_h = 40
@@ -1620,7 +1731,9 @@ local function ss_slot_row(st, slot, i, row_w)
   end
   local name = slot.path and (slot.name or slot.path:match("([^/\\]+)$")) or "—"
   if seq_truncate_text_to_width then
-    name = seq_truncate_text_to_width(name, name_w) or name
+    -- room for the "11/16" counter of a loop with its own length
+    local nw = (ss_slot_shows_own(st, slot) and SS_PLAY) and (name_w - 44) or name_w
+    name = seq_truncate_text_to_width(name, math.max(20, nw)) or name
   end
   ss_text(dl, name_x, y0 + 6, slot.path and (name_hover and SS_COL.accent or SS_COL.text) or SS_COL.mute, name)
   local info
@@ -1631,6 +1744,10 @@ local function ss_slot_row(st, slot, i, row_w)
       slot.bpm_est and "~" or "", tonumber(slot.src_bpm) or 0,
       (slot.mult == 2 and " (dbl)") or (slot.mult == 0.5 and " (half)") or "",
       slot.src_key or "no key", rate, "", shift > 0 and "+" or "", shift)
+    local own = ss_slot_bars(slot, st.target_bpm)
+    if own then
+      info = string.format("%s BAR  ", own == math.floor(own) and tostring(math.floor(own)) or tostring(own)) .. info
+    end
     if slot.relaxed then
       info = info .. "  (looser match)"
     end
@@ -1644,6 +1761,7 @@ local function ss_slot_row(st, slot, i, row_w)
     info = seq_truncate_text_to_width(info, name_w) or info
   end
   ss_text(dl, name_x, y0 + 22, SS_COL.dim, info)
+  ss_draw_slot_playhead(st, slot, dl, name_x, y1 - 5, name_w)
 
   local by = y0 + (row_h - 22) * 0.5
   r.ImGui_SetCursorScreenPos(ctx, cx, by)
@@ -1817,6 +1935,8 @@ end
 local function ss_window_body(st)
   local avail_w = r.ImGui_GetContentRegionAvail(ctx) or 600
   local dl = r.ImGui_GetWindowDrawList(ctx)
+
+  ss_draw_cycle_timeline(st, avail_w)
 
   -- Target: key, tempo, bars, scope.
   ss_label("Key")
