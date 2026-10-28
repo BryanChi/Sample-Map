@@ -1391,3 +1391,126 @@ def test_song_starter_tooltips_measure_and_draw_in_its_font():
     assert measured and drawn and depth == 0
     assert key.startswith("space:cond:")
     assert n_layouts == 2
+
+
+# --- Browse the loop's folder ---------------------------------------------------
+
+FOLDER = r"""
+  -- /lib/Drums holds: Drum Loop 120, Beat 124, Break 90, Drum Groove 60, Analyzed Loop 120
+  mk("/lib/Drums/Drum Hit 120bpm.wav", 0.5, { "drum" })   -- a one-shot in the same folder
+  rebuild_samples_path_index()
+  local st = ss_state()
+  st.target_bpm, st.chaos, st.key_auto, st.target_key, st.open = 120, 0.0, false, "Am", true
+  ss_do_reroll("batch")
+  DR = nil
+  for _, s in ipairs(st.slots) do if s.role == "drums" then DR = s end end
+  -- start from a known loop
+  ss_slot_swap_to(st, DR, find_sample_by_path("/lib/Drums/Drum Loop 120bpm.wav"))
+  DR.folder_nav = nil
+"""
+
+
+def test_folder_candidates_rank_by_fit_loops_first():
+    L = _runtime()
+    L.execute(FOLDER)
+    got = L.execute(r'''
+      local st = ss_state()
+      local ranked = ss_folder_ranked(st, DR)
+      local names = {}
+      for _, c in ipairs(ranked) do names[#names + 1] = c.path:match("[^/]+$") end
+      return table.concat(names, "|"), ranked[#ranked].loop
+    ''')
+    names, last_loop = got
+    order = names.split("|")
+    # exact-tempo loops first, the 60 (double time) and 90 bpm ones later, the one-shot last
+    assert set(order[:2]) == {"Drum Loop 120bpm.wav", "Analyzed Loop 120bpm.wav"}
+    assert order.index("Beat_124_bpm.wav") < order.index("Break 90bpm.wav")
+    assert order[-1] == "Drum Hit 120bpm.wav" and last_loop is False
+
+
+def test_folder_step_forward_back_and_wrap_keeps_lock():
+    L = _runtime()
+    L.execute(FOLDER)
+    got = L.execute(r'''
+      local st = ss_state()
+      DR.locked = true
+      local start = DR.path
+      local seen = { DR.path:match("[^/]+$") }
+      local pos, n = ss_folder_step(st, DR, 1)
+      seen[#seen + 1] = DR.path:match("[^/]+$")
+      local p2 = ss_folder_step(st, DR, 1)
+      local back = ss_folder_step(st, DR, -1)
+      local after_back = DR.path
+      -- wrap backwards from the start
+      for i = 1, back - 1 do ss_folder_step(st, DR, -1) end
+      local at_start = DR.path == start
+      local wpos = ss_folder_step(st, DR, -1)
+      local hit = DR.path
+      local nav = DR.folder_nav
+      return pos, n, p2, back, after_back == nav.paths[2], at_start, wpos, hit == nav.paths[n], DR.locked,
+             table.concat(seen, "|")
+    ''')
+    pos, n, p2, back, back_ok, at_start, wpos, wrap_ok, locked, seen = got
+    assert n == 5                     # five loops, the one-shot is not stepped through
+    assert pos == 2 and p2 == 3 and back == 2 and back_ok
+    assert at_start and wpos == n and wrap_ok
+    assert locked is True
+
+
+def test_folder_step_swaps_in_place_while_playing():
+    L = _runtime()
+    L.execute(FAKE_CF)
+    L.execute(FOLDER)
+    got = L.execute(r'''
+      local st = ss_state()
+      ss_preview_play()
+      local old = SS_PLAY.voices[DR.id]
+      NOW = NOW + 3.0
+      ss_folder_step(st, DR, 1)
+      local v = SS_PLAY.voices[DR.id]
+      return v ~= old, v.obj.vals.B_LOOP, v.obj.vals.D_POSITION ~= nil, SS_PLAY ~= nil
+    ''')
+    assert got == (True, 1, True, True)
+
+
+def test_folder_popup_lists_files_and_swaps_on_click():
+    L = _runtime()
+    L.execute(FOLDER)
+    got = L.execute(r'''
+      local st = ss_state()
+      reaper.EnumerateFiles = function(dir, i)
+        if dir == "/lib/Drums" and i == 0 then return "Unscanned Loop 120bpm.wav" end
+        if dir == "/lib/Drums" and i == 1 then return "readme.txt" end
+        return nil
+      end
+      reaper.PCM_Source_CreateFromFile = function(p) return { path = p } end
+      reaper.GetMediaSourceLength = function() return 8.0, false end
+      reaper.PCM_Source_Destroy = function() end
+      ss_folder_popup_open(st, DR)
+      local texts = {}
+      reaper.ImGui_BeginPopup = function(_, id) return id == "ss_folder_popup" end
+      reaper.ImGui_BeginChild = function() return true end
+      reaper.ImGui_DrawList_AddText = function(_, x, y, c, s) texts[#texts + 1] = s end
+      local n = ss_folder_popup(st, DR)
+      local joined = table.concat(texts, "|")
+      -- search narrows the list
+      st._folder.search = "unscanned"
+      local n2 = #ss_folder_popup_rows(st._folder)
+      st._folder.search = ""
+      -- click the row of the unscanned file
+      local target
+      for i, c in ipairs(ss_folder_popup_rows(st._folder)) do
+        if c.path:find("Unscanned", 1, true) then target = i end
+      end
+      local closed = false
+      reaper.ImGui_CloseCurrentPopup = function() closed = true end
+      reaper.ImGui_InvisibleButton = function(_, id) return id == "##ss_ff_" .. target end
+      ss_folder_popup(st, DR)
+      return n, joined:find("DRUMS", 1, true) ~= nil, joined:find("7 FILES", 1, true) ~= nil,
+             joined:find("readme", 1, true) ~= nil, n2, DR.path, DR.dur, closed, st._folder == nil
+    ''')
+    n, header, count, readme, n2, path, dur, closed, cleared = got
+    assert n == 7 and header and count and not readme
+    assert n2 == 1
+    assert path == "/lib/Drums/Unscanned Loop 120bpm.wav" and dur == 8.0
+    assert closed and cleared

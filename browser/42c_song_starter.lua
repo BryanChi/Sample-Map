@@ -1056,6 +1056,153 @@ function ss_do_reroll(which)
 end
 
 ---------------------------------------------------------------------------
+-- Folder browsing: the other files next to a slot's loop
+---------------------------------------------------------------------------
+
+function ss_path_dir(path)
+  return tostring(path or ""):match("^(.*)[/\\][^/\\]+$")
+end
+
+-- Candidate entry for any file, fitting or not: the relaxed (Chaos) limits
+-- first; failing those, an entry with its own tempo (or none: rate 1) and
+-- fit -1 so it sorts after everything that fits.
+function ss_candidate_any(s, role_key, target_bpm, target_key)
+  local c = ss_eval_candidate(s, role_key, target_bpm, target_key, ss_chaos_params(1))
+  if c then
+    c.fit = c.score
+    return c
+  end
+  local bpm, est, key = ss_sample_tempo_key(s, target_bpm)
+  local rate, mult = 1.0, 1
+  if bpm then
+    rate, mult = ss_stretch(bpm, target_bpm, true)
+  end
+  local role = SS_ROLE[role_key]
+  local shift = 0
+  if role and role.pitched and key and target_key then
+    shift = ss_pitch_shift(key, target_key) or 0
+  end
+  return { sample = s, path = s.path, role = role_key, bpm = bpm or target_bpm, est = est or not bpm, key = key,
+    rate = rate, mult = mult, shift = shift, strength = 0, score = -1, fit = -1 }
+end
+
+-- Library samples in dir, plus audio files there the library hasn't scanned
+-- (bare tables: path, name, unscanned = true).
+function ss_folder_files(dir)
+  local out, seen = {}, {}
+  if not dir then
+    return out
+  end
+  for _, s in ipairs(state.samples or {}) do
+    if s.path and ss_path_dir(s.path) == dir and not seen[s.path] then
+      seen[s.path] = true
+      out[#out + 1] = s
+    end
+  end
+  if r.EnumerateFiles then
+    local i = 0
+    while i < 4000 do
+      local ok, f = pcall(r.EnumerateFiles, dir, i)
+      if not ok or not f or f == "" then break end
+      local ext = (f:match("(%.[^.]+)$") or ""):lower()
+      local p = dir .. "/" .. f
+      if AUDIO_EXTS and AUDIO_EXTS[ext] and not seen[p] then
+        seen[p] = true
+        out[#out + 1] = { path = p, name = f, unscanned = true }
+      end
+      i = i + 1
+    end
+  end
+  return out
+end
+
+-- Every file in the slot's folder as candidates, best fit first (loops before
+-- one-shots, then by fit, then by name).
+function ss_folder_ranked(st, slot)
+  local dir = ss_path_dir(slot.path)
+  local out = {}
+  for _, s in ipairs(ss_folder_files(dir)) do
+    local c = ss_candidate_any(s, slot.role, st.target_bpm or 120, st.target_key)
+    c.loop = ss_is_loop(s) or (s.unscanned and detect_loop_or_oneshot
+      and detect_loop_or_oneshot(s.path, dir, nil, nil) == "loop") or false
+    out[#out + 1] = c
+  end
+  table.sort(out, function(a, b)
+    if a.loop ~= b.loop then return a.loop end
+    if math.abs(a.fit - b.fit) > 1e-9 then return a.fit > b.fit end
+    return tostring(a.path) < tostring(b.path)
+  end)
+  return out, dir
+end
+
+-- Stepping list for ◀ / ▶: the current loop first, then the folder's other
+-- loops by fit. Rebuilt when the slot's loop changed by other means.
+function ss_folder_nav(st, slot)
+  local nav = slot.folder_nav
+  if nav and nav.paths[nav.pos] == slot.path then
+    return nav
+  end
+  local ranked = ss_folder_ranked(st, slot)
+  local paths = { slot.path }
+  for _, c in ipairs(ranked) do
+    if c.loop and c.path ~= slot.path then paths[#paths + 1] = c.path end
+  end
+  nav = { paths = paths, pos = 1 }
+  slot.folder_nav = nav
+  return nav
+end
+
+-- Put file `s` (library sample or bare table) into the slot; locks stay.
+function ss_slot_swap_to(st, slot, s)
+  if s.unscanned and not s.duration and r.PCM_Source_CreateFromFile then
+    local src = r.PCM_Source_CreateFromFile(s.path)
+    if src then
+      s.duration = tonumber((r.GetMediaSourceLength(src)))
+      if r.PCM_Source_Destroy then r.PCM_Source_Destroy(src) end
+    end
+  end
+  local c = ss_candidate_any(s, slot.role, st.target_bpm or 120, st.target_key)
+  local nav = slot.folder_nav
+  ss_slot_take(slot, c)
+  slot.dur = tonumber(s.duration) or slot.dur
+  slot.relaxed = nil
+  if nav then
+    for i, p in ipairs(nav.paths) do
+      if p == s.path then nav.pos = i end
+    end
+  end
+  ss_preview_resync(slot)
+  ss_save()
+end
+
+-- ◀ (dir -1) / ▶ (dir 1) through the folder, wrapping. -> new position, count.
+function ss_folder_step(st, slot, dir)
+  if not slot.path then
+    return nil
+  end
+  local nav = ss_folder_nav(st, slot)
+  local n = #nav.paths
+  if n < 2 then
+    sm_notify("No other loops in this folder.", "warn")
+    return nav.pos, n
+  end
+  local pos = ((nav.pos - 1 + dir) % n) + 1
+  local path = nav.paths[pos]
+  local s = find_sample_by_path and find_sample_by_path(path)
+  if not s then
+    for _, f in ipairs(ss_folder_files(ss_path_dir(path))) do
+      if f.path == path then s = f end
+    end
+  end
+  if s then
+    nav.pos = pos
+    ss_slot_swap_to(st, slot, s)
+    nav.pos = pos
+  end
+  return pos, n
+end
+
+---------------------------------------------------------------------------
 -- Preview: all audible slots looped together through SWS CF_Preview
 ---------------------------------------------------------------------------
 
@@ -1526,6 +1673,21 @@ function ss_draw_icon(dl, kind, cx, cy, col, on)
     local a = -math.pi * 0.35
     local ex, ey = cx + math.cos(a) * rad, cy + math.sin(a) * rad
     r.ImGui_DrawList_AddTriangleFilled(dl, ex - 3.2, ey - 1.2, ex + 1.8, ey - 2.6, ex + 0.6, ey + 2.4, col)
+  elseif kind == "left" or kind == "right" then
+    local d = kind == "left" and -1 or 1
+    r.ImGui_DrawList_PathLineTo(dl, cx - d * 2, cy - 4)
+    r.ImGui_DrawList_PathLineTo(dl, cx + d * 2, cy)
+    r.ImGui_DrawList_PathLineTo(dl, cx - d * 2, cy + 4)
+    r.ImGui_DrawList_PathStroke(dl, col, 0, 1.25)
+  elseif kind == "folder" then
+    -- folder: tab on the top left, square body
+    r.ImGui_DrawList_PathLineTo(dl, cx - 5.5, cy + 4)
+    r.ImGui_DrawList_PathLineTo(dl, cx - 5.5, cy - 4)
+    r.ImGui_DrawList_PathLineTo(dl, cx - 1.5, cy - 4)
+    r.ImGui_DrawList_PathLineTo(dl, cx, cy - 2.5)
+    r.ImGui_DrawList_PathLineTo(dl, cx + 5.5, cy - 2.5)
+    r.ImGui_DrawList_PathLineTo(dl, cx + 5.5, cy + 4)
+    r.ImGui_DrawList_PathStroke(dl, col, closed, 1.25)
   elseif kind == "lock" then
     -- padlock: body + shackle (raised and swung open when unlocked)
     r.ImGui_DrawList_AddRect(dl, cx - 4.5, cy - 0.5, cx + 4.5, cy + 5.5, col, 0, 0, 1.25)
@@ -1823,6 +1985,114 @@ function ss_master_meter()
   return mm
 end
 
+-- Folder popup state for the slot whose folder icon was clicked.
+function ss_folder_popup_open(st, slot)
+  local list, dir = ss_folder_ranked(st, slot)
+  st._folder = { slot_id = slot.id, dir = dir, list = list, search = "", hover_path = nil }
+  ss_folder_nav(st, slot)
+end
+
+-- Rows of the folder popup after the search filter.
+function ss_folder_popup_rows(fs)
+  local q = tostring(fs.search or ""):lower()
+  local out = {}
+  for _, c in ipairs(fs.list or {}) do
+    local name = (c.sample and c.sample.name) or tostring(c.path):match("([^/\\]+)$") or ""
+    if q == "" or name:lower():find(q, 1, true) then
+      out[#out + 1] = c
+    end
+  end
+  return out
+end
+
+-- Every file in the slot's folder: name, bars, BPM, key, fit; one-shots
+-- greyed. Hover auditions it alone, click swaps it in and closes.
+function ss_folder_popup(st, slot)
+  local fs = st._folder
+  if not (fs and fs.slot_id == slot.id) then
+    return nil
+  end
+  if not r.ImGui_BeginPopup(ctx, "ss_folder_popup") then
+    if fs.open_seen then
+      st._folder = nil -- it was open and got closed
+    end
+    return nil
+  end
+  fs.open_seen = true
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local w = 520
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  local folder = tostring(fs.dir or ""):match("([^/\\]+)$") or tostring(fs.dir)
+  if seq_truncate_text_to_width then
+    folder = seq_truncate_text_to_width(string.upper(folder), w - 80) or folder
+  end
+  ss_text(dl, x, y, SS_COL.text, folder)
+  local cnt = string.format("%d FILES", #(fs.list or {}))
+  local cw = r.ImGui_CalcTextSize(ctx, cnt) or 0
+  ss_text(dl, x + w - cw, y, SS_COL.mute, cnt)
+  r.ImGui_Dummy(ctx, w, 16)
+  r.ImGui_SetNextItemWidth(ctx, w)
+  local changed, q = r.ImGui_InputTextWithHint(ctx, "##ss_folder_search", "Search this folder", fs.search or "")
+  if changed and type(q) == "string" then
+    fs.search = q
+  end
+  local rows = ss_folder_popup_rows(fs)
+  local picked = nil
+  local row_h = 20
+  local list_h = math.min(320, math.max(row_h, #rows * row_h))
+  if r.ImGui_BeginChild(ctx, "##ss_folder_list", w, list_h, 0) then
+    local cdl = r.ImGui_GetWindowDrawList(ctx)
+    local col_bars, col_bpm, col_key, col_fit = w - 196, w - 150, w - 98, w - 52
+    for i, c in ipairs(rows) do
+      local s = c.sample
+      if r.ImGui_InvisibleButton(ctx, "##ss_ff_" .. i, w - 12, row_h) then
+        picked = s
+      end
+      local rx, ry = r.ImGui_GetItemRectMin(ctx)
+      local hov = r.ImGui_IsItemHovered(ctx)
+      local current = c.path == slot.path
+      if hov or current then
+        r.ImGui_DrawList_AddRectFilled(cdl, rx, ry, rx + w - 12, ry + row_h, current and SS_COL.accent_d or 0xFFFFFF0C, 0)
+      end
+      local col = current and SS_COL.accent or (c.loop and SS_COL.text or SS_COL.mute)
+      local dim = c.loop and SS_COL.dim or SS_COL.mute
+      local name = (s and s.name) or tostring(c.path):match("([^/\\]+)$") or "?"
+      if seq_truncate_text_to_width then
+        name = seq_truncate_text_to_width(name, col_bars - 10) or name
+      end
+      local ty = ry + 3
+      ss_text(cdl, rx + 4, ty, col, name)
+      local bars = ss_slot_bars({ dur = tonumber(s and s.duration), rate = c.rate }, st.target_bpm or 120)
+      ss_text(cdl, rx + col_bars, ty, dim, bars and (bars == math.floor(bars) and string.format("%d BAR", bars)
+        or string.format("%.2g BAR", bars)) or "--")
+      ss_text(cdl, rx + col_bpm, ty, dim, c.bpm and string.format("%s%.0f", c.est and "~" or "", c.bpm) or "--")
+      ss_text(cdl, rx + col_key, ty, dim, c.key or "--")
+      -- fit: a short bar, full = best fit, empty = doesn't fit
+      local fit = math.max(0, math.min(1, ((c.fit or -1) + 0.0) / 5.0))
+      r.ImGui_DrawList_AddRect(cdl, rx + col_fit, ry + 7, rx + col_fit + 36, ry + 13, SS_COL.line, 0, 0, 1)
+      if fit > 0 then
+        r.ImGui_DrawList_AddRectFilled(cdl, rx + col_fit + 1, ry + 8, rx + col_fit + 1 + 34 * fit, ry + 12,
+          c.loop and SS_COL.accent or SS_COL.mute, 0)
+      end
+      if hov and fs.hover_path ~= c.path then
+        fs.hover_path = c.path
+        if preview_sample and s then
+          ss_preview_stop()
+          pcall(preview_sample, s)
+        end
+      end
+    end
+    r.ImGui_EndChild(ctx)
+  end
+  if picked then
+    ss_slot_swap_to(st, slot, picked)
+    r.ImGui_CloseCurrentPopup(ctx)
+    st._folder = nil
+  end
+  r.ImGui_EndPopup(ctx)
+  return #rows
+end
+
 local function ss_slot_row(st, slot, i, row_w)
   local role = SS_ROLE[slot.role] or SS_ROLES[1]
   local row_h = 40
@@ -1902,6 +2172,10 @@ local function ss_slot_row(st, slot, i, row_w)
   local cx = x1 - ctrl_w - 6 - meter_w
   local name_x = x0 + role_w + 8
   local name_w = math.max(40, cx - name_x - 8)
+  -- ◀ folder ▶ at the right end of the name column; text stops before it
+  local nav_w = slot.path and (3 * 18 + 2 * 3) or 0
+  local col_w = name_w
+  name_w = math.max(30, col_w - nav_w - (nav_w > 0 and 8 or 0))
 
   r.ImGui_SetCursorScreenPos(ctx, name_x - 4, y0 + 1)
   if r.ImGui_InvisibleButton(ctx, "##name", name_w + 4, row_h - 2) and slot.path then
@@ -1972,6 +2246,28 @@ local function ss_slot_row(st, slot, i, row_w)
   if meter_w > 0 then
     local v = SS_PLAY and SS_PLAY.voices[slot.id]
     ss_draw_meter(dl, x1 - 6 - SS_METER_W, y0 + 6, SS_METER_W, row_h - 12, v and v.meter or nil, false)
+  end
+  if nav_w > 0 then
+    if r.ImGui_IsMouseHoveringRect and r.ImGui_IsMouseHoveringRect(ctx, name_x + col_w - nav_w, y0, name_x + col_w, y1) then
+      ss_folder_nav(st, slot) -- for the "n / N in folder" tooltip
+    end
+    local nav = slot.folder_nav
+    local where = (nav and nav.paths[nav.pos] == slot.path) and string.format("%d / %d in folder", nav.pos, #nav.paths) or nil
+    r.ImGui_SetCursorScreenPos(ctx, name_x + col_w - nav_w, y0 + (row_h - 18) * 0.5)
+    if ss_icon_btn("##fold_prev", "left", 18, 18, false, "Previous loop in this folder, by fit" .. (where and ("\n" .. where) or "")) then
+      ss_folder_step(st, slot, -1)
+    end
+    r.ImGui_SameLine(ctx, 0, 3)
+    if ss_icon_btn("##fold_open", "folder", 18, 18, false, "Every file in this folder: hover to hear, click to swap"
+        .. (where and ("\n" .. where) or "")) then
+      ss_folder_popup_open(st, slot)
+      r.ImGui_OpenPopup(ctx, "ss_folder_popup")
+    end
+    r.ImGui_SameLine(ctx, 0, 3)
+    if ss_icon_btn("##fold_next", "right", 18, 18, false, "Next loop in this folder, by fit" .. (where and ("\n" .. where) or "")) then
+      ss_folder_step(st, slot, 1)
+    end
+    ss_folder_popup(st, slot)
   end
 
   local by = y0 + (row_h - 22) * 0.5
