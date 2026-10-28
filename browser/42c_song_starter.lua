@@ -1514,6 +1514,52 @@ local function ss_btn(id, label, w, h, on, tip)
   return clicked
 end
 
+-- Monolith line icons (1.25 px strokes), centred on cx, cy.
+function ss_draw_icon(dl, kind, cx, cy, col, on)
+  cx, cy = math.floor(cx) + 0.5, math.floor(cy) + 0.5
+  local closed = r.ImGui_DrawFlags_Closed and r.ImGui_DrawFlags_Closed() or 1
+  if kind == "roll" then
+    -- circular arrow: three-quarter arc with a head at its end
+    local rad = 4.5
+    r.ImGui_DrawList_PathArcTo(dl, cx, cy, rad, -math.pi * 0.35, math.pi * 1.25, 14)
+    r.ImGui_DrawList_PathStroke(dl, col, 0, 1.25)
+    local a = -math.pi * 0.35
+    local ex, ey = cx + math.cos(a) * rad, cy + math.sin(a) * rad
+    r.ImGui_DrawList_AddTriangleFilled(dl, ex - 3.2, ey - 1.2, ex + 1.8, ey - 2.6, ex + 0.6, ey + 2.4, col)
+  elseif kind == "lock" then
+    -- padlock: body + shackle (raised and swung open when unlocked)
+    r.ImGui_DrawList_AddRect(dl, cx - 4.5, cy - 0.5, cx + 4.5, cy + 5.5, col, 0, 0, 1.25)
+    if on then
+      r.ImGui_DrawList_AddRectFilled(dl, cx - 4.5, cy - 0.5, cx + 4.5, cy + 5.5, col, 0)
+    end
+    local sx, sy = cx, cy - 0.5
+    if not on then sx, sy = cx + 3, cy - 2.5 end
+    r.ImGui_DrawList_PathLineTo(dl, sx - 2.75, sy)
+    r.ImGui_DrawList_PathArcTo(dl, sx, sy - 2.5, 2.75, math.pi, 2 * math.pi, 10)
+    r.ImGui_DrawList_PathLineTo(dl, sx + 2.75, on and sy or sy + 0.5)
+    r.ImGui_DrawList_PathStroke(dl, col, 0, 1.25)
+  end
+end
+
+-- Square icon button (same frame as ss_btn). -> clicked.
+local function ss_icon_btn(id, kind, w, h, on, tip)
+  local clicked = r.ImGui_InvisibleButton(ctx, id, w, h)
+  local x0, y0 = r.ImGui_GetItemRectMin(ctx)
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local active = r.ImGui_IsItemActive(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local fill = on and SS_COL.accent_d or (active and 0xFFFFFF14 or (hovered and 0xFFFFFF0C or 0))
+  if fill ~= 0 then
+    r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h, fill, 0)
+  end
+  r.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h, on and SS_COL.accent or (hovered and SS_COL.line_hi or SS_COL.line), 0, 0, 1)
+  ss_draw_icon(dl, kind, x0 + w * 0.5, y0 + h * 0.5, on and SS_COL.accent or (hovered and SS_COL.text or SS_COL.dim), on)
+  if tip and hovered then
+    r.ImGui_SetTooltip(ctx, tip)
+  end
+  return clicked
+end
+
 local function ss_push_style()
   local cols = {
     { r.ImGui_Col_WindowBg, SS_COL.bg }, { r.ImGui_Col_ChildBg, 0x00000000 }, { r.ImGui_Col_PopupBg, ui_tc(0x0A0A0AFF) },
@@ -1799,16 +1845,41 @@ local function ss_slot_row(st, slot, i, row_w)
   -- Role label: click to change role or remove the slot.
   local role_w = 92
   r.ImGui_SetCursorScreenPos(ctx, x0 + 1, y0 + 1)
-  if r.ImGui_InvisibleButton(ctx, "##role", role_w, row_h - 2) then
+  if r.ImGui_InvisibleButton(ctx, "##role", role_w - 2, 17) then
     r.ImGui_OpenPopup(ctx, "ss_role_menu")
   end
   local role_hover = r.ImGui_IsItemHovered(ctx)
   if role_hover then
     r.ImGui_SetTooltip(ctx, "Change this slot's role or remove it")
   end
-  ss_text(dl, x0 + 8, y0 + 7, (slot.locked or playing) and SS_COL.accent or (role_hover and SS_COL.text or SS_COL.dim),
-    string.upper(role.label))
-  ss_text(dl, x0 + 8, y0 + 22, SS_COL.mute, string.format("%02d", i))
+  local role_label = string.upper(role.label)
+  if seq_truncate_text_to_width then
+    role_label = seq_truncate_text_to_width(role_label, role_w - 12) or role_label
+  end
+  ss_text(dl, x0 + 6, y0 + 3, (slot.locked or playing) and SS_COL.accent or (role_hover and SS_COL.text or SS_COL.dim),
+    role_label)
+  -- ROLL / LOCK / M / S under the role name
+  local bw, bh, gap = 18, 16, 4
+  r.ImGui_SetCursorScreenPos(ctx, x0 + 6, y0 + 20)
+  if ss_icon_btn("##roll", "roll", bw, bh, false, "Pick another loop for this slot") then
+    ss_do_reroll(slot)
+  end
+  r.ImGui_SameLine(ctx, 0, gap)
+  if ss_icon_btn("##lock", "lock", bw, bh, slot.locked, slot.locked and "Locked: Re-roll / New Batch keep this loop"
+      or "Lock: keep this loop on Re-roll / New Batch") then
+    slot.locked = not slot.locked
+    ss_save()
+  end
+  r.ImGui_SameLine(ctx, 0, gap)
+  if ss_btn("##mute", "M", bw, bh, slot.muted, "Mute (M key while hovering the row)") then
+    slot.muted = not slot.muted
+    ss_save()
+  end
+  r.ImGui_SameLine(ctx, 0, gap)
+  if ss_btn("##solo", "S", bw, bh, slot.solo, "Solo (S key while hovering the row)") then
+    slot.solo = not slot.solo
+    ss_save()
+  end
   r.ImGui_DrawList_AddLine(dl, x0 + role_w, y0 + 6, x0 + role_w, y1 - 6, SS_COL.line, 1)
   if r.ImGui_BeginPopup(ctx, "ss_role_menu") then
     for _, ro in ipairs(SS_ROLES) do
@@ -1825,8 +1896,8 @@ local function ss_slot_row(st, slot, i, row_w)
     r.ImGui_EndPopup(ctx)
   end
 
-  -- Controls on the right.
-  local ctrl_w = 64 + 38 + 40 + 22 + 22 + 60 + 6 * 5
+  -- Volume on the right.
+  local ctrl_w = 92
   local meter_w = ss_meter_available() and (SS_METER_W + 8) or 0
   local cx = x1 - ctrl_w - 6 - meter_w
   local name_x = x0 + role_w + 8
@@ -1905,26 +1976,7 @@ local function ss_slot_row(st, slot, i, row_w)
 
   local by = y0 + (row_h - 22) * 0.5
   r.ImGui_SetCursorScreenPos(ctx, cx, by)
-  if ss_btn("##roll", "ROLL", 64, 22, false, "Pick another loop for this slot") then
-    ss_do_reroll(slot)
-  end
-  r.ImGui_SameLine(ctx, 0, 6)
-  if ss_btn("##lock", "LOCK", 38 + 2, 22, slot.locked, "Keep this loop on Re-roll / New Batch") then
-    slot.locked = not slot.locked
-    ss_save()
-  end
-  r.ImGui_SameLine(ctx, 0, 6)
-  if ss_btn("##mute", "M", 22, 22, slot.muted, "Mute (M key while hovering the row)") then
-    slot.muted = not slot.muted
-    ss_save()
-  end
-  r.ImGui_SameLine(ctx, 0, 6)
-  if ss_btn("##solo", "S", 22, 22, slot.solo, "Solo (S key while hovering the row)") then
-    slot.solo = not slot.solo
-    ss_save()
-  end
-  r.ImGui_SameLine(ctx, 0, 6)
-  r.ImGui_SetNextItemWidth(ctx, 60 + 32)
+  r.ImGui_SetNextItemWidth(ctx, ctrl_w)
   local changed, v = r.ImGui_SliderDouble(ctx, "##vol", tonumber(slot.vol) or 1.0, 0.0, 1.5, "%.2f")
   if changed and type(v) == "number" then
     slot.vol = v
@@ -1951,20 +2003,42 @@ function ss_rel_time(t, now)
 end
 
 -- Heart outline / fill centred on cx, cy (two arcs + a point), size = width.
-function ss_draw_heart(dl, cx, cy, size, col, filled)
-  local r0 = size * 0.27
-  local lx, rx, ty = cx - r0, cx + r0, cy - size * 0.12
-  local by = cy + size * 0.42
-  if filled then
-    r.ImGui_DrawList_AddCircleFilled(dl, lx, ty, r0, col)
-    r.ImGui_DrawList_AddCircleFilled(dl, rx, ty, r0, col)
-    r.ImGui_DrawList_AddTriangleFilled(dl, cx - 2 * r0 + 0.3, ty + r0 * 0.35, cx + 2 * r0 - 0.3, ty + r0 * 0.35, cx, by, col)
-  else
-    r.ImGui_DrawList_AddCircle(dl, lx, ty, r0, col, 12, 1)
-    r.ImGui_DrawList_AddCircle(dl, rx, ty, r0, col, 12, 1)
-    r.ImGui_DrawList_AddLine(dl, cx - 2 * r0, ty + r0 * 0.2, cx, by, col, 1)
-    r.ImGui_DrawList_AddLine(dl, cx + 2 * r0, ty + r0 * 0.2, cx, by, col, 1)
+-- One continuous heart outline as points (classic parametric heart:
+-- x = 16 sin^3 t, y = 13 cos t - 5 cos 2t - 2 cos 3t - cos 4t), size = width,
+-- centred on cx, cy. -> { x1, y1, x2, y2, ... }
+function ss_heart_points(cx, cy, size, n)
+  n = n or 28
+  local k = size / 32
+  local pts = {}
+  for i = 0, n - 1 do
+    local t = (i / n) * 2 * math.pi
+    local sx = 16 * math.sin(t) ^ 3
+    local sy = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+    pts[#pts + 1] = cx + sx * k
+    pts[#pts + 1] = cy - (sy + 2.5) * k
   end
+  return pts
+end
+
+function ss_draw_heart(dl, cx, cy, size, col, filled)
+  cx, cy = math.floor(cx) + 0.5, math.floor(cy) + 0.5
+  local pts = ss_heart_points(cx, cy, size)
+  if filled then
+    if r.ImGui_DrawList_PathFillConcave then
+      for i = 1, #pts, 2 do r.ImGui_DrawList_PathLineTo(dl, pts[i], pts[i + 1]) end
+      r.ImGui_DrawList_PathFillConcave(dl, col)
+    else
+      -- the heart is star-shaped around its middle: a triangle fan fills it
+      local mx, my = cx, cy - 0.5 * size / 32
+      for i = 1, #pts, 2 do
+        local j = (i + 2 > #pts) and 1 or (i + 2)
+        r.ImGui_DrawList_AddTriangleFilled(dl, mx, my, pts[i], pts[i + 1], pts[j], pts[j + 1], col)
+      end
+    end
+  end
+  for i = 1, #pts, 2 do r.ImGui_DrawList_PathLineTo(dl, pts[i], pts[i + 1]) end
+  local closed = r.ImGui_DrawFlags_Closed and r.ImGui_DrawFlags_Closed() or 1
+  r.ImGui_DrawList_PathStroke(dl, col, closed, 1.25)
 end
 
 -- History entries the strip shows (newest first), with the filter applied.
@@ -2516,7 +2590,10 @@ function render_song_starter_window()
     local focus_rc = r.ImGui_FocusedFlags_RootAndChildWindows and r.ImGui_FocusedFlags_RootAndChildWindows() or 0
     SS_WINDOW_HOT = (r.ImGui_IsWindowHovered(ctx, flags_rc) or r.ImGui_IsWindowFocused(ctx, focus_rc)) and true or false
     sm_mono_space_backdrop()
+    -- tooltips from this window are laid out and drawn in its font
+    HINT_FONT_KIND = SM_MONO_SPACE and "cond" or nil
     local ok, err = pcall(ss_window_body, st)
+    HINT_FONT_KIND = nil
     if not ok and sm_report_error then
       sm_report_error("Song Starter", err)
     end

@@ -372,8 +372,11 @@ local function hint_flow(c, atoms, x0, max_w, m, ops, y0, row_col)
   return used, lines
 end
 
-function hint_layout(c, text)
-  local cached = hint_state.layouts[text]
+-- key: cache key (font + text); a layout measured in one font must never be
+-- drawn in another, or words run into each other.
+function hint_layout(c, text, key)
+  key = key or text
+  local cached = hint_state.layouts[key]
   if cached then
     return cached
   end
@@ -452,7 +455,7 @@ function hint_layout(c, text)
     hint_state.layouts = {}
     hint_state.layout_count = 0
   end
-  hint_state.layouts[text] = layout
+  hint_state.layouts[key] = layout
   hint_state.layout_count = hint_state.layout_count + 1
   return layout
 end
@@ -642,6 +645,9 @@ local function hint_capture(c, text, opts)
     anchor = anchor,
     item = item,
     vp = vp,
+    -- Monolith Space font the requesting window draws in (HINT_FONT_KIND,
+    -- set by windows such as Song Starter); nil = the theme's body font.
+    font = HINT_FONT_KIND,
   }
 end
 
@@ -743,7 +749,11 @@ function hint_card_flush()
     f = 0.25 + 0.75 * f
   end
 
-  local layout = hint_layout(c, req.text)
+  -- Measure and draw in the same font: the requester's (or the body font
+  -- the theme pushes for the frame); the cache key carries font and look.
+  local font_pushed = req.font and c == ctx and sm_mono_push_font and sm_mono_push_font(req.font) or false
+  local layout = hint_layout(c, req.text,
+    (SM_MONO_SPACE and "space:" or "classic:") .. tostring(font_pushed and req.font or "") .. ":" .. req.text)
   local cs = HINT_CARD.caret
   local x, y, side = hint_place(req, layout.w + 2, layout.h)
   if not x then
@@ -770,6 +780,9 @@ function hint_card_flush()
   end
   if pushed_vars > 0 then
     r.ImGui_PopStyleVar(c, pushed_vars)
+  end
+  if font_pushed then
+    r.ImGui_PopFont(c)
   end
 end
 

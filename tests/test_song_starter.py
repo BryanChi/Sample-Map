@@ -1280,3 +1280,114 @@ def test_relative_time_labels():
     assert f(1000, 1000 + 5 * 60) == "5m"
     assert f(1000, 1000 + 3 * 3600) == "3h"
     assert f(1000, 1000 + 2 * 86400) == "2d"
+
+
+# --- Heart, row controls, themed tooltips --------------------------------------
+
+def test_heart_is_one_symmetric_closed_path():
+    L = _runtime()
+    got = L.execute(r'''
+      local p = ss_heart_points(100, 100, 32, 28)
+      local n = #p // 2
+      local minx, maxx, miny, maxy = 1e9, -1e9, 1e9, -1e9
+      for i = 1, #p, 2 do
+        minx, maxx = math.min(minx, p[i]), math.max(maxx, p[i])
+        miny, maxy = math.min(miny, p[i + 1]), math.max(maxy, p[i + 1])
+      end
+      -- t = 0 is the dip between the lobes, t = pi the point at the bottom
+      local dip_y, point_y = p[2], p[n + 2]
+      -- mirror symmetry: point i and point n - i
+      local sym = 0
+      for i = 1, n - 1 do
+        local a, b = i + 1, n - i + 1
+        sym = math.max(sym, math.abs((p[2 * a - 1] - 100) + (p[2 * b - 1] - 100)), math.abs(p[2 * a] - p[2 * b]))
+      end
+      local strokes, fills = 0, 0
+      reaper.ImGui_DrawList_PathStroke = function(_, col, flags, th) strokes = strokes + 1; CLOSED = flags end
+      reaper.ImGui_DrawList_PathFillConcave = function() fills = fills + 1 end
+      reaper.ImGui_DrawFlags_Closed = function() return 1 end
+      ss_draw_heart({}, 100, 100, 14, 0xFFFFFFFF, false)
+      local s1, f1 = strokes, fills
+      ss_draw_heart({}, 100, 100, 14, 0xFFFFFFFF, true)
+      return n, maxx - minx, dip_y > miny + 3, point_y == maxy, sym < 1e-9, s1, f1, strokes, fills, CLOSED
+    ''')
+    n, width, dip_ok, point_ok, sym_ok, s1, f1, s2, f2, closed = got
+    assert n == 28 and abs(width - 32) < 1.0
+    assert dip_ok and point_ok and sym_ok
+    assert (s1, f1, s2, f2, closed) == (1, 0, 2, 1, 1)
+
+
+def test_row_controls_on_the_left_without_index():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key, st.open = 120, 0.0, false, "Am", true
+      ss_do_reroll("batch")
+      local texts, ids, arcs = {}, {}, 0
+      reaper.ImGui_DrawList_AddText = function(_, x, y, c, s) texts[#texts + 1] = s end
+      reaper.ImGui_InvisibleButton = function(_, id) ids[#ids + 1] = id; return false end
+      reaper.ImGui_DrawList_PathArcTo = function() arcs = arcs + 1 end
+      local cursor = {}
+      reaper.ImGui_SetCursorScreenPos = function(_, x, y) cursor[#cursor + 1] = { x, y } end
+      render_song_starter_window()
+      local joined = "|" .. table.concat(texts, "|") .. "|"
+      local has_index = joined:find("|01|", 1, true) ~= nil or joined:find("|02|", 1, true) ~= nil
+      local have = {}
+      for _, id in ipairs(ids) do have[id] = (have[id] or 0) + 1 end
+      -- clicking the roll icon re-rolls; the lock icon locks
+      local slot = st.slots[1]
+      local before = slot.path
+      reaper.ImGui_InvisibleButton = function(_, id) return id == "##roll" end
+      render_song_starter_window()
+      local rolled = slot.path ~= before
+      reaper.ImGui_InvisibleButton = function(_, id) return id == "##lock" end
+      render_song_starter_window()
+      return #ERRORS, ERRORS[1], has_index, have["##roll"], have["##lock"], have["##mute"], have["##solo"],
+             arcs >= #st.slots * 2, rolled, slot.locked
+    ''')
+    n_err, first, has_index, n_roll, n_lock, n_mute, n_solo, icons, rolled, locked = got
+    n = 6
+    assert n_err == 0, first
+    assert not has_index
+    assert n_roll == n and n_lock == n and n_mute == n and n_solo == n
+    assert icons and rolled and locked is True
+
+
+def test_song_starter_tooltips_measure_and_draw_in_its_font():
+    L = _runtime()
+    got = L.execute(r'''
+      SM_MONO_SPACE = true
+      SM_MONO_FONTS = SM_MONO_FONTS or {}
+      SM_MONO_FONTS.cond = { name = "cond" }
+      local stack, measured_in, drawn_in = {}, {}, {}
+      reaper.ImGui_PushFont = function(_, f) stack[#stack + 1] = f.name or "?" end
+      reaper.ImGui_PopFont = function() stack[#stack] = nil end
+      local function cur() return stack[#stack] or "body" end
+      reaper.ImGui_CalcTextSize = function(_, s)
+        measured_in[cur()] = true
+        return #tostring(s) * (cur() == "cond" and 6 or 7), 14
+      end
+      reaper.ImGui_DrawList_AddText = function() drawn_in[cur()] = true end
+      reaper.ImGui_BeginTooltip = function() return true end
+      reaper.ImGui_GetMousePos = function() return 10, 10 end
+      hint_state.layouts, hint_state.layout_count = {}, 0
+      hint_state.still_since = NOW - 10
+      hint_state.still_x, hint_state.still_y = 10, 10
+      HINT_FONT_KIND = "cond"
+      hint_request(ctx, "Solo (S key while hovering the row)")
+      HINT_FONT_KIND = nil
+      hint_card_flush()
+      local keys = {}
+      for k in pairs(hint_state.layouts) do keys[#keys + 1] = k end
+      -- same text from a window in the body font: a separate layout
+      hint_state.still_since = NOW - 10
+      hint_request(ctx, "Solo (S key while hovering the row)")
+      hint_card_flush()
+      local n = 0
+      for _ in pairs(hint_state.layouts) do n = n + 1 end
+      return measured_in.cond == true, drawn_in.cond == true, #stack, keys[1], n
+    ''')
+    measured, drawn, depth, key, n_layouts = got
+    assert measured and drawn and depth == 0
+    assert key.startswith("space:cond:")
+    assert n_layouts == 2
