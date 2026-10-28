@@ -183,10 +183,11 @@ function mono_corner_ticks(dl, x0, y0, x1, y1, col, k)
   add_line(dl, x1, y1, x1, y1 - k, col, 1)
 end
 
--- Uppercase caption with a little letter spacing. -> width drawn.
+-- Uppercase caption in letter-spaced JetBrains Mono SemiBold. -> width drawn.
 function mono_caps_text(dl, x, y, col, text, spacing)
   spacing = spacing or 1.5
   local s = string.upper(text or "")
+  local pushed = sm_mono_push_font("bold")
   local cx = x
   local add_text, calc = r.ImGui_DrawList_AddText, r.ImGui_CalcTextSize
   for i = 1, #s do
@@ -194,7 +195,207 @@ function mono_caps_text(dl, x, y, col, text, spacing)
     add_text(dl, cx, y, col, ch)
     cx = cx + (calc(ctx, ch) or 7) + spacing
   end
+  if pushed then
+    r.ImGui_PopFont(ctx)
+  end
   return cx - x - spacing
+end
+
+-- Width of mono_caps_text(text) without drawing it.
+function mono_caps_width(text, spacing)
+  spacing = spacing or 1.5
+  local s = string.upper(text or "")
+  local pushed = sm_mono_push_font("bold")
+  local w = (r.ImGui_CalcTextSize(ctx, s) or (#s * 7)) + math.max(0, #s - 1) * spacing
+  if pushed then
+    r.ImGui_PopFont(ctx)
+  end
+  return w
+end
+
+-- --- Fonts --------------------------------------------------------------------
+-- JetBrains Mono (assets/fonts) for Monolith Space; created and attached at
+-- startup next to the Classic font, pushed per frame only while the look is on.
+SM_MONO_FONT_SIZE = 13
+SM_MONO_FONTS = {}
+
+local function reaimgui_ge(major, minor)
+  if not r.ImGui_GetVersion then
+    return false
+  end
+  local _, _, rv = r.ImGui_GetVersion()
+  local a, b = tostring(rv or ""):match("^(%d+)%.(%d+)")
+  a, b = tonumber(a), tonumber(b)
+  if not a then
+    return false
+  end
+  return a > major or (a == major and b >= minor)
+end
+
+SM_IMGUI_FONT_SIZE_ARG = reaimgui_ge(0, 10)
+
+local function create_font(file, size)
+  local path = (SCRIPT_DIR or ".") .. "/assets/fonts/" .. file
+  local exists = r.file_exists and r.file_exists(path)
+  local ok, f
+  if exists and SM_IMGUI_FONT_SIZE_ARG and r.ImGui_CreateFontFromFile then
+    ok, f = pcall(r.ImGui_CreateFontFromFile, path)
+  elseif exists then
+    ok, f = pcall(r.ImGui_CreateFont, path, size)
+  end
+  if not (ok and f) then
+    ok, f = pcall(r.ImGui_CreateFont, "monospace", size)
+  end
+  return ok and f or nil
+end
+
+-- Call right after the ImGui context is created (before its first frame).
+function sm_mono_fonts_create(ctx_)
+  SM_MONO_FONTS = {}
+  if not (ctx_ and r.ImGui_Attach) then
+    return
+  end
+  for key, file in pairs({ body = "JetBrainsMono-Medium.ttf", bold = "JetBrainsMono-SemiBold.ttf" }) do
+    local f = create_font(file, SM_MONO_FONT_SIZE)
+    if f and pcall(r.ImGui_Attach, ctx_, f) then
+      SM_MONO_FONTS[key] = f
+    end
+  end
+end
+
+-- Push a Monolith Space font ("body" or "bold"). -> true when pushed (then PopFont).
+function sm_mono_push_font(kind)
+  if not SM_MONO_SPACE or not r.ImGui_PushFont then
+    return false
+  end
+  local f = SM_MONO_FONTS[kind or "body"]
+  if not f then
+    return false
+  end
+  if SM_IMGUI_FONT_SIZE_ARG then
+    r.ImGui_PushFont(ctx, f, SM_MONO_FONT_SIZE)
+  else
+    r.ImGui_PushFont(ctx, f)
+  end
+  return true
+end
+
+-- --- Space recolour -----------------------------------------------------------
+local function hsv_from_rgb(rr, gg, bb)
+  local mx, mn = math.max(rr, gg, bb), math.min(rr, gg, bb)
+  local d = mx - mn
+  local h = 0
+  if d > 0 then
+    if mx == rr then
+      h = ((gg - bb) / d) % 6
+    elseif mx == gg then
+      h = (bb - rr) / d + 2
+    else
+      h = (rr - gg) / d + 4
+    end
+    h = h * 60
+  end
+  return h, (mx > 0) and d / mx or 0, mx
+end
+
+local function rgb_from_hsv(h, s, v)
+  local c = v * s
+  local x = c * (1 - math.abs((h / 60) % 2 - 1))
+  local m = v - c
+  local rr, gg, bb
+  if h < 60 then rr, gg, bb = c, x, 0
+  elseif h < 120 then rr, gg, bb = x, c, 0
+  elseif h < 180 then rr, gg, bb = 0, c, x
+  elseif h < 240 then rr, gg, bb = 0, x, c
+  elseif h < 300 then rr, gg, bb = x, 0, c
+  else rr, gg, bb = c, 0, x end
+  return rr + m, gg + m, bb + m
+end
+
+local function clamp_byte(v)
+  return math.max(0, math.min(255, math.floor(v + 0.5)))
+end
+
+-- Classic fixed colour -> Monolith Space: neutral grays take the blue-violet
+-- cast of the space palette, accent greens turn toward the cyan accent.
+-- Anything else (amber, red, lime role colours...) is returned unchanged.
+function sm_space_tone(c)
+  if type(c) ~= "number" then
+    return c
+  end
+  local rr, gg, bb, a = (c >> 24) & 0xFF, (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF
+  local mx, mn = math.max(rr, gg, bb), math.min(rr, gg, bb)
+  local nr, ng, nb
+  if mx - mn <= 10 and mx >= 0x08 and mx <= 0xF4 then
+    local l = (rr + gg + bb) / 3
+    if l < 0x80 then
+      nr, ng, nb = l * 0.86, l * 0.9, l * 1.3 + 3
+    else
+      nr, ng, nb = l * 0.97, l * 0.985, l * 1.04 + 4
+    end
+  elseif gg >= rr + 30 and gg >= bb + 20 and gg >= 0x30 and bb >= rr then
+    local h, s, v = hsv_from_rgb(rr / 255, gg / 255, bb / 255)
+    nr, ng, nb = rgb_from_hsv((h + 62) % 360, s * 0.72, v)
+    nr, ng, nb = nr * 255, ng * 255, nb * 255
+  else
+    return c
+  end
+  return (clamp_byte(nr) << 24) | (clamp_byte(ng) << 16) | (clamp_byte(nb) << 8) | a
+end
+
+-- --- Tick-ring knob -----------------------------------------------------------
+-- Monolith knob (as FX Devices' MONO.Knob): thin track, ticks between ring
+-- and cap that light up to the value, accent value arc, dark cap + pointer.
+-- o: hovered, active, arc (colour), bipolar.
+function mono_knob(dl, cx, cy, rad, t, o)
+  o = o or {}
+  t = math.max(0, math.min(1, t or 0))
+  local A0, A1 = math.pi * 0.75, math.pi * 2.25
+  local acc = o.arc or MONO_COL.accent
+  local seg = math.max(18, math.floor(rad * 1.8))
+  local arc_w = rad >= 16 and 2 or 1.6
+  local arc_r = rad - arc_w / 2
+  local ticks = rad >= 11
+  local cap_r = rad - (ticks and math.max(5, rad * 0.3) or math.max(3, rad * 0.24))
+  local add_line = r.ImGui_DrawList_AddLine
+  local has_path = r.ImGui_DrawList_PathArcTo and r.ImGui_DrawList_PathStroke
+  local function arc(a0, a1, col)
+    if has_path then
+      r.ImGui_DrawList_PathArcTo(dl, cx, cy, arc_r, a0, a1, seg)
+      r.ImGui_DrawList_PathStroke(dl, col, 0, arc_w)
+    else
+      local n = math.max(6, math.floor(seg * (a1 - a0) / (A1 - A0)))
+      local px, py
+      for i = 0, n do
+        local a = a0 + (a1 - a0) * i / n
+        local ax, ay = cx + math.cos(a) * arc_r, cy + math.sin(a) * arc_r
+        if px then add_line(dl, px, py, ax, ay, col, arc_w) end
+        px, py = ax, ay
+      end
+    end
+  end
+  arc(A0, A1, o.hovered and 0xC8D2FF38 or 0xB4C0FF22)
+  if ticks then
+    local n = 10
+    local r1, r2 = cap_r + 2, arc_r - arc_w / 2 - 1.5
+    for i = 0, n do
+      local a = A0 + (A1 - A0) * i / n
+      local lit = (i / n) <= t + 0.001
+      local col = lit and (o.hovered and 0xE6E9F6B8 or 0xE6E9F678) or 0xB4C0FF2A
+      local ca, sa = math.cos(a), math.sin(a)
+      add_line(dl, cx + ca * r1, cy + sa * r1, cx + ca * r2, cy + sa * r2, col, 1)
+    end
+  end
+  local a = A0 + (A1 - A0) * t
+  local from = o.bipolar and (A0 + A1) / 2 or A0
+  if math.abs(a - from) > 0.01 then
+    arc(math.min(from, a), math.max(from, a), o.active and 0xFFFFFFFF or acc)
+  end
+  r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, cap_r, o.active and 0x161A2CFF or 0x0A0B15FF, seg)
+  r.ImGui_DrawList_AddCircle(dl, cx, cy, cap_r, o.hovered and 0xC8D2FF60 or 0xB4C0FF33, seg, 1)
+  local ca, sa = math.cos(a), math.sin(a)
+  add_line(dl, cx + ca * cap_r * 0.2, cy + sa * cap_r * 0.2, cx + ca * (cap_r - 1.5), cy + sa * (cap_r - 1.5),
+    o.hovered and 0xFFFFFFFF or MONO_COL.text, rad >= 16 and 1.8 or 1.5)
 end
 
 -- --- Star dust backdrop -----------------------------------------------------

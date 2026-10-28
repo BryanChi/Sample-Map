@@ -1039,11 +1039,11 @@ function render_seq_region_name_suggest_popup(edit_x, edit_y, edit_w)
     style_vars = style_vars + 1
   end
   if r.ImGui_Col_WindowBg then
-    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_WindowBg(), UI_THEME.popup_bg or 0x191A1DF5)
+    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_WindowBg(), UI_THEME.popup_bg or ui_tc(0x191A1DF5))
     style_cols = style_cols + 1
   end
   if r.ImGui_Col_Border then
-    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Border(), UI_THEME.border_hvr or 0x4B4C4FFF)
+    r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Border(), UI_THEME.border_hvr or ui_tc(0x4B4C4FFF))
     style_cols = style_cols + 1
   end
 
@@ -1058,14 +1058,14 @@ function render_seq_region_name_suggest_popup(edit_x, edit_y, edit_w)
       local hovered = r.ImGui_IsItemHovered(ctx)
       local selected = candidate and name == candidate
       if hovered or selected then
-        local fill = hovered and (UI_THEME.accent_fill_h or 0x174A24FF) or (UI_THEME.accent_fill or 0x0E2A18FF)
+        local fill = hovered and (UI_THEME.accent_fill_h or ui_tc(0x174A24FF)) or (UI_THEME.accent_fill or 0x0E2A18FF)
         r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, fill, 3.0)
         if selected then
-          r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, UI_THEME.accent or 0x1EFF5EFF, 3.0, 0, 1.4)
+          r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, UI_THEME.accent or ui_tc(0x1EFF5EFF), 3.0, 0, 1.4)
         end
       end
       local tw, th = r.ImGui_CalcTextSize(ctx, name)
-      local text_col = selected and (UI_THEME.accent_hvr or 0x62FF8AFF) or (UI_THEME.text or 0xEBECF0FF)
+      local text_col = selected and (UI_THEME.accent_hvr or ui_tc(0x62FF8AFF)) or (UI_THEME.text or ui_tc(0xEBECF0FF))
       r.ImGui_DrawList_AddText(dl, x0 + 4, y0 + (row_h - th) * 0.5, text_col, name)
       if r.ImGui_IsItemClicked(ctx, 0) then
         chosen = name

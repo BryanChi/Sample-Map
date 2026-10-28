@@ -31,6 +31,9 @@ function SampleMap_BeginInstance()
   if font then
     r.ImGui_Attach(ctx, font)
   end
+  if sm_mono_fonts_create then
+    sm_mono_fonts_create(ctx)
+  end
   ensure_seq_role_icons()
   ensure_vfx_icons()
 

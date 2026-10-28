@@ -36,11 +36,11 @@ function seq_midi_draw_keyboard(dl, x, y, w, h, slot, octave)
     local selected = in_range(note)
     local fill
     if black then
-      fill = selected and UI_THEME.accent or (hovered and 0x434447FF or 0x151619FF)
+      fill = selected and UI_THEME.accent or (hovered and ui_tc(0x434447FF) or ui_tc(0x151619FF))
     else
-      fill = selected and 0x174A24FF or (hovered and 0xEBECF0FF or 0xDBDCE0FF)
+      fill = selected and ui_tc(0x174A24FF) or (hovered and ui_tc(0xEBECF0FF) or ui_tc(0xDBDCE0FF))
     end
-    local edge = selected and UI_THEME.accent or (black and 0x000000FF or 0x2F3033FF)
+    local edge = selected and UI_THEME.accent or (black and 0x000000FF or ui_tc(0x2F3033FF))
     r.ImGui_DrawList_AddRectFilled(dl, kx0, ky0, kx1, ky1, fill, 2.0)
     r.ImGui_DrawList_AddRect(dl, kx0, ky0, kx1, ky1, edge, 2.0, 0, 1.0)
     if r.ImGui_IsItemClicked(ctx, 0) then
@@ -206,7 +206,7 @@ function render_seq_midi_assign_popup()
     "##seq_midi_hi", dl, hi_x, hi_y, 120, 18, hi, 0, 127,
     {
       horizontal = true,
-      fill_color = 0x62FF8AFF,
+      fill_color = ui_tc(0x62FF8AFF),
       format_value = function(v)
         v = seq_midi_clamp_note(v)
         return "Hi " .. seq_midi_note_name(v) .. "  " .. tostring(v)

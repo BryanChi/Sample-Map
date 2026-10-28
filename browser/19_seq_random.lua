@@ -1608,6 +1608,10 @@ function seq_random_knob_control(id, dl, x, y, size, value, min_v, max_v, alpha,
   local cx = knob_x + size * 0.5
   local cy = knob_y + size * 0.5
   local radius = size * 0.5 - 1.5
+  if SM_MONO_SPACE then
+    mono_knob(dl, cx, cy, radius, (value - min_v) / (max_v - min_v), { hovered = hovered, active = active })
+    return changed, value, active, released
+  end
   local bg = build_color_rrgbbaa(33, 40, 54, alpha)
   local ring = build_color_rrgbbaa(120, 145, 176, math.min(255, alpha + 35))
   local tip = build_color_rrgbbaa(255, 221, 132, math.min(255, alpha + 70))

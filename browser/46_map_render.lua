@@ -1316,6 +1316,7 @@ function sm_imgui_try_recover_context()
     font = new_font
     pcall(r.ImGui_Attach, ctx, font)
   end
+  pcall(sm_mono_fonts_create, ctx)
   pcall(ensure_seq_role_icons)
   pcall(ensure_vfx_icons)
   log("ImGui context recreated after an error")

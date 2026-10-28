@@ -88,7 +88,7 @@ function seq_draw_fader(dl, x, y, w, h, value, min_v, max_v, opts, hovered, acti
   local fill = opts.fill_color or UI_THEME.accent
   local fr, fg, fb = extract_rgb_rrgbbaa(fill)
   local rounding = math.min(5.0, h * 0.32)
-  local well = active and 0x08090CFF or (hovered and 0x141518FF or 0x0C0D10FF)
+  local well = active and ui_tc(0x08090CFF) or (hovered and ui_tc(0x141518FF) or ui_tc(0x0C0D10FF))
   local edge = active and fill or (hovered and UI_THEME.border_hvr or UI_THEME.border)
   r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, well, rounding)
 
@@ -155,7 +155,7 @@ function seq_draw_fader(dl, x, y, w, h, value, min_v, max_v, opts, hovered, acti
       tx = x + (w - tw) * 0.5
     end
     local ty = y + (h - th) * 0.5
-    local txt = (hovered or active) and 0xFFFFFFFF or 0xE0E1E5FF
+    local txt = (hovered or active) and 0xFFFFFFFF or ui_tc(0xE0E1E5FF)
     r.ImGui_DrawList_AddText(dl, tx + 1, ty + 1, 0x00000099, display)
     r.ImGui_DrawList_AddText(dl, tx, ty, txt, display)
   end
@@ -575,14 +575,14 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
   local taken = seq_candidate_entry_taken(entry)
   local a = math.max(0.0, math.min(1.0, tonumber(alpha) or 1.0))
   local ca = candidate_color_alpha
-  local bg = is_active and (taken and 0x122016FF or UI_THEME.accent_fill) or (is_hovered and 0x1A1B1EFF or 0x0F1013FF)
+  local bg = is_active and (taken and 0x122016FF or UI_THEME.accent_fill) or (is_hovered and ui_tc(0x1A1B1EFF) or ui_tc(0x0F1013FF))
   local edge = UI_THEME.border
   local edge_w = 1.0
   if is_active then
     edge = 0xFFFFFF80
     edge_w = 1.8
   elseif is_hovered then
-    edge = 0xEBECF0FF
+    edge = ui_tc(0xEBECF0FF)
   elseif taken then
     edge = UI_THEME.border_hvr
   end
@@ -644,7 +644,7 @@ function seq_draw_sample_candidate_square(dl, box, entry, is_active, is_hovered,
     th = (th or 10) * (sz / math.max(1.0, base_sz))
     local tx = x + (w - tw) * 0.5
     local ty = y + (h - th) * 0.5
-    local num_col = ca(taken and 0xFFFFFF72 or 0xCCCDD150, a)
+    local num_col = ca(taken and 0xFFFFFF72 or ui_tc(0xCCCDD150), a)
     local sh_col = ca(0x00000044, a)
     if r.ImGui_DrawList_AddTextEx then
       r.ImGui_DrawList_AddTextEx(dl, font, sz, tx + 0.5, ty + 0.5, sh_col, label)
@@ -1160,7 +1160,7 @@ function seq_render_track_rename_input(slot, box)
   if r.ImGui_StyleVar_FrameBorderSize then
     r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FrameBorderSize(), 1); vars = vars + 1
   end
-  r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBg(), 0x0C0D10FF); cols = cols + 1
+  r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBg(), ui_tc(0x0C0D10FF)); cols = cols + 1
   r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Border(), UI_THEME.accent); cols = cols + 1
   local fh = (r.ImGui_GetFrameHeight and r.ImGui_GetFrameHeight(ctx)) or box.h
   r.ImGui_SetCursorScreenPos(ctx, box.x, box.y + (box.h - fh) * 0.5)
@@ -1386,7 +1386,7 @@ local mix_opts = {
     icon = "gain", unit = " dB",
   },
   pan = {
-    bipolar = true, fill_color = 0x9FE3B5FF, horizontal = true, reset = 0.0,
+    bipolar = true, fill_color = ui_tc(0x9FE3B5FF), horizontal = true, reset = 0.0,
     format_value = false, icon = "pan",
   },
   layering = { active = false, on_fill = false, on_text = 0xC8FF9AFF, glyph = false, badge = nil },

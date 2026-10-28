@@ -413,9 +413,9 @@ function seq_draw_env_sparkline(dl, x, y, w, h, env, active, hovered)
     edge_w = 1.4
   end
   local shaped = seq_env_shape_active_norm(env)
-  local line = shaped and 0x9FE3B5FF or 0x6A849EFF
+  local line = shaped and ui_tc(0x9FE3B5FF) or 0x6A849EFF
   if hovered then
-    line = shaped and 0xC8FFD8FF or 0x9EC0E0FF
+    line = shaped and ui_tc(0xC8FFD8FF) or 0x9EC0E0FF
   end
   r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, bg, 3.0)
   if hovered then
@@ -576,7 +576,7 @@ function seq_draw_env_grid(dl, ix0, iy0, ix1, iy1, t0, t1, amp_max)
     return
   end
   local line_col = 0xFFFFFF0D
-  local text_col = 0x9B9CA0A0
+  local text_col = ui_tc(0x9B9CA0A0)
   for _, row in ipairs(SEQ_ENV_GRID_DB) do
     local y = iy1 - (row[1] / amp_max) * ih
     if y > iy0 + 8 and y < iy1 - 8 then
@@ -918,7 +918,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
   end
 
   local live = seq_env_is_active(env) or active or hovered
-  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, live and 0x15241AEE or 0x151619EE, 4.0)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, live and 0x15241AEE or ui_tc(0x151619EE), 4.0)
   r.ImGui_DrawList_AddRect(dl, x, y, x + w, y + h, (active or hovered) and UI_THEME.accent or UI_THEME.border, 4.0, 0, 1.2)
   if r.ImGui_DrawList_PushClipRect then
     r.ImGui_DrawList_PushClipRect(dl, ix0, iy0, ix1, iy1, true)
@@ -932,7 +932,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
   local unity_y = amp_to_y(1.0)
   r.ImGui_DrawList_AddLine(dl, ix0, unity_y, ix1, unity_y, 0xFFFFFF30, 1.0)
 
-  local line_col = live and 0x9FE3B5FF or 0x6A849EFF
+  local line_col = live and ui_tc(0x9FE3B5FF) or 0x6A849EFF
   local function dist2(ax, ay, bx, by)
     local dx, dy = ax - bx, ay - by
     return dx * dx + dy * dy
@@ -952,7 +952,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     local px_span = math.abs(time_to_x(t1) - time_to_x(t0))
     return math.max(8, math.min(28, math.floor(px_span / 6.0 + 0.5)))
   end
-  local area_col = live and 0x9FE3B51C or 0x6A849E14
+  local area_col = live and ui_tc(0x9FE3B51C) or 0x6A849E14
   local function draw_env_segment(x0, y0, t0, amp0, t1, amp1, curve, col, thickness)
     local steps = seg_sample_count(t0, t1)
     local prev_x, prev_y = x0, y0
@@ -1202,7 +1202,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
         a.t or 0.0, a.amp or 1.0,
         b.t or 0.0, b.amp or 1.0,
         a.curve,
-        hot and (UI_THEME.accent_hvr or 0xC8FFD8FF) or line_col,
+        hot and (UI_THEME.accent_hvr or ui_tc(0xC8FFD8FF)) or line_col,
         hot and 2.4 or 1.8
       )
     end
@@ -1217,7 +1217,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     local mid_amp = seq_env_seg_eval(a.amp, b.amp, 0.5, a.curve)
     local mxh, myh = time_to_x(mid_t), amp_to_y(mid_amp)
     r.ImGui_DrawList_AddCircleFilled(dl, mxh, myh, 3.2, 0xFFFFFFFF, 10)
-    r.ImGui_DrawList_AddCircle(dl, mxh, myh, 4.4, UI_THEME.accent_hvr or 0xC8FFD8FF, 10, 1.2)
+    r.ImGui_DrawList_AddCircle(dl, mxh, myh, 4.4, UI_THEME.accent_hvr or ui_tc(0xC8FFD8FF), 10, 1.2)
   end
 
   local active_idx = (drag_now and drag_now.slot_id == slot.id)
@@ -1283,7 +1283,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     local bw, bh = tw + 10.0, th + 4.0
     local bx = math.max(ix0 + 2.0, math.min(ix1 - bw - 2.0, ax - bw * 0.5))
     local by = knob_y + 9.0
-    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, 0x0C0D10E8, 4.0)
+    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, ui_tc(0x0C0D10E8), 4.0)
     r.ImGui_DrawList_AddRect(dl, bx, by, bx + bw, by + bh, edge_hot == "fi" and fade_col or end_col, 4.0, 0, 1.0)
     r.ImGui_DrawList_AddText(dl, bx + 5.0, by + 2.0, UI_THEME.text, edge_label)
   end
@@ -1300,7 +1300,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     if by < iy0 + 2.0 then
       by = hy + 9.0
     end
-    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, 0x0C0D10E8, 4.0)
+    r.ImGui_DrawList_AddRectFilled(dl, bx, by, bx + bw, by + bh, ui_tc(0x0C0D10E8), 4.0)
     r.ImGui_DrawList_AddRect(dl, bx, by, bx + bw, by + bh, UI_THEME.accent, 4.0, 0, 1.0)
     r.ImGui_DrawList_AddText(dl, bx + 5.0, by + 2.0, UI_THEME.text, label)
   end
@@ -1314,7 +1314,7 @@ function seq_render_env_graph_editor(dl, slot, x, y, w, h, opts)
     r.ImGui_DrawList_AddRectFilled(dl, ix0, by, ix1, iy1, 0xFFFFFF14, 1.0)
     local bx0 = ix0 + (view_t0 / PREVIEW_LEN) * iw
     local bx1 = ix0 + (view_t1 / PREVIEW_LEN) * iw
-    r.ImGui_DrawList_AddRectFilled(dl, bx0, by, bx1, iy1, 0x9FE3B5AA, 1.0)
+    r.ImGui_DrawList_AddRectFilled(dl, bx0, by, bx1, iy1, ui_tc(0x9FE3B5AA), 1.0)
     local label = string.format("%.0f–%.0f ms", view_t0 * 1000.0, view_t1 * 1000.0)
     local lw = r.ImGui_CalcTextSize(ctx, label)
     r.ImGui_DrawList_AddText(dl, ix0 + (iw - (lw or 0)) * 0.5, iy0 + 2, UI_THEME.text_dim, label)

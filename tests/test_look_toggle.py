@@ -139,3 +139,37 @@ def test_space_frames_run_with_backdrop():
       return n
     """)
     assert count > 50
+
+
+def test_fonts_pushed_only_in_space():
+    L = _runtime()
+    pushes = L.execute("""
+      local n = 0
+      reaper.ImGui_CreateFont = function(name, sz) return { name = name } end
+      reaper.ImGui_CreateFontFromFile = function(name) return { name = name } end
+      reaper.ImGui_Attach = function() end
+      reaper.ImGui_PushFont = function() n = n + 1 end
+      reaper.ImGui_PopFont = function() end
+      sm_mono_fonts_create(ctx)
+      assert(SM_MONO_FONTS.body and SM_MONO_FONTS.bold, "fonts not created")
+      ui_push_theme(); ui_pop_theme()
+      local classic = n
+      sm_look_set(true)
+      ui_push_theme(); ui_pop_theme()
+      return classic, n
+    """)
+    assert pushes == (0, 1)
+
+
+def test_space_tone_and_ui_tc():
+    L = _runtime()
+    g = L.globals()
+    assert g.ui_tc(0x0C0D10FF) == 0x0C0D10FF          # Classic: unchanged
+    g.sm_look_set(True)
+    gray = g.ui_tc(0x0C0D10FF)
+    assert gray != 0x0C0D10FF and (gray >> 8) & 0xFF > (gray >> 24) & 0xFF   # blue cast
+    assert gray & 0xFF == 0xFF
+    assert g.ui_tc(0xFFC870FF) == 0xFFC870FF          # amber stays amber
+    cyan = g.ui_tc(0x1EFF5E80)
+    rr, gg, bb, a = (cyan >> 24) & 0xFF, (cyan >> 16) & 0xFF, (cyan >> 8) & 0xFF, cyan & 0xFF
+    assert bb > gg > rr and a == 0x80                 # accent green turns cyan

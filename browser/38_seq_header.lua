@@ -64,7 +64,7 @@ function draw_seq_header_preview_waveform(dl, x, y, w, h, mx, my, left_down, lef
   end
   local sample = hover_sample or state.seq_header_wave_sample or preview_sample_obj
   if not sample or w < 16 or h < 10 then
-    r.ImGui_DrawList_AddText(dl, x + 4, y + math.max(0, (h - 14) * 0.5), 0xE8E8E8FF, "Track / Mix / Env")
+    r.ImGui_DrawList_AddText(dl, x + 4, y + math.max(0, (h - 14) * 0.5), ui_tc(0xE8E8E8FF), "Track / Mix / Env")
     state.seq_preview_wave_scrub = nil
     state.seq_header_start_drag = nil
     state.seq_header_vol_drag = nil

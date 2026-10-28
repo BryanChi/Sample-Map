@@ -188,7 +188,7 @@ function draw_sample_dot_control(sample, id_suffix, is_swap_active, play_t, role
   local ring_color = is_swap_active and 0xFFFFFFFF
     or (edit_mode and region_color)
     or (has_override and override_color)
-    or 0x666666FF
+    or ui_tc(0x666666FF)
   local ring_radius = icon_half + ((is_swap_active or edit_mode or has_override) and 2.0 or 1.0)
   local ring_thickness = is_swap_active and 2.0 or ((edit_mode or has_override) and 2.0 or 1.0)
 
@@ -218,7 +218,7 @@ function draw_sample_dot_control(sample, id_suffix, is_swap_active, play_t, role
       r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, icon_half * 0.55, fill, 24)
     end
   end
-  r.ImGui_DrawList_AddCircle(dl, cx, cy, ring_radius, ring_color or 0x666666FF, 24, ring_thickness)
+  r.ImGui_DrawList_AddCircle(dl, cx, cy, ring_radius, ring_color or ui_tc(0x666666FF), 24, ring_thickness)
   if cue.drop_armed and hovered then
     local dp = drag_pulse()
     local rr, rg, rb

@@ -264,11 +264,11 @@ function render_seq_minimap_popup()
   local hovered = r.ImGui_IsItemHovered(ctx)
   local mx, my = r.ImGui_GetMousePos(ctx)
 
-  local frame_bg = seq_minimap_fade_col(UI_THEME.surface or 0x151619FF, alpha)
-  local frame_border = seq_minimap_fade_col(UI_THEME.border or 0x323336FF, alpha)
+  local frame_bg = seq_minimap_fade_col(UI_THEME.surface or ui_tc(0x151619FF), alpha)
+  local frame_border = seq_minimap_fade_col(UI_THEME.border or ui_tc(0x323336FF), alpha)
   r.ImGui_DrawList_AddRectFilled(dl, wx0, wy0, wx0 + win_w, wy0 + win_h, frame_bg, 8.0)
   r.ImGui_DrawList_AddRect(dl, wx0 + 0.5, wy0 + 0.5, wx0 + win_w - 0.5, wy0 + win_h - 0.5, frame_border, 8.0, 0, 1.0)
-  r.ImGui_DrawList_AddRectFilled(dl, mx0, my0, mx0 + map_w, my0 + map_h, seq_minimap_fade_col(UI_THEME.bg or 0x0C0D10FF, alpha), 5.0)
+  r.ImGui_DrawList_AddRectFilled(dl, mx0, my0, mx0 + map_w, my0 + map_h, seq_minimap_fade_col(UI_THEME.bg or ui_tc(0x0C0D10FF), alpha), 5.0)
   if layer_mode then
     pop.hint = nil
     seq_layering_draw_picker_header(pop, slot, dl, mx0, wy0 + pad, map_w)
@@ -342,7 +342,7 @@ function render_seq_minimap_popup()
     r.ImGui_DrawList_PopClipRect(dl)
   end
   r.ImGui_DrawList_AddRect(dl, mx0 + 0.5, my0 + 0.5, mx0 + map_w - 0.5, my0 + map_h - 0.5,
-    seq_minimap_fade_col(UI_THEME.border or 0x323336FF, alpha), 5.0, 0, 1.0)
+    seq_minimap_fade_col(UI_THEME.border or ui_tc(0x323336FF), alpha), 5.0, 0, 1.0)
   if layer_mode then
     if #samples == 0 then
       local msg = "No samples match"
@@ -607,9 +607,9 @@ function render_preview_history_popup()
   r.ImGui_InvisibleButton(ctx, "##preview_history_hit", win_w, win_h)
   local mx2, my2 = r.ImGui_GetMousePos(ctx)
 
-  r.ImGui_DrawList_AddRectFilled(dl, px, py, px + win_w, py + win_h, seq_minimap_fade_col(UI_THEME.surface or 0x151619FF, alpha), 8.0)
+  r.ImGui_DrawList_AddRectFilled(dl, px, py, px + win_w, py + win_h, seq_minimap_fade_col(UI_THEME.surface or ui_tc(0x151619FF), alpha), 8.0)
   r.ImGui_DrawList_AddRect(dl, px + 0.5, py + 0.5, px + win_w - 0.5, py + win_h - 0.5,
-    seq_minimap_fade_col(UI_THEME.border or 0x323336FF, alpha), 8.0, 0, 1.0)
+    seq_minimap_fade_col(UI_THEME.border or ui_tc(0x323336FF), alpha), 8.0, 0, 1.0)
 
   local clicked = nil
   for row = 0, vis - 1 do
@@ -647,7 +647,7 @@ function render_preview_history_popup()
         tw, th = r.ImGui_CalcTextSize(ctx, name)
       end
       r.ImGui_DrawList_AddText(dl, text_x, ry + (row_h - (th or 12)) * 0.5,
-        seq_minimap_fade_col(is_cur and 0xF4FFF8FF or (UI_THEME.text or 0xEBECF0FF), alpha), name)
+        seq_minimap_fade_col(is_cur and 0xF4FFF8FF or (UI_THEME.text or ui_tc(0xEBECF0FF)), alpha), name)
       if hovered_row and r.ImGui_IsMouseClicked and r.ImGui_IsMouseClicked(ctx, 0) then
         clicked = sample
       end

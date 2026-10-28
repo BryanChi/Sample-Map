@@ -1444,6 +1444,7 @@ function render_explorer_window()
     return
   end
   if visible then
+    sm_mono_space_backdrop()
     render_explorer_content()
     pcall(r.ImGui_End, ctx)
   end

@@ -216,6 +216,22 @@ function ui_accent_a(a)
   return ((UI_THEME.accent or 0x1EFF5EFF) & 0xFFFFFF00) | (a & 0xFF)
 end
 
+-- Fixed colour from a draw call, recoloured for Monolith Space (neutral grays
+-- get the blue-violet cast, accent greens turn cyan); unchanged in Classic.
+UI_TC_MEMO = {}
+
+function ui_tc(c)
+  if not SM_MONO_SPACE or not sm_space_tone then
+    return c
+  end
+  local v = UI_TC_MEMO[c]
+  if v == nil then
+    v = sm_space_tone(c)
+    UI_TC_MEMO[c] = v
+  end
+  return v
+end
+
 -- ImGui enum getter -> value. Enum values are constants, so each getter is
 -- called once instead of ~60 times per frame by ui_push_theme.
 SM_ENUM_VALUE = {}
@@ -314,28 +330,35 @@ function ui_push_theme()
   var1(r.ImGui_StyleVar_PopupBorderSize, 1)
   var1(r.ImGui_StyleVar_FrameBorderSize, mono and 1 or 0)
   var2(r.ImGui_StyleVar_WindowPadding, 10, 8)
-  var2(r.ImGui_StyleVar_FramePadding, 8, 4)
-  var2(r.ImGui_StyleVar_ItemSpacing, 6, 5)
-  var2(r.ImGui_StyleVar_ItemInnerSpacing, 6, 4)
+  var2(r.ImGui_StyleVar_FramePadding, mono and 6 or 8, 4)
+  var2(r.ImGui_StyleVar_ItemSpacing, mono and 5 or 6, 5)
+  var2(r.ImGui_StyleVar_ItemInnerSpacing, mono and 5 or 6, 4)
   var1(r.ImGui_StyleVar_GrabMinSize, 10)
   var1(r.ImGui_StyleVar_ScrollbarSize, 10)
 
   state._ui_theme_cols = n_col
   state._ui_theme_vars = n_var
+  -- Monolith Space: JetBrains Mono for every window this frame.
+  state._ui_theme_font = sm_mono_push_font and sm_mono_push_font("body") or false
 end
 
 function ui_pop_theme()
   local cols = state._ui_theme_cols or 0
   local vars = state._ui_theme_vars or 0
+  local font = state._ui_theme_font
   state._ui_theme_cols = 0
   state._ui_theme_vars = 0
-  if cols <= 0 and vars <= 0 then
+  state._ui_theme_font = false
+  if cols <= 0 and vars <= 0 and not font then
     return
   end
   -- Docker float/dock can invalidate the context mid-frame. Never let a
   -- style-stack unwind take the script down with it.
   if not (ctx and r.ImGui_ValidatePtr(ctx, "ImGui_Context*")) then
     return
+  end
+  if font then
+    pcall(r.ImGui_PopFont, ctx)
   end
   if cols > 0 then
     pcall(r.ImGui_PopStyleColor, ctx, cols)
@@ -1535,6 +1558,19 @@ function draw_ui_radio(id, label, selected)
   local cy = y0 + h * 0.5 + (active and 1.0 or 0.0)
   local ring = selected and UI_THEME.accent or (hovered and UI_THEME.border_hvr or UI_THEME.border)
   local fill = hovered and UI_THEME.surface_hvr or UI_THEME.surface
+  if SM_MONO_SPACE then
+    -- Square radio: hairline box, filled inner square when selected.
+    local k = rad - 1
+    r.ImGui_DrawList_AddRectFilled(dl, cx - k, cy - k, cx + k, cy + k, fill, 0)
+    r.ImGui_DrawList_AddRect(dl, cx - k, cy - k, cx + k, cy + k, ring, 0, 0, 1)
+    if selected then
+      r.ImGui_DrawList_AddRectFilled(dl, cx - k * 0.45, cy - k * 0.45, cx + k * 0.45, cy + k * 0.45, UI_THEME.accent, 0)
+    elseif hovered then
+      r.ImGui_DrawList_AddRectFilled(dl, cx - k * 0.25, cy - k * 0.25, cx + k * 0.25, cy + k * 0.25, ui_accent_a(0x66), 0)
+    end
+    r.ImGui_DrawList_AddText(dl, x0 + rad * 2 + gap, y0 + (h - th) * 0.5, UI_THEME.text, label)
+    return clicked
+  end
   r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, rad, fill, 20)
   r.ImGui_DrawList_AddCircle(dl, cx, cy, rad, ring, 20, selected and 1.6 or 1.2)
   if selected then

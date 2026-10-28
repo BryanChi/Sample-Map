@@ -271,6 +271,7 @@ function render_sample_map_float_window()
   end
   local visible, open, began = begin_view_float_window("Sample Map", "sample_map_float", 980, 720, 48, 64)
   if began and visible then
+    sm_mono_space_backdrop()
     if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
       local wx, wy = r.ImGui_GetWindowPos(ctx)
       local ww, wh = r.ImGui_GetWindowSize(ctx)
@@ -329,6 +330,7 @@ function render_sequencer_float_window()
   end
   local visible, open, began = begin_view_float_window("Sequencer", "sequencer_float", 1100, 640, 88, 108)
   if began and visible then
+    sm_mono_space_backdrop()
     if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
       local wx, wy = r.ImGui_GetWindowPos(ctx)
       local ww, wh = r.ImGui_GetWindowSize(ctx)

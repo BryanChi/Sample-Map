@@ -1975,7 +1975,7 @@ function seq_pattern_render_ai_strip(region, can_generate)
   local x, y = r.ImGui_GetCursorScreenPos(ctx)
   local avail = r.ImGui_GetContentRegionAvail(ctx) or 0
   local h = 32
-  ui_draw_panel(dl, x, y, x + avail, y + h, UI_METRICS.radius_ctrl, 0x13241AFF, 0x5EDC8A33, false, false)
+  ui_draw_panel(dl, x, y, x + avail, y + h, UI_METRICS.radius_ctrl, ui_tc(0x13241AFF), ui_tc(0x5EDC8A33), false, false)
   local dice_s, gap = 20, 3
   local dice_x = x + avail - 6 - (6 * dice_s + 5 * gap)
 
@@ -1990,7 +1990,7 @@ function seq_pattern_render_ai_strip(region, can_generate)
   ui_button_draw_icon(dl, "vary", x + 16, y + h * 0.5, 20, UI_THEME.success)
   local label = "AI variation"
   local _, lh = r.ImGui_CalcTextSize(ctx, label)
-  r.ImGui_DrawList_AddText(dl, x + 30, y + (h - lh) * 0.5, 0xCFF5DDFF, label)
+  r.ImGui_DrawList_AddText(dl, x + 30, y + (h - lh) * 0.5, ui_tc(0xCFF5DDFF), label)
 
   for s = 1, 6 do
     r.ImGui_SetCursorScreenPos(ctx, dice_x + (s - 1) * (dice_s + gap), y + (h - dice_s) * 0.5)
@@ -2284,7 +2284,7 @@ function render_seq_kit_history_element_chip(kit_id, elem_idx, element)
   local pressed = r.ImGui_IsItemActive(ctx)
   if hovered and not active then
     factor = 0.58
-    text_col = 0xF4F4F4FF
+    text_col = ui_tc(0xF4F4F4FF)
   end
   bg = build_color_rrgbbaa(
     math.floor(base_r * factor),

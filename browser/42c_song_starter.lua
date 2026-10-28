@@ -1064,10 +1064,10 @@ end
 
 local function ss_push_style()
   local cols = {
-    { r.ImGui_Col_WindowBg, SS_COL.bg }, { r.ImGui_Col_ChildBg, 0x00000000 }, { r.ImGui_Col_PopupBg, 0x0A0A0AFF },
+    { r.ImGui_Col_WindowBg, SS_COL.bg }, { r.ImGui_Col_ChildBg, 0x00000000 }, { r.ImGui_Col_PopupBg, ui_tc(0x0A0A0AFF) },
     { r.ImGui_Col_Border, SS_COL.line }, { r.ImGui_Col_Separator, SS_COL.line },
-    { r.ImGui_Col_FrameBg, SS_COL.panel }, { r.ImGui_Col_FrameBgHovered, 0x161616FF }, { r.ImGui_Col_FrameBgActive, 0x1C1C1CFF },
-    { r.ImGui_Col_SliderGrab, SS_COL.accent }, { r.ImGui_Col_SliderGrabActive, 0x6BE0A0FF },
+    { r.ImGui_Col_FrameBg, SS_COL.panel }, { r.ImGui_Col_FrameBgHovered, ui_tc(0x161616FF) }, { r.ImGui_Col_FrameBgActive, ui_tc(0x1C1C1CFF) },
+    { r.ImGui_Col_SliderGrab, SS_COL.accent }, { r.ImGui_Col_SliderGrabActive, ui_tc(0x6BE0A0FF) },
     { r.ImGui_Col_CheckMark, SS_COL.accent }, { r.ImGui_Col_Text, SS_COL.text }, { r.ImGui_Col_TextDisabled, SS_COL.mute },
     { r.ImGui_Col_Header, SS_COL.accent_d }, { r.ImGui_Col_HeaderHovered, 0xFFFFFF14 }, { r.ImGui_Col_HeaderActive, SS_COL.accent_m },
     { r.ImGui_Col_Button, 0x00000000 }, { r.ImGui_Col_ButtonHovered, 0xFFFFFF0C }, { r.ImGui_Col_ButtonActive, 0xFFFFFF14 },

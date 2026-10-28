@@ -7,7 +7,7 @@
 -- so REAPER's UI never blocks on curl. Updates are all-or-nothing: every file
 -- is downloaded to "<file>.new" and validated first, then all are renamed into
 -- place (keeping "<file>.bak"), with rollback if any rename fails.
--- Note: assets/ (icons) is not updated by this mechanism.
+-- Note: assets/ (icons) is not updated by this mechanism, except assets/fonts.
 
 if not r then r = reaper end
 
@@ -396,6 +396,9 @@ local FILES_TO_UPDATE = {
   { url = "feedback/CRS_Feedback_Recorder.lua" },
   { url = "perf/CRS_Perf.lua" },
   { url = "SampleMapUpdate.lua", required = true },
+  { url = "assets/fonts/JetBrainsMono-Medium.ttf" },
+  { url = "assets/fonts/JetBrainsMono-SemiBold.ttf" },
+  { url = "assets/fonts/OFL - JetBrains Mono.txt" },
   { url = "Effects/SampleMapMIDI.jsfx", dest = "Effects/SampleMapMIDI.jsfx", resource = true },
   { url = "Effects/SampleMapPlayer.jsfx", dest = "Effects/SampleMapPlayer.jsfx", resource = true },
   { url = "Effects/SampleMapPreview.jsfx", dest = "Effects/SampleMapPreview.jsfx", resource = true },

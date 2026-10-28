@@ -472,11 +472,11 @@ function seq_draw_region_random_labels(dl, labels, mx, my)
       edge = hovered and 0xD8F6FFFF or 0x8ED4E8CC
       text = 0xFFFFFFFF
     elseif lab.kind == "vel" then
-      fill = hovered and 0x7EE0A8FF or 0x3CAA6EEE
-      edge = hovered and 0xD8FFE8FF or 0x8ED4A8CC
+      fill = hovered and ui_tc(0x7EE0A8FF) or ui_tc(0x3CAA6EEE)
+      edge = hovered and ui_tc(0xD8FFE8FF) or ui_tc(0x8ED4A8CC)
       text = 0x0A180CFF
     elseif lab.kind == "vary" then
-      fill = hovered and 0x9FE88FFF or 0x4CAA5EEE
+      fill = hovered and 0x9FE88FFF or ui_tc(0x4CAA5EEE)
       edge = hovered and 0xD8FFD0FF or 0x8ED48CCC
       text = 0x0A180CFF
     elseif lab.kind == "stut" then

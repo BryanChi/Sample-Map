@@ -28,14 +28,14 @@ function draw_seq_vary_filter_span(dl, ctx, x0, y0, x1, y1, text, edit_mode, hov
     return sx0, sy0, sx1, sy1
   end
   local no_hits = seq_vary_filter_has_no_hits(text)
-  local fill = editing and 0x10261CB8 or (edit_mode and 0x16171AA8 or 0x13141796)
-  local wash = editing and 0x8FD98F55 or 0x8FD98F2A
-  local outline = editing and 0xB6F0C8FF or 0x8FD98F99
+  local fill = editing and 0x10261CB8 or (edit_mode and ui_tc(0x16171AA8) or ui_tc(0x13141796))
+  local wash = editing and ui_tc(0x8FD98F55) or ui_tc(0x8FD98F2A)
+  local outline = editing and ui_tc(0xB6F0C8FF) or ui_tc(0x8FD98F99)
   local outline_w = editing and 1.9 or 1.4
   if hovered and not editing then
     fill = 0x163024D0
-    wash = 0x8FD98F48
-    outline = 0xC8F8D8FF
+    wash = ui_tc(0x8FD98F48)
+    outline = ui_tc(0xC8F8D8FF)
     outline_w = 2.0
   end
   if no_hits then
@@ -201,12 +201,12 @@ function render_seq_vary_filter_input()
     else
       r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBg(), 0x10261CEE)
       r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBgHovered(), 0x163024EE)
-      r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBgActive(), 0x2E2F32EE)
+      r.ImGui_PushStyleColor(ctx, r.ImGui_Col_FrameBgActive(), ui_tc(0x2E2F32EE))
       r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Text(), 0xE8FFEEFF)
     end
     style_cols = 4
     if r.ImGui_Col_Border then
-      r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Border(), no_hits and 0xE8A020FF or 0x8FD98F99)
+      r.ImGui_PushStyleColor(ctx, r.ImGui_Col_Border(), no_hits and 0xE8A020FF or ui_tc(0x8FD98F99))
       style_cols = style_cols + 1
     end
   end
@@ -376,8 +376,8 @@ function seq_draw_segmented_bar(bar_id, items, h, opts)
   local inner_y0 = gy + 2
   local inner_y1 = y1 - 2
 
-  r.ImGui_DrawList_AddRectFilled(dl, gx, gy, x1, y1, 0x0C0D10FF, rounding)
-  r.ImGui_DrawList_AddRectFilled(dl, gx + 1, gy + 1, x1 - 1, y1 - 1, 0x17181BFF, rounding - 1)
+  r.ImGui_DrawList_AddRectFilled(dl, gx, gy, x1, y1, ui_tc(0x0C0D10FF), rounding)
+  r.ImGui_DrawList_AddRectFilled(dl, gx + 1, gy + 1, x1 - 1, y1 - 1, ui_tc(0x17181BFF), rounding - 1)
   r.ImGui_DrawList_AddLine(dl, gx + rounding, gy + 1.2, x1 - rounding, gy + 1.2, 0x00000077, 1.0)
   r.ImGui_DrawList_AddLine(dl, gx + rounding, y1 - 1.6, x1 - rounding, y1 - 1.6, 0xFFFFFF0C, 1.0)
   r.ImGui_DrawList_AddRect(dl, gx + 0.5, gy + 0.5, x1 - 0.5, y1 - 0.5, UI_THEME.border, rounding, 0, 1.0)
@@ -2204,7 +2204,7 @@ function draw_sample_wave_controls(dl, sample, x, y, w, h, duration, t0, t1, mx,
   end
   local start_visible = start_x >= x - 2 and start_x <= x + w + 2
   local start_col = sample_start_has_session(sample) and 0x5CE1FFFF
-      or (sample_start_is_saved(sample) and 0x7CFFB0FF or 0x8EC8E8CC)
+      or (sample_start_is_saved(sample) and ui_tc(0x7CFFB0FF) or 0x8EC8E8CC)
   -- Start marker: a line with a tab (the time once moved) to grab it by.
   local tab_x0, tab_y0, tab_x1, tab_y1 = start_x - 5, y, start_x + 5, y + 10
   if start_visible then
@@ -2217,17 +2217,17 @@ function draw_sample_wave_controls(dl, sample, x, y, w, h, duration, t0, t1, mx,
     end
   end
 
-  r.ImGui_DrawList_AddRectFilled(dl, cap_x0, cap_y0, cap_x1, cap_y1, 0x0C0D10D8, 12.0)
+  r.ImGui_DrawList_AddRectFilled(dl, cap_x0, cap_y0, cap_x1, cap_y1, ui_tc(0x0C0D10D8), 12.0)
   r.ImGui_DrawList_AddRect(dl, cap_x0 + 0.5, cap_y0 + 0.5, cap_x1 - 0.5, cap_y1 - 0.5, 0xFFFFFF16, 12.0, 0, 1.0)
   if show_db then
     local _, th = r.ImGui_CalcTextSize(ctx, db_text)
     r.ImGui_DrawList_AddText(dl, cap_x0 + 7, vol_cy - (th or 13) * 0.5,
-      (over_vol or state.seq_header_vol_drag) and 0xEBECF0FF or 0x9B9CA0FF, db_text)
+      (over_vol or state.seq_header_vol_drag) and ui_tc(0xEBECF0FF) or ui_tc(0x9B9CA0FF), db_text)
   end
   local vol_col = sample_gain_has_session(sample) and 0x5CE1FFFF
-      or (sample_gain_is_saved(sample) and 0x7CFFB0FF or 0x8EC8E8CC)
+      or (sample_gain_is_saved(sample) and ui_tc(0x7CFFB0FF) or 0x8EC8E8CC)
   local hot_vol = over_vol or state.seq_header_vol_drag
-  r.ImGui_DrawList_AddCircleFilled(dl, vol_cx, vol_cy, vol_r, hot_vol and 0x2B2C2FFF or 0x1C1D20FF, 20)
+  r.ImGui_DrawList_AddCircleFilled(dl, vol_cx, vol_cy, vol_r, hot_vol and ui_tc(0x2B2C2FFF) or ui_tc(0x1C1D20FF), 20)
   r.ImGui_DrawList_AddCircle(dl, vol_cx, vol_cy, vol_r, hot_vol and 0xFFFFFF40 or 0xFFFFFF18, 20, 1.0)
   local ANGLE_MIN = math.pi * 0.75
   local ANGLE_MAX = math.pi * 2.25
@@ -2261,7 +2261,7 @@ function draw_sample_wave_controls(dl, sample, x, y, w, h, duration, t0, t1, mx,
   if over_btn then
     r.ImGui_DrawList_AddRectFilled(dl, btn_cx - btn_r, btn_cy - btn_r, btn_cx + btn_r, btn_cy + btn_r, 0xFFFFFF1C, 5.0)
   end
-  local dot_col = over_btn and 0xF4F7FCFF or 0x9B9CA0FF
+  local dot_col = over_btn and 0xF4F7FCFF or ui_tc(0x9B9CA0FF)
   for d = -1, 1 do
     r.ImGui_DrawList_AddCircleFilled(dl, btn_cx + d * 4.0, btn_cy, 1.5, dot_col, 8)
   end

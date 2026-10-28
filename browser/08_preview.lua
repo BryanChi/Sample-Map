@@ -521,7 +521,11 @@ function draw_preview_volume_knob(knob_size)
   local ANGLE_MIN = math.pi * 0.75
   local ANGLE_MAX = math.pi * 2.25
   local angle = ANGLE_MIN + (ANGLE_MAX - ANGLE_MIN) * vol
-  local accent = active and UI_THEME.accent_hvr or (hovered and UI_THEME.accent or 0x148A3AFF)
+  if SM_MONO_SPACE then
+    mono_knob(dl, cx, cy, radius - 0.5, vol, { hovered = hovered, active = active })
+    return
+  end
+  local accent = active and UI_THEME.accent_hvr or (hovered and UI_THEME.accent or ui_tc(0x148A3AFF))
   local fill = active and UI_THEME.accent_fill_h or (hovered and UI_THEME.surface_hvr or UI_THEME.surface)
 
   r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, radius - 0.5, fill, 22)

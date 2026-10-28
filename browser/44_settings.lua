@@ -176,7 +176,11 @@ function settings_section(label, default_open)
   local cy = (y0 + y1) * 0.5 + (active and 1.0 or 0.0)
   ui_button_draw_icon(dl, open and "chev_down" or "chev_right", x0 + 16, cy, 14, open and UI_THEME.accent_hvr or UI_THEME.text_dim)
   local tw, th = r.ImGui_CalcTextSize(ctx, label)
-  r.ImGui_DrawList_AddText(dl, x0 + 30, cy - th * 0.5, open and UI_THEME.text or UI_THEME.text_dim, label)
+  if SM_MONO_SPACE then
+    mono_caps_text(dl, x0 + 30, cy - th * 0.5, open and UI_THEME.text or UI_THEME.text_dim, label, 1.2)
+  else
+    r.ImGui_DrawList_AddText(dl, x0 + 30, cy - th * 0.5, open and UI_THEME.text or UI_THEME.text_dim, label)
+  end
   state.settings_filter_section_title_hit = searching and settings_matches(label)
   return open
 end

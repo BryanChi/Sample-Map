@@ -869,7 +869,7 @@ function draw_sample_drag_ghost()
   local y1 = y0 + chip_h
 
   r.ImGui_DrawList_AddRectFilled(dl, x0 + 2, y0 + 3, x1 + 2, y1 + 3, 0x00000070, 7.0)
-  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, 0x222326F5, 7.0)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, ui_tc(0x222326F5), 7.0)
 
   local cr, cg, cb = extract_rgb_rrgbbaa(dot_color)
   local border = build_color_rrgbbaa(cr, cg, cb, math.floor(140 + 115 * pulse))
@@ -885,7 +885,7 @@ function draw_sample_drag_ghost()
 
   local tx = x0 + pad + dot_r * 2 + gap
   r.ImGui_DrawList_AddText(dl, tx, y0 + pad, 0xFFFFFFFF, name)
-  local hint_color = (over_target or over_layer) and 0x8FE0A6FF or 0x9FB2CCFF
+  local hint_color = (over_target or over_layer) and ui_tc(0x8FE0A6FF) or 0x9FB2CCFF
   r.ImGui_DrawList_AddText(dl, tx, y0 + pad + name_h + line_gap, hint_color, hint)
 end
 
