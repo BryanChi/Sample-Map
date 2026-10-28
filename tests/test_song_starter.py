@@ -767,3 +767,52 @@ def test_window_draws_arrangement_strip():
     n_err, first, tall, n_roles, has_drop, rects = got
     assert n_err == 0, first
     assert tall and n_roles >= 4 and has_drop and rects
+
+
+def test_add_to_project_rebuilds_peaks_for_added_items_only():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    got = L.execute(r'''
+      -- selection fakes: one existing item selected before
+      OLD = { tr = {}, old = true }
+      SELECTED = { [OLD] = true }
+      ALL = { OLD }
+      local add = reaper.AddMediaItemToTrack
+      reaper.AddMediaItemToTrack = function(tr) local it = add(tr); ALL[#ALL + 1] = it; return it end
+      reaper.CountSelectedMediaItems = function()
+        local n = 0; for _, it in ipairs(ALL) do if SELECTED[it] then n = n + 1 end end; return n
+      end
+      reaper.GetSelectedMediaItem = function(_, i)
+        local n = -1
+        for _, it in ipairs(ALL) do if SELECTED[it] then n = n + 1; if n == i then return it end end end
+      end
+      reaper.SelectAllMediaItems = function(_, on) for _, it in ipairs(ALL) do SELECTED[it] = on or nil end end
+      reaper.SetMediaItemSelected = function(it, on) SELECTED[it] = on or nil end
+      reaper.ValidatePtr2 = function(_, p, t) return t == "MediaItem*" and p ~= nil end
+      RUNS = {}
+      reaper.Main_OnCommand = function(cmd)
+        local sel = {}
+        for _, it in ipairs(ALL) do if SELECTED[it] then sel[#sel + 1] = it end end
+        RUNS[#RUNS + 1] = { cmd = cmd, sel = sel }
+      end
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 0.0, false, "Am"
+      ss_do_reroll("batch")
+      local function check(n_before)
+        local run = RUNS[#RUNS]
+        local exact = #run.sel == #ITEMS - n_before
+        for i, it in ipairs(run.sel) do if it ~= ITEMS[n_before + i] then exact = false end end
+        local restored = SELECTED[OLD] == true
+        for i = n_before + 1, #ITEMS do if SELECTED[ITEMS[i]] then restored = false end end
+        return run.cmd, exact, restored
+      end
+      st.mode = "loop"
+      ss_add_to_project()
+      local c1, e1, r1 = check(0)
+      local n = #ITEMS
+      st.mode = "arrange"
+      ss_add_to_project()
+      local c2, e2, r2 = check(n)
+      return #RUNS, c1, e1, r1, c2, e2, r2, #ITEMS - n > 6
+    ''')
+    assert got == (2, 40441, True, True, 40441, True, True, True)

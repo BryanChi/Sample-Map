@@ -1193,6 +1193,30 @@ end
 ---------------------------------------------------------------------------
 
 SS_EDGE_FADE = 0.008 -- seconds, item edges in arrangements
+SS_CMD_REBUILD_PEAKS = 40441 -- Peaks: Rebuild peaks for selected items
+
+-- Rebuild peaks for exactly `items` (REAPER builds them in the background),
+-- then put the item selection back as it was.
+function ss_rebuild_peaks(items)
+  if #items == 0 then
+    return
+  end
+  local prev = {}
+  for i = 0, r.CountSelectedMediaItems(0) - 1 do
+    prev[#prev + 1] = r.GetSelectedMediaItem(0, i)
+  end
+  r.SelectAllMediaItems(0, false)
+  for _, item in ipairs(items) do
+    r.SetMediaItemSelected(item, true)
+  end
+  r.Main_OnCommand(SS_CMD_REBUILD_PEAKS, 0)
+  r.SelectAllMediaItems(0, false)
+  for _, item in ipairs(prev) do
+    if r.ValidatePtr2(0, item, "MediaItem*") then
+      r.SetMediaItemSelected(item, true)
+    end
+  end
+end
 
 -- Native region colour from 0xRRGGBB.
 local function ss_native_color(rgb)
@@ -1264,6 +1288,7 @@ function ss_add_arrangement()
   r.GetSetMediaTrackInfo_String(folder, "P_NAME", title, true)
   r.SetMediaTrackInfo_Value(folder, "I_FOLDERDEPTH", 1)
   local last
+  local added = {}
   for i, slot in ipairs(list) do
     r.InsertTrackAtIndex(idx + i, true)
     local tr = r.GetTrack(proj, idx + i)
@@ -1272,6 +1297,7 @@ function ss_add_arrangement()
     r.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH", 0)
     for _, it in ipairs(by_slot[slot]) do
       local item = r.AddMediaItemToTrack(tr)
+      added[#added + 1] = item
       local take = r.AddTakeToMediaItem(item)
       local src = r.PCM_Source_CreateFromFile(slot.path)
       local len = it.t1 - it.t0
@@ -1305,6 +1331,7 @@ function ss_add_arrangement()
     r.AddProjectMarker2(proj, true, base + sec.start * bar_s, base + (sec.start + sec.bars) * bar_s, sec.name, -1,
       ss_native_color(def.color or 0x808080))
   end
+  ss_rebuild_peaks(added)
   r.PreventUIRefresh(-1)
   if r.TrackList_AdjustWindows then r.TrackList_AdjustWindows(false) end
   r.UpdateArrange()
@@ -1348,6 +1375,7 @@ function ss_add_to_project()
   r.GetSetMediaTrackInfo_String(folder, "P_NAME", title, true)
   r.SetMediaTrackInfo_Value(folder, "I_FOLDERDEPTH", 1)
   local last
+  local added = {}
   for i, slot in ipairs(list) do
     r.InsertTrackAtIndex(idx + i, true)
     local tr = r.GetTrack(proj, idx + i)
@@ -1355,6 +1383,7 @@ function ss_add_to_project()
     r.GetSetMediaTrackInfo_String(tr, "P_NAME", role and role.label or slot.role, true)
     r.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH", 0)
     local item = r.AddMediaItemToTrack(tr)
+    added[#added + 1] = item
     local take = r.AddTakeToMediaItem(item)
     local src = r.PCM_Source_CreateFromFile(slot.path)
     if take and src then
@@ -1371,6 +1400,7 @@ function ss_add_to_project()
     last = tr
   end
   r.SetMediaTrackInfo_Value(last, "I_FOLDERDEPTH", -1)
+  ss_rebuild_peaks(added)
   r.PreventUIRefresh(-1)
   if r.TrackList_AdjustWindows then r.TrackList_AdjustWindows(false) end
   r.UpdateArrange()
