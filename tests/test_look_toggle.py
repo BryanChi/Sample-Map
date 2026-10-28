@@ -225,3 +225,14 @@ def test_custom_title_bar_in_space():
     assert bar_flags == 1 and open_ is False      # NoTitleBar added; X click closes
     assert popup_flags == 0                        # "##" windows untouched
     assert classic_flags == 0 and open3 is True and restored
+
+
+def test_caps_letter_spacing_keeps_utf8_characters_whole():
+    L = _runtime()
+    drawn = L.execute("""
+      local out = {}
+      reaper.ImGui_DrawList_AddText = function(_, _, _, _, ch) out[#out + 1] = ch end
+      mono_caps_text({}, 0, 0, 0xFFFFFFFF, "a \\xC2\\xB7 8")
+      return table.concat(out, "|")
+    """)
+    assert drawn == "A| |\u00b7| |8"

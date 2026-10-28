@@ -188,6 +188,8 @@ function mono_corner_ticks(dl, x0, y0, x1, y1, col, k)
   add_line(dl, x1, y1, x1, y1 - k, col, 1)
 end
 
+SM_UTF8_CHAR = "[%z\1-\127\194-\244][\128-\191]*"
+
 -- Uppercase caption in letter-spaced Barlow Semi Condensed. -> width drawn.
 function mono_caps_text(dl, x, y, col, text, spacing)
   spacing = spacing or 1.5
@@ -195,8 +197,8 @@ function mono_caps_text(dl, x, y, col, text, spacing)
   local pushed = sm_mono_push_font("cond")
   local cx = x
   local add_text, calc = r.ImGui_DrawList_AddText, r.ImGui_CalcTextSize
-  for i = 1, #s do
-    local ch = s:sub(i, i)
+  -- One UTF-8 character at a time ("·" is two bytes).
+  for ch in s:gmatch(SM_UTF8_CHAR) do
     add_text(dl, cx, y, col, ch)
     cx = cx + (calc(ctx, ch) or 7) + spacing
   end
@@ -211,7 +213,8 @@ function mono_caps_width(text, spacing)
   spacing = spacing or 1.5
   local s = string.upper(text or "")
   local pushed = sm_mono_push_font("cond")
-  local w = (r.ImGui_CalcTextSize(ctx, s) or (#s * 7)) + math.max(0, #s - 1) * spacing
+  local n = utf8.len(s) or #s
+  local w = (r.ImGui_CalcTextSize(ctx, s) or (n * 7)) + math.max(0, n - 1) * spacing
   if pushed then
     r.ImGui_PopFont(ctx)
   end
