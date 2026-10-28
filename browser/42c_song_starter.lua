@@ -1905,16 +1905,16 @@ local function ss_window_body(st)
     r.ImGui_EndPopup(ctx)
   end
 
-  -- Actions.
-  r.ImGui_Dummy(ctx, 1, 2)
-  local ax, ay = r.ImGui_GetCursorScreenPos(ctx)
-  r.ImGui_DrawList_AddLine(dl, ax, ay, ax + avail_w, ay, SS_COL.line, 1)
   -- Arrangement strip.
   if st.mode == "arrange" then
     r.ImGui_Dummy(ctx, 1, 4)
     ss_draw_arrangement_strip(st, avail_w)
   end
 
+  -- Actions.
+  r.ImGui_Dummy(ctx, 1, 2)
+  local ax, ay = r.ImGui_GetCursorScreenPos(ctx)
+  r.ImGui_DrawList_AddLine(dl, ax, ay, ax + avail_w, ay, SS_COL.line, 1)
   r.ImGui_Dummy(ctx, avail_w, 2)
   if ss_btn("##ss_play", SS_PLAY and "STOP" or "PLAY", 70, 26, SS_PLAY ~= nil, "Play all slots together, looped (Space in this window)") then
     if SS_PLAY then ss_preview_stop() else ss_preview_play() end
@@ -1944,10 +1944,6 @@ local function ss_window_body(st)
     ss_save()
   end
 
-  -- History.
-  r.ImGui_Dummy(ctx, 1, 4)
-  ss_label("Recent")
-  local _, rest_h = r.ImGui_GetContentRegionAvail(ctx)
   -- Mode: LOOP (every slot for N bars) or ARRANGE (sections).
   ss_label("Mode")
   r.ImGui_SameLine(ctx, 0, 6)
@@ -1978,6 +1974,10 @@ local function ss_window_body(st)
     r.ImGui_NewLine(ctx)
   end
 
+  -- History.
+  r.ImGui_Dummy(ctx, 1, 4)
+  ss_label("Recent")
+  local _, rest_h = r.ImGui_GetContentRegionAvail(ctx)
   if r.ImGui_BeginChild(ctx, "##ss_history", 0, math.max(60, tonumber(rest_h) or 120), 0) then
     ss_history_list(st)
     r.ImGui_EndChild(ctx)
