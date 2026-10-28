@@ -832,7 +832,7 @@ function seq_layering_draw_wave_pane(dl, slot, x, y, w, h, kind, hover_side)
   local hot = playing or state.seq_layering_ab == kind
   local bg = hot and 0x112619FF or UI_THEME.bg_panel
   if over then bg = hot and 0x163322FF or UI_THEME.surface end
-  local edge = using and 0x1EFF5E99 or (over and UI_THEME.border_hvr or UI_THEME.border_soft)
+  local edge = using and ui_accent_a(0x99) or (over and UI_THEME.border_hvr or UI_THEME.border_soft)
   ui_draw_panel(dl, x, y, x + w, y + h, 8.0, bg, edge, over, false)
   if using then
     r.ImGui_DrawList_AddRectFilled(dl, x + 1.0, y + 9.0, x + 4.0, y + h - 9.0, UI_THEME.accent, 1.5)
@@ -897,7 +897,7 @@ function seq_layering_draw_wave_pane(dl, slot, x, y, w, h, kind, hover_side)
         local gw = math.max(8.0, math.min(iw, iw * orig_dur / dur))
         seq_layering_draw_wave(dl, "ghost", ix, iy, gw, ih, orig_peaks, 0xFFFFFF0E, nil)
       end
-      seq_layering_draw_wave(dl, "mix", ix, iy, iw, ih, peaks, 0x1EFF5E50, 0x7CFFA2D8)
+      seq_layering_draw_wave(dl, "mix", ix, iy, iw, ih, peaks, ui_accent_a(0x50), 0x7CFFA2D8)
       if ribbon and #ribbon > 0 then
         local ry = y + h - 5.0
         for i = 1, #ribbon do
@@ -1000,7 +1000,7 @@ function seq_layering_vol_knob(id, dl, x, y, size, vert)
     local lw = text_w(label)
     local lx, ly = cx - lw * 0.5, y - 21.0
     r.ImGui_DrawList_AddRectFilled(dl, lx - 6.0, ly, lx + lw + 6.0, ly + 17.0, 0x0C0D10F0, 5.0)
-    r.ImGui_DrawList_AddRect(dl, lx - 6.0, ly, lx + lw + 6.0, ly + 17.0, vol > 1.001 and 0xFFC870AA or 0x1EFF5E88, 5.0, 0, 1.0)
+    r.ImGui_DrawList_AddRect(dl, lx - 6.0, ly, lx + lw + 6.0, ly + 17.0, vol > 1.001 and 0xFFC870AA or ui_accent_a(0x88), 5.0, 0, 1.0)
     r.ImGui_DrawList_AddText(dl, lx, ly + 1.5, 0xFFFFFFFF, label)
     tooltip("Corner volume " .. label .. "\nShift: fine  ·  Double-click: 100%")
   elseif hovered then
@@ -1848,7 +1848,7 @@ function seq_layering_draw_triangle(dl, slot, side_key, x, y, w, h)
   r.ImGui_DrawList_AddText(dl, x + 24.0, hy - 7.0, UI_THEME.text, label)
   local after_label = x + 24.0 + text_w(label) + 10.0
   if linked then
-    after_label = after_label + draw_pill(dl, after_label, hy, "LINKED", UI_THEME.accent_fill, 0x1EFF5E55, UI_THEME.accent, 16.0) + 8.0
+    after_label = after_label + draw_pill(dl, after_label, hy, "LINKED", UI_THEME.accent_fill, ui_accent_a(0x55), UI_THEME.accent, 16.0) + 8.0
   end
   local btn = 20.0
   local bx = x + w - 8.0 - btn
@@ -2445,7 +2445,7 @@ end
 function seq_layering_header(dl, slot, x, y, w)
   local h = SEQ_LAYER_HEADER_H
   r.ImGui_DrawList_AddRectFilled(dl, x, y, x + h, y + h, UI_THEME.accent_fill, UI_METRICS.radius_ctrl)
-  r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + h - 0.5, y + h - 0.5, 0x1EFF5E44, UI_METRICS.radius_ctrl, 0, 1.0)
+  r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + h - 0.5, y + h - 0.5, ui_accent_a(0x44), UI_METRICS.radius_ctrl, 0, 1.0)
   seq_layering_draw_glyph(dl, "triangle", x + h * 0.5, y + h * 0.5 + 1.0, h, UI_THEME.accent)
   local title = "Drum Layering"
   local tw = text_w(title)

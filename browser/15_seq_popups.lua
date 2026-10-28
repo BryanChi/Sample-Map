@@ -621,7 +621,7 @@ function render_preview_history_popup()
       local is_cur = current_path and sample.path == current_path
       if is_cur then
         r.ImGui_DrawList_AddRectFilled(dl, px + 3, ry, px + win_w - 3, ry + row_h,
-          seq_minimap_fade_col(0x1EFF5E44, alpha), 4.0)
+          seq_minimap_fade_col(ui_accent_a(0x44), alpha), 4.0)
       elseif hovered_row then
         r.ImGui_DrawList_AddRectFilled(dl, px + 3, ry, px + win_w - 3, ry + row_h,
           seq_minimap_fade_col(0xFFFFFF18, alpha), 4.0)

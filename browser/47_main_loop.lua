@@ -103,6 +103,7 @@ function sm_loop_frame()
   local ui_ok, ui_err = xpcall(function()
   visible, open, began = begin_window()
   if visible then
+    sm_mono_space_backdrop()
     if r.ImGui_GetWindowPos and r.ImGui_GetWindowSize then
       local wx, wy = r.ImGui_GetWindowPos(ctx)
       local ww, wh = r.ImGui_GetWindowSize(ctx)

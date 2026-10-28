@@ -98,6 +98,9 @@ function settings_section_should_show(label)
     end
     return false
   end
+  if label == "Look" then
+    return settings_matches("Look", "Classic", "Monolith", "Space", "theme", "dark", "galaxy")
+  end
   if label == "Updates" then
     return settings_matches(
       "Update", "GitHub", "Download", "version", "Check for updates", "install"
@@ -835,6 +838,26 @@ function settings_render_drum_layering()
   end
 end
 
+function settings_render_look()
+  local on = SM_MONO_SPACE and true or false
+  if settings_show("Classic") then
+    if draw_ui_radio("look_classic", "Classic", not on) and on then
+      sm_look_set(false)
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      r.ImGui_SetTooltip(ctx, "The original rounded dark look.")
+    end
+  end
+  if settings_show("Monolith Space", "Monolith", "Space", "galaxy") then
+    if draw_ui_radio("look_mono_space", "Monolith Space", on) and not on then
+      sm_look_set(true)
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      r.ImGui_SetTooltip(ctx, "Square hairline Monolith design on a deep-space canvas with star dust, cyan accent and green selection ticks.")
+    end
+  end
+end
+
 function settings_groups()
   local groups = {
     { caption = "Library", sections = {
@@ -853,6 +876,7 @@ function settings_groups()
       { label = "Drum Layering", open = false, draw = settings_render_drum_layering },
     } },
     { caption = "General", sections = {
+      { label = "Look", open = false, draw = settings_render_look },
       { label = "Keyboard Shortcuts", open = false, draw = settings_render_keyboard_shortcuts },
     } },
   }
@@ -876,6 +900,7 @@ function render_settings()
   local visible, open = r.ImGui_Begin(ctx, "Settings", true, r.ImGui_WindowFlags_None())
 
   if visible then
+    sm_mono_space_backdrop()
     r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_ItemSpacing(), 8, 6)
     r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FramePadding(), 6, 4)
 

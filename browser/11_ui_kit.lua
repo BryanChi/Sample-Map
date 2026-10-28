@@ -28,6 +28,10 @@ UI_THEME = {
   accent_hvr    = 0x62FF8AFF,
   accent_fill   = 0x0E2A18FF,
   accent_fill_h = 0x174A24FF,
+  accent_press  = 0x0A2212FF,
+  accent_strong = 0x145028FF,
+  accent_strong_h = 0x1A5A2CFF,
+  accent_strong_a = 0x0F3018FF,
   danger        = 0xE07070FF,
   danger_fill   = 0x3A1E1EFF,
   danger_hvr    = 0x4A2828FF,
@@ -70,7 +74,11 @@ function ui_group_caption(text)
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local label = string.upper(text or "")
   local tw, th = r.ImGui_CalcTextSize(ctx, label)
-  r.ImGui_DrawList_AddText(dl, x + 2, y, UI_THEME.text_mute, label)
+  if SM_MONO_SPACE then
+    tw = mono_caps_text(dl, x + 2, y, UI_THEME.text_dim, label)
+  else
+    r.ImGui_DrawList_AddText(dl, x + 2, y, UI_THEME.text_mute, label)
+  end
   local avail = r.ImGui_GetContentRegionAvail(ctx)
   local line_x0 = x + tw + 12
   local line_x1 = x + (avail or 0) - 2
@@ -91,7 +99,7 @@ function ui_popup_header(icon, title, meta)
   local text_x = x
   if icon then
     r.ImGui_DrawList_AddRectFilled(dl, x, y, x + h, y + h, UI_THEME.accent_fill, UI_METRICS.radius_ctrl)
-    r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + h - 0.5, y + h - 0.5, 0x1EFF5E44, UI_METRICS.radius_ctrl, 0, 1.0)
+    r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + h - 0.5, y + h - 0.5, ui_accent_a(0x44), UI_METRICS.radius_ctrl, 0, 1.0)
     ui_button_draw_icon(dl, icon, x + h * 0.5, y + h * 0.5, h, UI_THEME.accent)
     text_x = x + h + 9
   end
@@ -203,6 +211,11 @@ function ui_fit_child_end(key, opened)
   imgui_end_child(true)
 end
 
+-- Theme accent with a given alpha byte (0x00..0xFF).
+function ui_accent_a(a)
+  return ((UI_THEME.accent or 0x1EFF5EFF) & 0xFFFFFF00) | (a & 0xFF)
+end
+
 -- ImGui enum getter -> value. Enum values are constants, so each getter is
 -- called once instead of ~60 times per frame by ui_push_theme.
 SM_ENUM_VALUE = {}
@@ -217,6 +230,9 @@ function sm_enum(getter)
 end
 
 function ui_push_theme()
+  if sm_look_sync then
+    sm_look_sync()
+  end
   local n_col, n_var = 0, 0
   local push_col, push_var = r.ImGui_PushStyleColor, r.ImGui_PushStyleVar
   local function col(getter, value)
@@ -246,7 +262,7 @@ function ui_push_theme()
   col(r.ImGui_Col_BorderShadow, 0x00000000)
   col(r.ImGui_Col_Text, T.text)
   col(r.ImGui_Col_TextDisabled, T.text_mute)
-  col(r.ImGui_Col_TextSelectedBg, 0x1EFF5E40)
+  col(r.ImGui_Col_TextSelectedBg, ui_accent_a(0x40))
   col(r.ImGui_Col_TitleBg, T.title_bg)
   col(r.ImGui_Col_TitleBgActive, T.title_bg_act)
   col(r.ImGui_Col_TitleBgCollapsed, T.title_bg)
@@ -259,15 +275,15 @@ function ui_push_theme()
   col(r.ImGui_Col_ButtonActive, T.surface_act)
   col(r.ImGui_Col_Header, T.accent_fill)
   col(r.ImGui_Col_HeaderHovered, T.accent_fill_h)
-  col(r.ImGui_Col_HeaderActive, 0x1A5A2CFF)
+  col(r.ImGui_Col_HeaderActive, T.accent_strong_h)
   col(r.ImGui_Col_Separator, T.border)
   col(r.ImGui_Col_SeparatorHovered, T.border_hvr)
   col(r.ImGui_Col_SeparatorActive, T.accent)
   col(r.ImGui_Col_CheckMark, T.accent)
   col(r.ImGui_Col_SliderGrab, T.accent)
   col(r.ImGui_Col_SliderGrabActive, T.accent_hvr)
-  col(r.ImGui_Col_ResizeGrip, 0x1EFF5E22)
-  col(r.ImGui_Col_ResizeGripHovered, 0x1EFF5E66)
+  col(r.ImGui_Col_ResizeGrip, ui_accent_a(0x22))
+  col(r.ImGui_Col_ResizeGripHovered, ui_accent_a(0x66))
   col(r.ImGui_Col_ResizeGripActive, T.accent)
   col(r.ImGui_Col_ScrollbarBg, 0x0D0E1100)
   col(r.ImGui_Col_ScrollbarGrab, 0x43444770)
@@ -285,17 +301,18 @@ function ui_push_theme()
   col(r.ImGui_Col_PlotHistogram, T.accent)
   col(r.ImGui_Col_NavHighlight, 0x00000000)
 
-  var1(r.ImGui_StyleVar_WindowRounding, 10)
+  local mono = SM_MONO_SPACE
+  var1(r.ImGui_StyleVar_WindowRounding, mono and 0 or 10)
   var1(r.ImGui_StyleVar_ChildRounding, UI_METRICS.radius_panel)
   var1(r.ImGui_StyleVar_PopupRounding, UI_METRICS.radius_panel)
   var1(r.ImGui_StyleVar_FrameRounding, UI_METRICS.radius_ctrl)
-  var1(r.ImGui_StyleVar_GrabRounding, 4)
+  var1(r.ImGui_StyleVar_GrabRounding, mono and 0 or 4)
   var1(r.ImGui_StyleVar_TabRounding, UI_METRICS.radius_ctrl)
-  var1(r.ImGui_StyleVar_ScrollbarRounding, 8)
+  var1(r.ImGui_StyleVar_ScrollbarRounding, mono and 0 or 8)
   var1(r.ImGui_StyleVar_WindowBorderSize, 1)
   var1(r.ImGui_StyleVar_ChildBorderSize, 0)
   var1(r.ImGui_StyleVar_PopupBorderSize, 1)
-  var1(r.ImGui_StyleVar_FrameBorderSize, 0)
+  var1(r.ImGui_StyleVar_FrameBorderSize, mono and 1 or 0)
   var2(r.ImGui_StyleVar_WindowPadding, 10, 8)
   var2(r.ImGui_StyleVar_FramePadding, 8, 4)
   var2(r.ImGui_StyleVar_ItemSpacing, 6, 5)
@@ -330,11 +347,15 @@ end
 
 function ui_draw_panel(dl, x0, y0, x1, y1, rounding, bg, border, hovered, active)
   rounding = rounding or 7.0
+  local mono = SM_MONO_SPACE
+  if mono then
+    rounding = 0
+  end
   if hovered and not active then
     r.ImGui_DrawList_AddRectFilled(dl, x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5, 0xFFFFFF10, rounding + 0.5)
   end
   r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, bg, rounding)
-  if not active then
+  if not active and not mono then
     r.ImGui_DrawList_AddLine(dl, x0 + rounding, y0 + 1.0, x1 - rounding, y0 + 1.0, 0xFFFFFF16, 1.0)
   end
   if border and border ~= 0 then
@@ -368,21 +389,21 @@ function ui_button_colors(style, hovered, active, selected)
     if hovered then return T.danger_hvr, 0xE0707028, 0xFFFFFFFF, 0xE0707055, 1.0 end
     return 0x2C1818FF, 0x00000000, 0xF0C4C4FF, 0xE0707033, 1.0
   elseif style == "ghost_arrow" then
-    if active then return 0x00000000, 0x00000000, 0xB6FFD0FF, 0x1EFF5E33, 0.0 end
-    if hovered then return 0x00000000, 0x00000000, 0xFFFFFFFF, 0x1EFF5E28, 0.0 end
+    if active then return 0x00000000, 0x00000000, 0xB6FFD0FF, ui_accent_a(0x33), 0.0 end
+    if hovered then return 0x00000000, 0x00000000, 0xFFFFFFFF, ui_accent_a(0x28), 0.0 end
     return 0x00000000, 0x00000000, 0x9C9DA1FF, 0x00000000, 0.0
   elseif style == "success" then
     if active then return T.success_fill, 0x00000000, 0xFFFFFFFF, T.success, 1.0 end
     if hovered then return T.success_hvr, 0x5EDC8A28, 0xFFFFFFFF, 0x5EDC8A55, 1.0 end
     return 0x173022FF, 0x00000000, 0xD4F5E0FF, 0x5EDC8A33, 1.0
   elseif style == "primary" or selected then
-    if active then return 0x0A2212FF, 0x00000000, 0xFFFFFFFF, T.accent, 1.2 end
-    if hovered then return T.accent_fill_h, 0x1EFF5E28, 0xFFFFFFFF, T.accent_hvr, 1.2 end
-    return T.accent_fill, 0x00000000, 0xE8F8EEFF, 0x1EFF5E66, 1.0
+    if active then return T.accent_press, 0x00000000, 0xFFFFFFFF, T.accent, 1.2 end
+    if hovered then return T.accent_fill_h, ui_accent_a(0x28), 0xFFFFFFFF, T.accent_hvr, 1.2 end
+    return T.accent_fill, 0x00000000, 0xE8F8EEFF, ui_accent_a(0x66), 1.0
   elseif style == "accent" then
-    if active then return 0x0F3018FF, 0x00000000, 0xFFFFFFFF, T.accent_hvr, 1.2 end
-    if hovered then return 0x1A5A2CFF, 0x1EFF5E33, 0xFFFFFFFF, T.accent_hvr, 1.2 end
-    return 0x145028FF, 0x00000000, 0xF0FFF4FF, T.accent, 1.0
+    if active then return T.accent_strong_a, 0x00000000, 0xFFFFFFFF, T.accent_hvr, 1.2 end
+    if hovered then return T.accent_strong_h, ui_accent_a(0x33), 0xFFFFFFFF, T.accent_hvr, 1.2 end
+    return T.accent_strong, 0x00000000, 0xF0FFF4FF, T.accent, 1.0
   end
   if active then return T.surface_act, 0x00000000, 0xFFFFFFFF, T.border_hvr, 1.0 end
   if hovered then return T.surface_hvr, 0xFFFFFF10, 0xFFFFFFFF, T.border_hvr, 1.0 end
@@ -738,7 +759,9 @@ function draw_ui_button(id, label, w, h, opts)
       r.ImGui_DrawList_AddRectFilled(dl, x0 - 1, y0 - 1, x1 + 1, y1 + 1, glow, rounding + 1)
     end
     ui_draw_panel(dl, x0, y0, x1, y1, rounding, bg, border, hovered, active)
-    if opts.selected then
+    if opts.selected and SM_MONO_SPACE then
+      mono_corner_ticks(dl, x0, y0, x1 - 1, y1 - 1, MONO_COL.tick, math.min(6, h * 0.3))
+    elseif opts.selected then
       r.ImGui_DrawList_AddRectFilled(dl, x0 + 6, y1 - 3, x1 - 6, y1 - 1.5, tint or UI_THEME.accent, 1.5)
     end
   end
@@ -1517,7 +1540,7 @@ function draw_ui_radio(id, label, selected)
   if selected then
     r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, rad * 0.42, UI_THEME.accent, 16)
   elseif hovered then
-    r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, rad * 0.22, 0x1EFF5E66, 12)
+    r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, rad * 0.22, ui_accent_a(0x66), 12)
   end
   r.ImGui_DrawList_AddText(dl, x0 + rad * 2 + gap, y0 + (h - th) * 0.5, UI_THEME.text, label)
   return clicked

@@ -50,6 +50,7 @@ SAMPLE_MAP_BROWSER_MODULES = {
   "10_map_index.lua",
   "11_ui_kit.lua",
   "11b_hint_card.lua",
+  "11c_monolith.lua",
   "12_seq_tracks.lua",
   "13_seq_track_order.lua",
   "14_seq_note_samples.lua",

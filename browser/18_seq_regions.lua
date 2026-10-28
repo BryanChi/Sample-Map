@@ -931,7 +931,7 @@ function seq_draw_region_rename_completion(edit, x0, y0, x1, y1)
   local sy0 = text_y - 1
   local sx1 = math.min(x1 - 2, sx0 + tw_suffix + 1)
   local sy1 = text_y + th + 1
-  r.ImGui_DrawList_AddRectFilled(dl, sx0, sy0, sx1, sy1, 0x1EFF5E99, 2.0)
+  r.ImGui_DrawList_AddRectFilled(dl, sx0, sy0, sx1, sy1, ui_accent_a(0x99), 2.0)
   r.ImGui_DrawList_AddText(dl, text_x, text_y, 0xFFFFFFFF, prefix)
   r.ImGui_DrawList_AddText(dl, sx0, text_y, 0xFFFFFFFF, suffix)
 end

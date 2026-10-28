@@ -376,7 +376,7 @@ local function render_map_tab_item(tab, idx, x, y, w, h, vertical, can_close)
   if active then
     text_col = UI_THEME.text
     r.ImGui_DrawList_AddRectFilled(dl, x, y, x1, y1, hovered and UI_THEME.accent_fill_h or UI_THEME.accent_fill, rad)
-    r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x1 - 0.5, y1 - 0.5, 0x1EFF5E50, rad, 0, 1.0)
+    r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x1 - 0.5, y1 - 0.5, ui_accent_a(0x50), rad, 0, 1.0)
     if vertical then
       r.ImGui_DrawList_AddRectFilled(dl, x + 2, y + 4, x + 4.5, y1 - 4, UI_THEME.accent, 2)
     else

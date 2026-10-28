@@ -136,7 +136,7 @@ function map_ui_draw_drop_preview()
   else
     hy0 = y1 - (y1 - y0) * t
   end
-  r.ImGui_DrawList_AddRectFilled(dl, hx0, hy0, hx1, hy1, 0x1EFF5E40, 5)
+  r.ImGui_DrawList_AddRectFilled(dl, hx0, hy0, hx1, hy1, ui_accent_a(0x40), 5)
   r.ImGui_DrawList_AddRect(dl, hx0 + 1, hy0 + 1, hx1 - 1, hy1 - 1, UI_THEME.accent, 5, 0, 2)
 end
 

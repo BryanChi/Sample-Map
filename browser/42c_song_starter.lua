@@ -1505,6 +1505,7 @@ function render_song_starter_window()
     ss_save()
   end
   if visible then
+    sm_mono_space_backdrop()
     local ok, err = pcall(ss_window_body, st)
     if not ok and sm_report_error then
       sm_report_error("Song Starter", err)

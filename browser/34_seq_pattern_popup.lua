@@ -1641,7 +1641,7 @@ end
 -- Row panel shared by every list row; selected rows get an accent edge bar.
 local function seq_pattern_row_panel(dl, x0, y0, x1, y1, selected, hovered, rounding)
   local fill = selected and UI_THEME.accent_fill or UI_THEME.bg_panel
-  local edge = selected and 0x1EFF5E88 or UI_THEME.border_soft
+  local edge = selected and ui_accent_a(0x88) or UI_THEME.border_soft
   if hovered then
     fill = selected and UI_THEME.accent_fill_h or UI_THEME.surface_hvr
     edge = selected and UI_THEME.accent_hvr or UI_THEME.border_hvr
@@ -1911,7 +1911,7 @@ function seq_pattern_window_header(region_name)
   local avail = r.ImGui_GetContentRegionAvail(ctx) or 0
   local h = 26
   r.ImGui_DrawList_AddRectFilled(dl, x, y, x + h, y + h, UI_THEME.accent_fill, UI_METRICS.radius_ctrl)
-  r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + h - 0.5, y + h - 0.5, 0x1EFF5E44, UI_METRICS.radius_ctrl, 0, 1.0)
+  r.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5, x + h - 0.5, y + h - 0.5, ui_accent_a(0x44), UI_METRICS.radius_ctrl, 0, 1.0)
   ui_button_draw_icon(dl, "steps", x + h * 0.5, y + h * 0.5, h, UI_THEME.accent)
   local title = "Patterns"
   local tw, th = r.ImGui_CalcTextSize(ctx, title)

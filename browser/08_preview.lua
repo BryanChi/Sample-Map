@@ -527,7 +527,7 @@ function draw_preview_volume_knob(knob_size)
   r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, radius - 0.5, fill, 22)
   r.ImGui_DrawList_AddCircle(dl, cx, cy, radius - 0.5, accent, 22, hovered and 1.8 or 1.3)
   if hovered or active then
-    r.ImGui_DrawList_AddCircle(dl, cx, cy, radius + 1.5, 0x1EFF5E33, 22, 1.0)
+    r.ImGui_DrawList_AddCircle(dl, cx, cy, radius + 1.5, ui_accent_a(0x33), 22, 1.0)
   end
   local arc_r = radius - 3.0
   local n = 18

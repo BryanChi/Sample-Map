@@ -36,7 +36,7 @@ function seq_midi_draw_keyboard(dl, x, y, w, h, slot, octave)
     local selected = in_range(note)
     local fill
     if black then
-      fill = selected and 0x1EFF5EFF or (hovered and 0x434447FF or 0x151619FF)
+      fill = selected and UI_THEME.accent or (hovered and 0x434447FF or 0x151619FF)
     else
       fill = selected and 0x174A24FF or (hovered and 0xEBECF0FF or 0xDBDCE0FF)
     end
@@ -192,7 +192,7 @@ function render_seq_midi_assign_popup()
     120, 18, lo, 0, 127,
     {
       horizontal = true,
-      fill_color = 0x1EFF5EFF,
+      fill_color = UI_THEME.accent,
       format_value = function(v)
         v = seq_midi_clamp_note(v)
         return "Lo " .. seq_midi_note_name(v) .. "  " .. tostring(v)
