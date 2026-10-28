@@ -807,7 +807,7 @@ function ss_state()
   st = {
     open = false, target_bpm = nil, target_key = nil, key_auto = true, chaos = 0.25, scope = "library",
     bars = 8, set_tempo = false, slots = {}, history = {}, next_id = 0,
-    mode = "loop", template = "club", arr = nil,
+    mode = "loop", template = "club", arr = nil, hist_filter = "all",
   }
   state.song_starter = st
   local content = sm_read_nonempty_file and sm_read_nonempty_file(SS_FILE)
@@ -825,6 +825,7 @@ function ss_state()
     st.bars = (cfg.bars == 4 or cfg.bars == 16) and cfg.bars or 8
     st.set_tempo = cfg.set_tempo == true
     st.mode = (cfg.mode == "arrange") and "arrange" or "loop"
+    st.hist_filter = (cfg.hist_filter == "liked") and "liked" or "all"
     st.template = SS_TEMPLATE[cfg.template] and cfg.template or "club"
     if ss_arr_valid(cfg.arr) then st.arr = cfg.arr end
     for _, sl in ipairs(type(cfg.slots) == "table" and cfg.slots or {}) do
@@ -839,6 +840,10 @@ function ss_state()
     end
     for _, h in ipairs(type(cfg.history) == "table" and cfg.history or {}) do
       if type(h) == "table" and type(h.slots) == "table" then
+        if h.pinned then
+          -- pins became likes
+          h.liked, h.pinned = true, nil
+        end
         st.history[#st.history + 1] = h
       end
     end
@@ -865,7 +870,7 @@ function ss_save_now()
     v = 1, open = st.open == true, target_bpm = st.target_bpm, target_key = st.target_key,
     key_auto = st.key_auto ~= false, chaos = st.chaos, scope = st.scope, bars = st.bars,
     set_tempo = st.set_tempo == true, slots = slots, history = st.history,
-    mode = st.mode, template = st.template, arr = st.arr,
+    mode = st.mode, template = st.template, arr = st.arr, hist_filter = st.hist_filter,
   }
   local ok, json = pcall(json_encode, cfg)
   if ok and type(json) == "string" then
@@ -912,16 +917,16 @@ function ss_arr_valid(arr)
   return true
 end
 
-local function ss_snapshot_sig(h)
+function ss_snapshot_sig(h)
   local parts = { tostring(h.key), string.format("%.2f", tonumber(h.bpm) or 0), tostring(h.mode),
     tostring(h.template) }
   for _, s in ipairs(h.slots or {}) do parts[#parts + 1] = tostring(s.role) .. "=" .. tostring(s.path) end
   return table.concat(parts, "|")
 end
 
--- Add the current starter to history (pinned = Save). Unpinned entries past
--- SS_HISTORY_MAX drop off the end; pinned ones stay.
-function ss_history_push(st, pinned)
+-- Add the current starter to history (liked = LIKE). Unliked entries past
+-- SS_HISTORY_MAX drop off the end; liked ones stay.
+function ss_history_push(st, liked)
   local h = ss_snapshot(st)
   if not h then
     return nil
@@ -930,23 +935,23 @@ function ss_history_push(st, pinned)
   for i, old in ipairs(st.history) do
     if ss_snapshot_sig(old) == sig then
       table.remove(st.history, i)
-      h.pinned = old.pinned
+      h.liked = old.liked
       break
     end
   end
-  if pinned then
-    h.pinned = true
+  if liked then
+    h.liked = true
   end
   table.insert(st.history, 1, h)
-  local unpinned = 0
+  local unliked = 0
   for i = 1, #st.history do
-    if not st.history[i].pinned then unpinned = unpinned + 1 end
+    if not st.history[i].liked then unliked = unliked + 1 end
   end
   for i = #st.history, 1, -1 do
-    if unpinned <= SS_HISTORY_MAX then break end
-    if not st.history[i].pinned then
+    if unliked <= SS_HISTORY_MAX then break end
+    if not st.history[i].liked then
       table.remove(st.history, i)
-      unpinned = unpinned - 1
+      unliked = unliked - 1
     end
   end
   ss_save()
@@ -1930,43 +1935,213 @@ local function ss_slot_row(st, slot, i, row_w)
   r.ImGui_Dummy(ctx, row_w, 0)
 end
 
-local function ss_history_list(st)
-  if #st.history == 0 then
-    r.ImGui_TextColored(ctx, SS_COL.mute, "Starters you make show up here.")
-    return
+-- Role colours for the mini slot bars on recent cards.
+SS_ROLE_COL = {
+  drums = 0x49CC85FF, top = 0x7FD8B0FF, bass = 0x5A8FBFFF,
+  chords = 0xD9A441FF, lead = 0xE07A9AFF, texture = 0x8E6CC9FF,
+}
+SS_CARD = 96   -- recent card size (square)
+
+function ss_rel_time(t, now)
+  local d = math.max(0, (now or os.time()) - (tonumber(t) or 0))
+  if d < 60 then return "now" end
+  if d < 3600 then return string.format("%dm", d // 60) end
+  if d < 86400 then return string.format("%dh", d // 3600) end
+  return string.format("%dd", d // 86400)
+end
+
+-- Heart outline / fill centred on cx, cy (two arcs + a point), size = width.
+function ss_draw_heart(dl, cx, cy, size, col, filled)
+  local r0 = size * 0.27
+  local lx, rx, ty = cx - r0, cx + r0, cy - size * 0.12
+  local by = cy + size * 0.42
+  if filled then
+    r.ImGui_DrawList_AddCircleFilled(dl, lx, ty, r0, col)
+    r.ImGui_DrawList_AddCircleFilled(dl, rx, ty, r0, col)
+    r.ImGui_DrawList_AddTriangleFilled(dl, cx - 2 * r0 + 0.3, ty + r0 * 0.35, cx + 2 * r0 - 0.3, ty + r0 * 0.35, cx, by, col)
+  else
+    r.ImGui_DrawList_AddCircle(dl, lx, ty, r0, col, 12, 1)
+    r.ImGui_DrawList_AddCircle(dl, rx, ty, r0, col, 12, 1)
+    r.ImGui_DrawList_AddLine(dl, cx - 2 * r0, ty + r0 * 0.2, cx, by, col, 1)
+    r.ImGui_DrawList_AddLine(dl, cx + 2 * r0, ty + r0 * 0.2, cx, by, col, 1)
   end
+end
+
+-- History entries the strip shows (newest first), with the filter applied.
+function ss_history_visible(st)
+  local out = {}
   for i, h in ipairs(st.history) do
-    r.ImGui_PushID(ctx, "ss_hist_" .. i)
+    if st.hist_filter ~= "liked" or h.liked then
+      out[#out + 1] = { h = h, index = i }
+    end
+  end
+  return out
+end
+
+function ss_liked_count(st)
+  local n = 0
+  for _, h in ipairs(st.history) do if h.liked then n = n + 1 end end
+  return n
+end
+
+-- History entry for the current starter, if any.
+function ss_history_find_current(st)
+  local cur = ss_snapshot(st)
+  if not cur then return nil end
+  local sig = ss_snapshot_sig(cur)
+  for _, h in ipairs(st.history) do
+    if ss_snapshot_sig(h) == sig then return h end
+  end
+  return nil
+end
+
+-- LIKE button: like / unlike the current starter (adds it to history if new).
+function ss_toggle_like_current(st)
+  local h = ss_history_find_current(st)
+  if h then
+    h.liked = not h.liked or nil
+    ss_save()
+    return h.liked == true
+  end
+  h = ss_history_push(st, true)
+  return h ~= nil
+end
+
+-- One recent card. -> clicked (recall), like toggled.
+function ss_draw_card(st, h, idx)
+  local sz = SS_CARD
+  local clicked = r.ImGui_InvisibleButton(ctx, "##ss_card_" .. idx, sz, sz)
+  local x0, y0 = r.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = x0 + sz, y0 + sz
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, hovered and 0x111111FF or 0x0B0B0BFF, 0)
+  r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, hovered and SS_COL.line_hi or SS_COL.line, 0, 0, 1)
+  if hovered then
+    ss_corner_ticks(dl, x0, y0, x1, y1, SS_COL.accent)
+  end
+  -- key + bpm, large-ish (drawn twice for weight)
+  local key = h.key or "--"
+  ss_text(dl, x0 + 7, y0 + 6, SS_COL.text, key)
+  ss_text(dl, x0 + 7.5, y0 + 6, SS_COL.text, key)
+  ss_text(dl, x0 + 7, y0 + 22, SS_COL.text, string.format("%.0f BPM", tonumber(h.bpm) or 0))
+  local tmpl = SS_TEMPLATE[h.template]
+  local mode = (h.mode == "arrange" and tmpl) and string.upper(tmpl.label) or "LOOP"
+  ss_text(dl, x0 + 7, y0 + 40, SS_COL.mute, mode)
+  -- mini visual: arrangement strip, else one bar per role with a loop
+  local vy0, vy1 = y0 + 60, y0 + 76
+  local vx0, vx1 = x0 + 7, x1 - 7
+  if h.mode == "arrange" and ss_arr_valid(h.arr) and (h.arr.total or 0) > 0 then
+    local px = (vx1 - vx0) / h.arr.total
+    for _, sec in ipairs(h.arr.sections) do
+      local def = SS_SECTION_TYPES[sec.type] or {}
+      local n = 0
+      for _ in pairs(sec.parts) do n = n + 1 end
+      local hh = (vy1 - vy0) * math.min(1, n / 6)
+      r.ImGui_DrawList_AddRectFilled(dl, vx0 + sec.start * px + 0.5, vy1 - hh, vx0 + (sec.start + sec.bars) * px - 0.5, vy1,
+        ((def.color or 0x808080) << 8) | 0xB0, 0)
+    end
+  else
     local roles = {}
+    for _, s in ipairs(h.slots or {}) do roles[#roles + 1] = s end
+    local n = math.max(1, #roles)
+    local bh = (vy1 - vy0) / n
+    for i, s in ipairs(roles) do
+      local by = vy0 + (i - 1) * bh
+      local w = (s.muted and 0.35 or 1) * (vx1 - vx0)
+      r.ImGui_DrawList_AddRectFilled(dl, vx0, by + 0.5, vx0 + w, by + math.max(1, bh - 1), SS_ROLE_COL[s.role] or SS_COL.dim, 0)
+    end
+  end
+  ss_text(dl, x0 + 7, y1 - 17, SS_COL.mute, ss_rel_time(h.t))
+  -- heart, top right: click toggles like instead of recalling
+  local hx, hy, hs = x1 - 13, y0 + 12, 12
+  ss_draw_heart(dl, hx, hy, hs, h.liked and SS_COL.accent or (hovered and SS_COL.dim or SS_COL.mute), h.liked)
+  local liked_click = false
+  if clicked then
+    local mx, my = r.ImGui_GetMousePos(ctx)
+    if mx and my and mx >= hx - hs and mx <= hx + hs and my >= hy - hs and my <= hy + hs then
+      liked_click, clicked = true, false
+    end
+  end
+  if hovered then
+    local names = {}
     for _, s in ipairs(h.slots or {}) do
-      roles[#roles + 1] = SS_ROLE[s.role] and SS_ROLE[s.role].label:match("^(%S+)") or s.role
+      local role = SS_ROLE[s.role]
+      names[#names + 1] = string.format("%s: %s", role and role.label or s.role, tostring(s.name or s.path))
     end
-    local label = string.format("%s%s  %.0f BPM  %s  ·  %s", h.pinned and "* " or "  ",
-      h.key or "--", tonumber(h.bpm) or 0, os.date("%b %d %H:%M", h.t or 0), table.concat(roles, " "))
-    if r.ImGui_Selectable(ctx, label) then
-      ss_history_recall(st, h)
-      ss_preview_resync(nil)
+    r.ImGui_SetTooltip(ctx, table.concat(names, "\n") .. "\n\nClick: recall  ·  Heart: like  ·  Right-click: more")
+  end
+  if r.ImGui_IsItemClicked(ctx, 1) then
+    r.ImGui_OpenPopup(ctx, "ss_card_menu_" .. idx)
+  end
+  if r.ImGui_BeginPopup(ctx, "ss_card_menu_" .. idx) then
+    if r.ImGui_Selectable(ctx, h.liked and "Unlike" or "Like") then
+      liked_click = true
     end
-    if r.ImGui_IsItemClicked(ctx, 1) then
-      r.ImGui_OpenPopup(ctx, "ss_hist_menu")
+    if r.ImGui_Selectable(ctx, "Remove") then
+      st._remove_hist = h
     end
-    if r.ImGui_BeginPopup(ctx, "ss_hist_menu") then
-      if r.ImGui_Selectable(ctx, h.pinned and "Unpin" or "Pin (keep)") then
-        h.pinned = not h.pinned
+    r.ImGui_EndPopup(ctx)
+  end
+  return clicked, liked_click
+end
+
+-- Recent starters as a horizontal strip of square cards, ALL / LIKED filter on
+-- the left. -> { shown = n, liked = n } for tests.
+function ss_history_cards(st)
+  local avail_w = r.ImGui_GetContentRegionAvail(ctx) or 600
+  local filt_w = 64
+  r.ImGui_BeginGroup(ctx)
+  if ss_btn("##ss_hist_all", "ALL", filt_w, 22, st.hist_filter ~= "liked", "Show every recent starter") then
+    st.hist_filter = "all"
+    ss_save()
+  end
+  local nliked = ss_liked_count(st)
+  local lx, ly = r.ImGui_GetCursorScreenPos(ctx)
+  if ss_btn("##ss_hist_liked", "      " .. nliked, filt_w, 22, st.hist_filter == "liked", "Show only liked starters") then
+    st.hist_filter = "liked"
+    ss_save()
+  end
+  ss_draw_heart(r.ImGui_GetWindowDrawList(ctx), lx + 18, ly + 11, 11,
+    st.hist_filter == "liked" and SS_COL.accent or SS_COL.dim, st.hist_filter == "liked")
+  r.ImGui_EndGroup(ctx)
+  r.ImGui_SameLine(ctx, 0, 8)
+  local list = ss_history_visible(st)
+  local flags = r.ImGui_WindowFlags_HorizontalScrollbar and r.ImGui_WindowFlags_HorizontalScrollbar() or 0
+  local child_h = SS_CARD + 16
+  if r.ImGui_BeginChild(ctx, "##ss_history", math.max(1, avail_w - filt_w - 8), child_h, 0, flags) then
+    if #list == 0 then
+      r.ImGui_TextColored(ctx, SS_COL.mute, st.hist_filter == "liked" and "No liked starters yet: click a card's heart."
+        or "Starters you make show up here.")
+    end
+    for i, e in ipairs(list) do
+      if i > 1 then r.ImGui_SameLine(ctx, 0, 6) end
+      local recall, like = ss_draw_card(st, e.h, e.index)
+      if like then
+        e.h.liked = not e.h.liked or nil
         ss_save()
+      elseif recall then
+        ss_history_recall(st, e.h)
+        ss_preview_resync(nil)
       end
-      if r.ImGui_Selectable(ctx, "Remove") then
-        st._remove_hist = i
-      end
-      r.ImGui_EndPopup(ctx)
     end
-    r.ImGui_PopID(ctx)
+    -- mouse wheel scrolls the strip sideways
+    if r.ImGui_IsWindowHovered(ctx) and r.ImGui_GetMouseWheel and r.ImGui_SetScrollX then
+      local wheel = r.ImGui_GetMouseWheel(ctx)
+      if type(wheel) == "number" and wheel ~= 0 then
+        r.ImGui_SetScrollX(ctx, math.max(0, (r.ImGui_GetScrollX(ctx) or 0) - wheel * 60))
+      end
+    end
+    r.ImGui_EndChild(ctx)
   end
   if st._remove_hist then
-    table.remove(st.history, st._remove_hist)
+    for i, h in ipairs(st.history) do
+      if h == st._remove_hist then table.remove(st.history, i) break end
+    end
     st._remove_hist = nil
     ss_save()
   end
+  return { shown = #list, liked = nliked }
 end
 
 SS_STRIP_HEAD_H = 18
@@ -2239,9 +2414,13 @@ local function ss_window_body(st)
     ss_do_reroll("batch")
   end
   r.ImGui_SameLine(ctx, 0, 6)
-  if ss_btn("##ss_save", "SAVE", nil, 26, false, "Pin this starter in the list below") then
-    if ss_history_push(st, true) then sm_notify("Song Starter saved.") end
+  local cur_h = ss_history_find_current(st)
+  local liked_now = cur_h and cur_h.liked
+  local lkx, lky = r.ImGui_GetCursorScreenPos(ctx)
+  if ss_btn("##ss_save", "      LIKE", 74, 26, liked_now, "Like this starter: liked ones stay in Recent for good") then
+    if ss_toggle_like_current(st) then sm_notify("Song Starter liked.") end
   end
+  ss_draw_heart(dl, lkx + 15, lky + 13, 11, liked_now and SS_COL.accent or SS_COL.dim, liked_now)
   r.ImGui_SameLine(ctx, 0, 6)
   if ss_btn("##ss_add", "ADD TO PROJECT", nil, 26, false, st.mode == "arrange"
       and "Folder track with one track per unmuted slot, an item per section and a region per section, at the edit cursor"
@@ -2285,17 +2464,10 @@ local function ss_window_body(st)
     r.ImGui_NewLine(ctx)
   end
 
-  -- History.
+  -- History: recent starters as cards.
   r.ImGui_Dummy(ctx, 1, 4)
   ss_label("Recent")
-  -- The list takes exactly the room left (it scrolls itself): a fixed minimum
-  -- would overflow a short window, and the window scrollbar that brings
-  -- narrows the rows above, which then fit again: the scrollbar flickers.
-  local _, rest_h = r.ImGui_GetContentRegionAvail(ctx)
-  if r.ImGui_BeginChild(ctx, "##ss_history", 0, math.max(1, math.floor(tonumber(rest_h) or 120) - 1), 0) then
-    ss_history_list(st)
-    r.ImGui_EndChild(ctx)
-  end
+  ss_history_cards(st)
 
   -- Space toggles playback while this window has focus and no field is active.
   if r.ImGui_IsWindowFocused and r.ImGui_IsWindowFocused(ctx, r.ImGui_FocusedFlags_RootAndChildWindows and r.ImGui_FocusedFlags_RootAndChildWindows() or 0)

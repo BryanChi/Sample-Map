@@ -415,7 +415,7 @@ def test_add_to_project_builds_folder():
     assert first_child == "Top / Perc"  # drums slot was muted
 
 
-def test_history_cap_pins_and_persistence():
+def test_history_cap_likes_and_persistence():
     L = _runtime()
     out = L.execute(r'''
       local st = ss_state()
@@ -428,7 +428,7 @@ def test_history_cap_pins_and_persistence():
         ss_history_push(st, false)
       end
       local unpinned, pinned = 0, 0
-      for _, h in ipairs(st.history) do if h.pinned then pinned = pinned + 1 else unpinned = unpinned + 1 end end
+      for _, h in ipairs(st.history) do if h.liked then pinned = pinned + 1 else unpinned = unpinned + 1 end end
       st.slots[2].locked = true
       st.chaos = 0.7
       ss_save_now()
@@ -436,9 +436,9 @@ def test_history_cap_pins_and_persistence():
       local locked_path = st.slots[2].path
       state.song_starter = nil
       local st2 = ss_state()
-      -- recall the pinned one
+      -- recall the liked one
       local h
-      for _, e in ipairs(st2.history) do if e.pinned then h = e end end
+      for _, e in ipairs(st2.history) do if e.liked then h = e end end
       local n_hist = #st2.history
       ss_history_recall(st2, h)
       return unpinned, pinned, n_hist, #st2.slots > 0, st2.chaos, slots_before, locked_path,
@@ -1179,3 +1179,104 @@ def test_every_voice_meters_despite_sws_loop_flag_bug():
     metering, total, swapped = got
     assert total >= 5 and metering == total
     assert swapped == 0.5
+
+
+# --- Recent cards with likes ----------------------------------------------------
+
+def test_pins_migrate_to_likes_and_filter_persists():
+    L = _runtime()
+    got = L.execute(r'''
+      local f = io.open(SS_FILE, "w")
+      f:write('{"v":1,"hist_filter":"liked","history":[' ..
+        '{"t":1,"bpm":120,"key":"Am","pinned":true,"slots":[{"role":"drums","path":"/a.wav"}]},' ..
+        '{"t":2,"bpm":124,"key":"C","slots":[{"role":"bass","path":"/b.wav"}]}]}')
+      f:close()
+      state.song_starter = nil
+      local st = ss_state()
+      local h1, h2 = st.history[1], st.history[2]
+      local vis = ss_history_visible(st)
+      ss_save_now()
+      state.song_starter = nil
+      local st2 = ss_state()
+      return h1.liked, h1.pinned, h2.liked, st.hist_filter, #vis, vis[1].h == h1, st2.hist_filter, st2.history[1].liked
+    ''')
+    assert got == (True, None, None, "liked", 1, True, "liked", True)
+
+
+def test_like_button_toggles_current_and_filter_shows_only_liked():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 0.0, false, "Am"
+      ss_do_reroll("batch")          -- pushes an unliked entry
+      local n0 = #st.history
+      local on = ss_toggle_like_current(st)
+      local n1 = #st.history
+      local liked1 = ss_history_find_current(st).liked
+      ss_do_reroll("unlocked")       -- a new unliked one
+      st.hist_filter = "all"
+      local all = #ss_history_visible(st)
+      st.hist_filter = "liked"
+      local liked = #ss_history_visible(st)
+      -- unlike via the same button after recalling the liked one
+      local lh
+      for _, h in ipairs(st.history) do if h.liked then lh = h end end
+      ss_history_recall(st, lh)
+      ss_toggle_like_current(st)
+      return n0, on, n1, liked1, all, liked, lh.liked, ss_liked_count(st)
+    ''')
+    n0, on, n1, liked1, n_all, n_liked, after, count = got
+    assert n0 == 1 and on is True and n1 == 1 and liked1 is True
+    assert n_all == 2 and n_liked == 1
+    assert after is None and count == 0
+
+
+def test_cards_draw_recall_and_heart_click():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key, st.open = 120, 0.0, false, "Am", true
+      ss_do_reroll("batch")
+      st.mode, st.template = "arrange", "club"
+      ss_arrangement(st, true)
+      ss_history_push(st, false)
+      st.mode = "loop"
+      st.target_bpm = 98
+      ss_do_reroll("unlocked")
+      local texts, rects = {}, 0
+      reaper.ImGui_DrawList_AddText = function(_, x, y, c, s) texts[#texts + 1] = s end
+      reaper.ImGui_DrawList_AddRectFilled = function() rects = rects + 1 end
+      reaper.ImGui_BeginChild = function() return true end
+      local res = ss_history_cards(st)
+      render_song_starter_window()
+      local joined = table.concat(texts, "|")
+      -- click the arrange card's body: recall; click its heart: like, no recall
+      local target
+      for i, h in ipairs(st.history) do if h.mode == "arrange" then target = i end end
+      local h = st.history[target]
+      reaper.ImGui_InvisibleButton = function(_, id) return id == "##ss_card_" .. target end
+      reaper.ImGui_GetItemRectMin = function() return 100, 200 end
+      reaper.ImGui_GetMousePos = function() return 130, 260 end   -- body
+      st.mode = "loop"
+      ss_history_cards(st)
+      local recalled_mode = st.mode
+      reaper.ImGui_GetMousePos = function() return 100 + SS_CARD - 13, 212 end   -- heart
+      st.target_bpm = 77
+      ss_history_cards(st)
+      return #ERRORS, ERRORS[1], res.shown, joined:find("CLUB", 1, true) ~= nil, joined:find("98 BPM", 1, true) ~= nil,
+             joined:find("now", 1, true) ~= nil, rects > 10, recalled_mode, h.liked, st.target_bpm
+    ''')
+    n_err, first, shown, has_club, has_bpm, has_time, drew, recalled_mode, liked, bpm = got
+    assert n_err == 0, first
+    assert shown == 3 and has_club and has_bpm and has_time and drew
+    assert recalled_mode == "arrange"
+    assert liked is True and bpm == 77   # heart click liked it without recalling
+
+
+def test_relative_time_labels():
+    L = _runtime()
+    f = L.globals().ss_rel_time
+    assert f(1000, 1030) == "now"
+    assert f(1000, 1000 + 5 * 60) == "5m"
+    assert f(1000, 1000 + 3 * 3600) == "3h"
+    assert f(1000, 1000 + 2 * 86400) == "2d"
