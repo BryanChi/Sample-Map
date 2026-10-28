@@ -21,8 +21,8 @@ HINT_CARD = {
   gap = 8,             -- between the card and the hovered control
   caret = 6,           -- size of the pointer under the card
   shadow = 6,
-  show_delay = 0.16,   -- seconds of hover before a cold card appears
-  warm_time = 0.5,     -- moving to another control within this keeps it up
+  still_delay = 2.0,   -- seconds the mouse must rest (no move, no button) first
+  still_px = 2,        -- movement under this many pixels still counts as resting
   fade_time = 0.12,
 }
 
@@ -655,7 +655,7 @@ function hint_request(c, text, opts)
     return
   end
   local ok = pcall(hint_capture, c or ctx, text, opts)
-  if not ok and HINT_RAW_SET_TOOLTIP then
+  if not ok and HINT_RAW_SET_TOOLTIP and hint_mouse_rested(r.time_precise()) then
     HINT_RAW_SET_TOOLTIP(c or ctx, text)
   end
 end
@@ -684,12 +684,43 @@ local function hint_begin_card_window(c, x, y)
   return open ~= false, pushed_vars, pushed_cols
 end
 
+-- Every tooltip waits until the mouse has rested for HINT_CARD.still_delay:
+-- no movement beyond still_px and no button held. Moving hides it again.
+-- Tracked once per frame by hint_card_flush.
+function hint_track_mouse(c, now)
+  local mx, my = r.ImGui_GetMousePos(c)
+  mx, my = tonumber(mx), tonumber(my)
+  local held = false
+  if r.ImGui_IsMouseDown then
+    for b = 0, 2 do
+      if r.ImGui_IsMouseDown(c, b) then
+        held = true
+        break
+      end
+    end
+  end
+  local lx, ly = hint_state.still_x, hint_state.still_y
+  local moved = (not mx) or (not lx)
+    or math.abs(mx - lx) > HINT_CARD.still_px or math.abs(my - ly) > HINT_CARD.still_px
+  if moved or held or not hint_state.still_since then
+    hint_state.still_since = now
+    hint_state.still_x, hint_state.still_y = mx, my
+  end
+end
+
+function hint_mouse_rested(now)
+  return hint_state.still_since ~= nil and (now - hint_state.still_since) >= HINT_CARD.still_delay
+end
+
 -- Draw the hint requested this frame. Called once per frame from the main loop,
 -- after every window, so the card sits on top of everything.
 function hint_card_flush()
   local req = hint_state.req
   hint_state.req = nil
   local now = r.time_precise()
+  if ctx or (req and req.ctx) then
+    hint_track_mouse((req and req.ctx) or ctx, now)
+  end
   if not req then
     hint_state.pending_text = nil
     return
@@ -698,15 +729,13 @@ function hint_card_flush()
   hint_ctx = c
   if req.text ~= hint_state.pending_text then
     hint_state.pending_text = req.text
-    hint_state.pending_since = now
+    hint_state.visible_since = nil
   end
-  local cold = (now - (hint_state.last_shown or -100)) > HINT_CARD.warm_time
-  if cold then
-    if now - hint_state.pending_since < HINT_CARD.show_delay then
-      return
-    end
-    hint_state.visible_since = now
+  if not hint_mouse_rested(now) then
+    hint_state.visible_since = nil
+    return
   end
+  hint_state.visible_since = hint_state.visible_since or now
   hint_state.last_shown = now
   local f = 1.0
   if HINT_CARD.fade_time > 0 then

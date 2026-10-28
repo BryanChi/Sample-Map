@@ -126,9 +126,11 @@ def test_set_tooltip_draws_card_above_the_control():
     L.execute('''
       MOUSE = {40, 760}; ITEM = {20, 750, 80, 772}
       reaper.ImGui_SetTooltip(ctx, "Grid 1/16\\nAlt+LMB drag = stutter")
-      NOW = 0.05; hint_card_flush()          -- still in the show delay
+      NOW = 0.05; hint_card_flush()          -- mouse has not rested 2 s yet
       reaper.ImGui_SetTooltip(ctx, "Grid 1/16\\nAlt+LMB drag = stutter")
-      NOW = 0.3; hint_card_flush()
+      NOW = 1.5; hint_card_flush()
+      reaper.ImGui_SetTooltip(ctx, "Grid 1/16\\nAlt+LMB drag = stutter")
+      NOW = 2.3; hint_card_flush()
     ''')
     calls = [list(c.values()) for c in L.globals().CALLS.values()]
     names = [c[0] for c in calls]
@@ -154,7 +156,7 @@ def test_card_flips_below_when_no_room_above():
       reaper.ImGui_SetTooltip(ctx, "Sync to Arrange: off")
       NOW = 0.0; hint_card_flush()
       reaper.ImGui_SetTooltip(ctx, "Sync to Arrange: off")
-      NOW = 0.3; hint_card_flush()
+      NOW = 2.3; hint_card_flush()
     ''')
     calls = [list(c.values()) for c in L.globals().CALLS.values()]
     pos = [c for c in calls if c[0] == "ImGui_SetNextWindowPos"]
@@ -164,4 +166,38 @@ def test_card_flips_below_when_no_room_above():
 def test_flush_without_request_draws_nothing():
     L = _runtime()
     L.execute("NOW = 1; hint_card_flush()")
-    assert len(L.globals().CALLS) == 0
+    names = [list(c.values())[0] for c in L.globals().CALLS.values()]
+    # Only the mouse is read (to time the rest); nothing is drawn.
+    assert all(n in ("ImGui_GetMousePos", "ImGui_IsMouseDown") for n in names)
+
+
+def test_tooltip_waits_for_the_mouse_to_rest_two_seconds():
+    L = _runtime()
+    shown = L.execute('''
+      local function frame(t, x, y)
+        MOUSE = {x, y}; ITEM = {20, 300, 80, 322}
+        reaper.ImGui_SetTooltip(ctx, "Shuffle")
+        NOW = t
+        local function begins()
+          local n = 0
+          for _, c in pairs(CALLS) do
+            if c[1] == "ImGui_EndTooltip" then n = n + 1 end
+          end
+          return n
+        end
+        local before = begins()
+        hint_card_flush()
+        return begins() > before
+      end
+      local out = {}
+      out[1] = frame(0.0, 40, 310)     -- arrives
+      out[2] = frame(1.0, 40, 310)     -- resting 1 s
+      out[3] = frame(1.9, 41, 311)     -- tiny jitter keeps resting
+      out[4] = frame(2.1, 41, 311)     -- 2.1 s: shown
+      out[5] = frame(2.2, 60, 310)     -- moved: hidden, timer restarts
+      out[6] = frame(3.9, 60, 310)     -- 1.7 s since the move
+      out[7] = frame(4.3, 60, 310)     -- 2.1 s: shown again
+      return table.concat({tostring(out[1]), tostring(out[2]), tostring(out[3]), tostring(out[4]),
+        tostring(out[5]), tostring(out[6]), tostring(out[7])}, ",")
+    ''')
+    assert shown == "false,false,false,true,false,false,true"
