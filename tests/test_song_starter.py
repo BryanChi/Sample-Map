@@ -925,14 +925,212 @@ def test_draws_cycle_timeline_and_own_playheads():
       reaper.ImGui_DrawList_AddText = function(_, x, y, c, s) texts[#texts + 1] = s end
       render_song_starter_window()
       local tl = ss_draw_cycle_timeline(st, 720)
-      local own = ss_draw_slot_playhead(st, drums, {}, 0, 0, 300)
-      local none = ss_draw_slot_playhead(st, bass, {}, 0, 0, 300)
+      local own = ss_draw_slot_playhead(st, drums, {}, 0, 0, 320, 40)
+      local same = ss_draw_slot_playhead(st, bass, {}, 0, 0, 320, 40)
       local joined = table.concat(texts, "|")
-      return #ERRORS, ERRORS[1], tl.bars, math.abs(tl.now - 2.5) < 1e-9, own.label, none == nil,
-             joined:find("11/16", 1, true) ~= nil, joined:find("16 BAR", 1, true) ~= nil
+      return #ERRORS, ERRORS[1], tl.bars, math.abs(tl.now - 2.5) < 1e-9, own.label, same.label,
+             joined:find("11/16", 1, true) ~= nil, joined:find("16 BAR", 1, true) ~= nil,
+             joined:find("3/8", 1, true) ~= nil
     ''')
-    n_err, first, bars, now_ok, label, none, drew_counter, drew_bars = got
+    n_err, first, bars, now_ok, label, same_label, drew_counter, drew_bars, drew_same = got
     assert n_err == 0, first
     assert bars == 8 and now_ok
-    assert label == "11/16" and none
-    assert drew_counter and drew_bars
+    assert label == "11/16" and same_label == "3/8"
+    assert drew_counter and drew_bars and drew_same
+
+
+# --- Full-height playheads and meters ------------------------------------------
+
+FAKE_CF = r"""
+  reaper.PCM_Source_CreateFromFile = function(p) return { path = p } end
+  reaper.PCM_Source_Destroy = function() end
+  reaper.CF_CreatePreview = function(src) return { vals = {}, path = src.path } end
+  reaper.CF_Preview_SetValue = function(o, k, v) o.vals[k] = v; return true end
+  reaper.CF_Preview_GetValue = function(o, k) return true, 0 end
+  reaper.CF_Preview_Play = function() return true end
+  reaper.CF_Preview_Stop = function() end
+  reaper.CF_Preview_StopAll = function() end
+  PEAK = 0.5
+  reaper.CF_Preview_GetPeak = function(o, ch)
+    return true, (o.vals.D_VOLUME or 0) > 0 and (ch == 0 and PEAK or PEAK * 0.5) or 0
+  end
+  local st = ss_state()
+  st.target_bpm, st.chaos, st.key_auto, st.target_key, st.bars, st.open = 120, 0.0, false, "Am", 8, true
+  ss_do_reroll("batch")
+  BY = {}
+  for _, s in ipairs(st.slots) do BY[s.role] = s end
+  BY.drums.dur, BY.drums.rate = 32.0, 1.0   -- 16 bars
+  BY.bass.dur, BY.bass.rate = 16.0, 1.0     -- 8 bars
+"""
+
+
+def test_full_height_playhead_fill_per_loop_length():
+    L = _runtime()
+    L.execute(FAKE_CF)
+    got = L.execute(r'''
+      local st = ss_state()
+      ss_preview_play()
+      NOW = NOW + 21.0                       -- song bar 10.5
+      local fills, lines = {}, {}
+      local dl = {}
+      reaper.ImGui_DrawList_AddRectFilled = function(_, x0, y0, x1, y1) fills[#fills + 1] = { x0, y0, x1, y1 } end
+      reaper.ImGui_DrawList_AddLine = function(_, x0, y0, x1, y1) lines[#lines + 1] = { x0, y0, x1, y1 } end
+      local long = ss_draw_slot_playhead(st, BY.drums, dl, 0, 100, 400, 140)
+      local f1, l1 = fills[#fills], lines[#lines]
+      local short = ss_draw_slot_playhead(st, BY.bass, dl, 0, 100, 400, 140)
+      local f2 = fills[#fills]
+      return long.hx, f1[2], f1[4], l1[1], l1[2], l1[4], short.hx, f2[3], short.label
+    ''')
+    long_hx, fy0, fy1, lx, ly0, ly1, short_hx, short_fill_x1, short_label = got
+    # 16-bar loop at its bar 10.5: 10.5/16 of the row; 8-bar loop at its bar 2.5: 2.5/8
+    assert abs(long_hx - 400 * 10.5 / 16) < 1e-9
+    assert fy0 == 101 and fy1 == 139 and lx == long_hx and ly0 == 101 and ly1 == 139
+    assert abs(short_hx - 400 * 2.5 / 8) < 1e-9 and abs(short_fill_x1 - short_hx) < 1e-9
+    assert short_label == "3/8"
+
+
+def test_every_row_gets_a_playhead_and_a_meter():
+    L = _runtime()
+    L.execute(FAKE_CF)
+    got = L.execute(r'''
+      local st = ss_state()
+      BY.top.muted = true
+      ss_preview_play()
+      NOW = NOW + 3.0
+      ss_preview_update()
+      local labels = {}
+      reaper.ImGui_DrawList_AddText = function(_, x, y, c, s) if tostring(s):match("^%d+/%d+$") then labels[#labels + 1] = s end end
+      render_song_starter_window()
+      local loaded = 0
+      for _, s in ipairs(st.slots) do if s.path then loaded = loaded + 1 end end
+      local dv = SS_PLAY.voices[BY.drums.id].meter
+      local tv = SS_PLAY.voices[BY.top.id].meter
+      local mm = ss_master_meter()
+      return #ERRORS, ERRORS[1], #labels, loaded, dv[1], dv[2], dv.hold[1], tv[1], mm[1], ss_meter_available()
+    ''')
+    n_err, first, n_labels, loaded, l, r_, hold, muted_peak, master, avail = got
+    assert n_err == 0, first
+    assert n_labels == loaded and loaded >= 5
+    assert l == 0.5 and r_ == 0.25 and hold == 0.5
+    assert muted_peak == 0          # post-volume: muted slot reads silent
+    assert master == 0.5 and avail
+
+
+def test_meter_peak_hold_falls_after_a_second():
+    L = _runtime()
+    got = L.execute(r'''
+      local P = 1.0
+      reaper.CF_Preview_GetPeak = function() return true, P end
+      local v = { obj = {} }
+      ss_meter_read(v, 0.0)
+      P = 0.01
+      ss_meter_read(v, 0.5)
+      local held = v.meter.hold[1]
+      ss_meter_read(v, 1.5)            -- 0.5 s past the hold: fell part way
+      local falling = v.meter.hold[1]
+      ss_meter_read(v, 3.0)            -- fell all the way to the live level
+      return held, falling < 1.0 and falling > 0.01, v.meter.hold[1]
+    ''')
+    held, falling_ok, final = got
+    assert held == 1.0 and falling_ok and abs(final - 0.01) < 1e-9
+
+
+def test_meters_hidden_without_peak_api():
+    L = _runtime()
+    L.execute(FAKE_CF)
+    got = L.execute(r'''
+      rawset(reaper, "CF_Preview_GetPeak", false)
+      local st = ss_state()
+      ss_preview_play()
+      ss_preview_update()
+      local tl = ss_draw_cycle_timeline(st, 720)
+      local any_meter = false
+      for _, v in pairs(SS_PLAY.voices) do if v.meter then any_meter = true end end
+      render_song_starter_window()
+      return ss_meter_available(), tl.master == nil, tl.w == 720, any_meter, #ERRORS
+    ''')
+    assert got == (False, True, True, False, 0)
+
+
+# --- S / M keys on the hovered row ----------------------------------------------
+
+KEYS = r"""
+  PRESSED = {}
+  reaper.ImGui_Key_S = function() return 83 end
+  reaper.ImGui_Key_M = function() return 77 end
+  reaper.ImGui_Key_Space = function() return 32 end
+  reaper.ImGui_IsKeyPressed = function(_, k) return PRESSED[k] == true end
+  reaper.ImGui_IsAnyItemActive = function() return ITEM_ACTIVE == true end
+  CAPTURED = 0
+  reaper.ImGui_SetNextFrameWantCaptureKeyboard = function() CAPTURED = CAPTURED + 1 end
+  is_shift_down = function() return SHIFT == true end
+  imgui_text_input_active = function() return TEXT_ACTIVE == true end
+  is_ctrl_down = function() return false end
+  is_alt_down = function() return false end
+  is_cmd_down = function() return false end
+  local st = ss_state()
+  st.target_bpm, st.chaos, st.key_auto, st.target_key, st.open = 120, 0.0, false, "Am", true
+  ss_do_reroll("batch")
+"""
+
+
+def test_s_and_m_keys_toggle_the_hovered_row():
+    L = _runtime()
+    L.execute(KEYS)
+    got = L.execute(r'''
+      local st = ss_state()
+      local slot = st.slots[3]
+      st._hover_slot_id = slot.id
+      PRESSED[83] = true
+      local a = ss_handle_row_keys(st)
+      local solo1 = slot.solo
+      PRESSED = { [77] = true }
+      local b = ss_handle_row_keys(st)
+      local muted1 = slot.muted
+      -- with Shift held, or while a slider drag is active: nothing
+      SHIFT = true
+      local c = ss_handle_row_keys(st)
+      SHIFT, ITEM_ACTIVE = false, true
+      local d = ss_handle_row_keys(st)
+      ITEM_ACTIVE, TEXT_ACTIVE = false, true
+      d = d or ss_handle_row_keys(st)
+      TEXT_ACTIVE = false
+      -- no hovered row: nothing
+      st._hover_slot_id = nil
+      local e = ss_handle_row_keys(st)
+      local others = false
+      for i, s in ipairs(st.slots) do if i ~= 3 and (s.solo or s.muted) then others = true end end
+      return a, solo1, b, muted1, c, d, e, others, CAPTURED, slot.muted
+    ''')
+    a, solo1, b, muted1, c, d, e, others, captured, still_muted = got
+    assert (a, solo1, b, muted1) == ("solo", True, "mute", True)
+    assert c is None and d is None and e is None
+    assert not others and captured == 2 and still_muted is True
+
+
+def test_hover_in_window_marks_row_and_blocks_sample_map_shortcuts():
+    L = _runtime()
+    L.execute(KEYS)
+    got = L.execute(r'''
+      local st = ss_state()
+      reaper.ImGui_IsMouseHoveringRect = function() return true end   -- every row (same rect in the stub)
+      reaper.ImGui_IsWindowHovered = function() return true end
+      PRESSED = { [77] = true }
+      render_song_starter_window()
+      local last = st.slots[#st.slots]
+      local hot = SS_WINDOW_HOT
+      -- Sample Map's shortcut handler stands down while the window is hot
+      local ran = 0
+      reaper.Main_OnCommand = function() ran = ran + 1 end
+      PRESSED = { [32] = true }
+      handle_script_keyboard_shortcuts()
+      local blocked = ran
+      SS_WINDOW_HOT = false
+      handle_script_keyboard_shortcuts()
+      return #ERRORS, ERRORS[1], last.muted, hot, blocked, ran
+    ''')
+    n_err, first, muted, hot, blocked, ran = got
+    assert n_err == 0, first
+    assert muted is True and hot is True
+    assert blocked == 0
+    assert ran >= 1  # not hot: Space reaches Sample Map's play_stop (REAPER transport)

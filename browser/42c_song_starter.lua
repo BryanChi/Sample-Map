@@ -1200,6 +1200,7 @@ function ss_preview_update()
       if r.CF_Preview_GetValue and ok_get and ret ~= false then
         alive = true
       end
+      ss_meter_read(v, r.time_precise())
       local vol = ss_voice_volume(st, slot, elapsed)
       if v.vol ~= vol then
         pcall(r.CF_Preview_SetValue, v.obj, "D_VOLUME", vol)
@@ -1592,12 +1593,6 @@ function ss_cycle_bar_now(st)
   return (math.max(0, elapsed) * (st.target_bpm or 120) / 240.0) % (st.bars or 8)
 end
 
--- A slot gets its own playhead when its loop is not the bar setting's length.
-function ss_slot_shows_own(st, slot)
-  local own = slot.path and ss_slot_bars(slot, st.target_bpm)
-  return own ~= nil and own ~= (st.bars or 8)
-end
-
 -- Cycle timeline at the top: hairline box, a tick per bar (taller every 4),
 -- green playhead while previewing. -> { x0, y0, w, h, bars }.
 function ss_draw_cycle_timeline(st, w)
@@ -1606,6 +1601,14 @@ function ss_draw_cycle_timeline(st, w)
   local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
   r.ImGui_Dummy(ctx, math.max(1, w), h)
   local dl = r.ImGui_GetWindowDrawList(ctx)
+  local master
+  if ss_meter_available() then
+    -- master meter (max of the voices) at the right end
+    local mw = 64
+    master = ss_master_meter()
+    ss_draw_meter(dl, x0 + w - mw, y0, mw, h, master, true)
+    w = w - mw - 6
+  end
   r.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h, SS_COL.line, 0, 0, 1)
   local px = w / bars
   local step = bars > 64 and 4 or 1
@@ -1620,34 +1623,148 @@ function ss_draw_cycle_timeline(st, w)
     r.ImGui_DrawList_AddRectFilled(dl, x0 + 1, y0 + 1, hx, y0 + h - 1, SS_COL.accent_d, 0)
     r.ImGui_DrawList_AddLine(dl, hx, y0 - 2, hx, y0 + h + 2, SS_COL.accent, 1)
   end
-  return { x0 = x0, y0 = y0, w = w, h = h, bars = bars, now = now }
+  return { x0 = x0, y0 = y0, w = w, h = h, bars = bars, now = now, master = master }
 end
 
--- Slot's own position in its own length (e.g. bar 11 of a 16-bar loop) as a
--- thin line across the name column, and "11/16" at its right end while playing.
-function ss_draw_slot_playhead(st, slot, dl, x, y, w)
-  if not ss_slot_shows_own(st, slot) then
+-- Every loaded slot gets its own playhead while previewing.
+function ss_slot_shows_own(st, slot)
+  return slot.path ~= nil and ss_slot_bars(slot, st.target_bpm) ~= nil
+end
+
+-- Row playhead: translucent fill across the whole row height from its left
+-- edge to the loop's position in its own length, and a 1px line at the
+-- leading edge. Drawn before the row's text and buttons. Muted / silent rows
+-- dimmer. -> { own, bar, frac, hx, label } while playing, else nil.
+function ss_draw_slot_playhead(st, slot, dl, x0, y0, x1, y1)
+  if not (SS_PLAY and SS_PLAY.voices[slot.id]) or not ss_slot_shows_own(st, slot) then
     return nil
   end
-  local own = ss_slot_bars(slot, st.target_bpm)
-  r.ImGui_DrawList_AddLine(dl, x, y, x + w, y, SS_COL.line, 1)
-  if own >= 1 and own <= 32 then
-    for b = 1, own - 1 do
-      local tx = x + w * b / own
-      r.ImGui_DrawList_AddLine(dl, tx, y - 2, tx, y, SS_COL.line, 1)
+  local bar, own = ss_slot_bar_at(slot, r.time_precise() - SS_PLAY.t0, st.target_bpm)
+  local frac = bar / own
+  local hx = x0 + (x1 - x0) * frac
+  local live = ss_slot_audible(st.slots, slot)
+  r.ImGui_DrawList_AddRectFilled(dl, x0 + 1, y0 + 1, hx, y1 - 1, live and 0x49CC851C or 0x49CC850A, 0)
+  r.ImGui_DrawList_AddLine(dl, hx, y0 + 1, hx, y1 - 1, live and SS_COL.accent or SS_COL.accent_m, 1)
+  local label = string.format("%d/%s", math.floor(bar) + 1,
+    own == math.floor(own) and tostring(math.floor(own)) or tostring(own))
+  return { own = own, bar = bar, frac = frac, hx = hx, label = label }
+end
+
+---------------------------------------------------------------------------
+-- Meters (SWS CF_Preview_GetPeak, post-volume)
+---------------------------------------------------------------------------
+
+SS_METER_W = 11
+SS_METER_HOLD = 1.0   -- seconds a peak tick holds before it falls
+SS_METER_FALL = 1.0   -- seconds the tick takes to fall the whole scale
+SS_METER_DB_MIN = -48
+
+function ss_meter_available()
+  return r.CF_Preview_GetPeak and true or false
+end
+
+-- Update a voice's meter from the preview peaks (channels 0 / 1).
+function ss_meter_read(v, now)
+  if not (v and v.obj and r.CF_Preview_GetPeak) then
+    return
+  end
+  local m = v.meter or { 0, 0, hold = { 0, 0 }, hold_t = { 0, 0 } }
+  v.meter = m
+  for ch = 0, 1 do
+    local ok, ok2, peak = pcall(r.CF_Preview_GetPeak, v.obj, ch)
+    local p = (ok and ok2 and tonumber(peak)) or 0
+    local i = ch + 1
+    m[i] = p
+    if p >= m.hold[i] then
+      m.hold[i], m.hold_t[i] = p, now
+    elseif now - m.hold_t[i] > SS_METER_HOLD then
+      -- fall in dB so the tick glides down
+      local db = ss_meter_db(m.hold[i]) - (-SS_METER_DB_MIN) * (now - m.hold_t[i] - SS_METER_HOLD) / SS_METER_FALL
+      m.hold[i] = math.max(p, db <= SS_METER_DB_MIN and 0 or 10 ^ (db / 20))
     end
   end
-  if not (SS_PLAY and SS_PLAY.voices[slot.id]) then
-    return { own = own }
+end
+
+function ss_meter_db(p)
+  if not p or p <= 1e-6 then
+    return SS_METER_DB_MIN
   end
-  local bar = ss_slot_bar_at(slot, r.time_precise() - SS_PLAY.t0, st.target_bpm)
-  local hx = x + w * bar / own
-  r.ImGui_DrawList_AddLine(dl, x, y, hx, y, SS_COL.accent_m, 1)
-  r.ImGui_DrawList_AddLine(dl, hx, y - 3, hx, y + 1, SS_COL.accent, 1)
-  local label = string.format("%d/%s", math.floor(bar) + 1, own == math.floor(own) and tostring(math.floor(own)) or tostring(own))
-  local lw = r.ImGui_CalcTextSize(ctx, label) or 0
-  ss_text(dl, x + w - lw, y - 29, SS_COL.accent, label)
-  return { own = own, bar = bar, label = label }
+  return math.max(SS_METER_DB_MIN, 20 * math.log(p, 10))
+end
+
+-- 0..1 position on the meter scale (-48 dB .. +6 dB).
+function ss_meter_pos(p)
+  return math.max(0, math.min(1, (ss_meter_db(p) - SS_METER_DB_MIN) / (6 - SS_METER_DB_MIN)))
+end
+
+local function ss_meter_col(db)
+  if db > -3 then return 0xE05050FF end
+  if db > -12 then return 0xE0A040FF end
+  return SS_COL.accent
+end
+
+-- Stereo meter in a hairline frame: vertical (two bars side by side) or
+-- horizontal (two bars stacked). Colours step green -> amber (-12 dB) -> red (-3 dB).
+function ss_draw_meter(dl, x0, y0, w, h, m, horizontal)
+  r.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h, SS_COL.line, 0, 0, 1)
+  if not m then
+    return
+  end
+  local stops = { { SS_METER_DB_MIN, -12 }, { -12, -3 }, { -3, 6 } }
+  for ch = 1, 2 do
+    local pos = ss_meter_pos(m[ch])
+    local hold = ss_meter_pos(m.hold and m.hold[ch])
+    if horizontal then
+      local bh = (h - 3) / 2
+      local by = y0 + 1 + (ch - 1) * (bh + 1)
+      local span = w - 2
+      for _, sgm in ipairs(stops) do
+        local a = (sgm[1] - SS_METER_DB_MIN) / (6 - SS_METER_DB_MIN)
+        local b = math.min(pos, (sgm[2] - SS_METER_DB_MIN) / (6 - SS_METER_DB_MIN))
+        if b > a then
+          r.ImGui_DrawList_AddRectFilled(dl, x0 + 1 + span * a, by, x0 + 1 + span * b, by + bh, ss_meter_col(sgm[2] - 0.01), 0)
+        end
+      end
+      if hold > 0 then
+        local hx = x0 + 1 + span * hold
+        r.ImGui_DrawList_AddLine(dl, hx, by, hx, by + bh, ss_meter_col(ss_meter_db(m.hold[ch])), 1)
+      end
+    else
+      local bw = (w - 3) / 2
+      local bx = x0 + 1 + (ch - 1) * (bw + 1)
+      local span = h - 2
+      local ybot = y0 + h - 1
+      for _, sgm in ipairs(stops) do
+        local a = (sgm[1] - SS_METER_DB_MIN) / (6 - SS_METER_DB_MIN)
+        local b = math.min(pos, (sgm[2] - SS_METER_DB_MIN) / (6 - SS_METER_DB_MIN))
+        if b > a then
+          r.ImGui_DrawList_AddRectFilled(dl, bx, ybot - span * b, bx + bw, ybot - span * a, ss_meter_col(sgm[2] - 0.01), 0)
+        end
+      end
+      if hold > 0 then
+        local hy = ybot - span * hold
+        r.ImGui_DrawList_AddLine(dl, bx, hy, bx + bw, hy, ss_meter_col(ss_meter_db(m.hold[ch])), 1)
+      end
+    end
+  end
+end
+
+-- Max of all voices' peaks for the master meter.
+function ss_master_meter()
+  if not SS_PLAY then
+    return nil
+  end
+  local mm = { 0, 0, hold = { 0, 0 } }
+  for _, v in pairs(SS_PLAY.voices) do
+    local m = v.meter
+    if m then
+      for ch = 1, 2 do
+        mm[ch] = math.max(mm[ch], m[ch] or 0)
+        mm.hold[ch] = math.max(mm.hold[ch], m.hold and m.hold[ch] or 0)
+      end
+    end
+  end
+  return mm
 end
 
 local function ss_slot_row(st, slot, i, row_w)
@@ -1658,6 +1775,11 @@ local function ss_slot_row(st, slot, i, row_w)
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local playing = SS_PLAY and SS_PLAY.voices[slot.id] and ss_slot_audible(st.slots, slot)
   local selected = st.selected_id == slot.id
+  local ph = ss_draw_slot_playhead(st, slot, dl, x0, y0, x1, y1)
+  if r.ImGui_IsMouseHoveringRect and r.ImGui_IsMouseHoveringRect(ctx, x0, y0, x1, y1)
+      and r.ImGui_IsWindowHovered(ctx, r.ImGui_HoveredFlags_ChildWindows and r.ImGui_HoveredFlags_ChildWindows() or 0) then
+    st._hover_slot_id = slot.id
+  end
   r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, SS_COL.line, 0, 0, 1)
   if playing or selected then
     ss_corner_ticks(dl, x0, y0, x1, y1, SS_COL.accent)
@@ -1695,7 +1817,8 @@ local function ss_slot_row(st, slot, i, row_w)
 
   -- Controls on the right.
   local ctrl_w = 64 + 38 + 40 + 22 + 22 + 60 + 6 * 5
-  local cx = x1 - ctrl_w - 6
+  local meter_w = ss_meter_available() and (SS_METER_W + 8) or 0
+  local cx = x1 - ctrl_w - 6 - meter_w
   local name_x = x0 + role_w + 8
   local name_w = math.max(40, cx - name_x - 8)
 
@@ -1731,8 +1854,8 @@ local function ss_slot_row(st, slot, i, row_w)
   end
   local name = slot.path and (slot.name or slot.path:match("([^/\\]+)$")) or "—"
   if seq_truncate_text_to_width then
-    -- room for the "11/16" counter of a loop with its own length
-    local nw = (ss_slot_shows_own(st, slot) and SS_PLAY) and (name_w - 44) or name_w
+    -- room for the "11/16" playhead counter
+    local nw = ph and (name_w - 44) or name_w
     name = seq_truncate_text_to_width(name, math.max(20, nw)) or name
   end
   ss_text(dl, name_x, y0 + 6, slot.path and (name_hover and SS_COL.accent or SS_COL.text) or SS_COL.mute, name)
@@ -1761,7 +1884,14 @@ local function ss_slot_row(st, slot, i, row_w)
     info = seq_truncate_text_to_width(info, name_w) or info
   end
   ss_text(dl, name_x, y0 + 22, SS_COL.dim, info)
-  ss_draw_slot_playhead(st, slot, dl, name_x, y1 - 5, name_w)
+  if ph then
+    local lw = r.ImGui_CalcTextSize(ctx, ph.label) or 0
+    ss_text(dl, name_x + name_w - lw, y0 + 6, ss_slot_audible(st.slots, slot) and SS_COL.accent or SS_COL.dim, ph.label)
+  end
+  if meter_w > 0 then
+    local v = SS_PLAY and SS_PLAY.voices[slot.id]
+    ss_draw_meter(dl, x1 - 6 - SS_METER_W, y0 + 6, SS_METER_W, row_h - 12, v and v.meter or nil, false)
+  end
 
   local by = y0 + (row_h - 22) * 0.5
   r.ImGui_SetCursorScreenPos(ctx, cx, by)
@@ -1774,12 +1904,12 @@ local function ss_slot_row(st, slot, i, row_w)
     ss_save()
   end
   r.ImGui_SameLine(ctx, 0, 6)
-  if ss_btn("##mute", "M", 22, 22, slot.muted, "Mute") then
+  if ss_btn("##mute", "M", 22, 22, slot.muted, "Mute (M key while hovering the row)") then
     slot.muted = not slot.muted
     ss_save()
   end
   r.ImGui_SameLine(ctx, 0, 6)
-  if ss_btn("##solo", "S", 22, 22, slot.solo, "Solo") then
+  if ss_btn("##solo", "S", 22, 22, slot.solo, "Solo (S key while hovering the row)") then
     slot.solo = not slot.solo
     ss_save()
   end
@@ -1932,6 +2062,46 @@ local function ss_template_combo(st)
   end
 end
 
+-- S / M while hovering a row: solo / mute that slot (no modifiers, not while
+-- a field or drag is active). The key is kept from Sample Map's own shortcuts
+-- (SS_WINDOW_HOT) and from REAPER.
+function ss_handle_row_keys(st)
+  local id = st._hover_slot_id
+  if not id or not r.ImGui_IsKeyPressed then
+    return nil
+  end
+  if (r.ImGui_IsAnyItemActive and r.ImGui_IsAnyItemActive(ctx))
+      or (imgui_text_input_active and imgui_text_input_active()) then
+    return nil
+  end
+  if (is_shift_down and is_shift_down()) or (is_ctrl_down and is_ctrl_down())
+      or (is_alt_down and is_alt_down()) or (is_cmd_down and is_cmd_down()) then
+    return nil
+  end
+  local slot
+  for _, s in ipairs(st.slots) do
+    if s.id == id then slot = s end
+  end
+  if not slot then
+    return nil
+  end
+  local did
+  if r.ImGui_Key_S and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_S(), false) then
+    slot.solo = not slot.solo
+    did = "solo"
+  elseif r.ImGui_Key_M and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_M(), false) then
+    slot.muted = not slot.muted
+    did = "mute"
+  end
+  if did then
+    if r.ImGui_SetNextFrameWantCaptureKeyboard then
+      r.ImGui_SetNextFrameWantCaptureKeyboard(ctx, true)
+    end
+    ss_save()
+  end
+  return did
+end
+
 local function ss_window_body(st)
   local avail_w = r.ImGui_GetContentRegionAvail(ctx) or 600
   local dl = r.ImGui_GetWindowDrawList(ctx)
@@ -2011,9 +2181,11 @@ local function ss_window_body(st)
   r.ImGui_Dummy(ctx, 1, 2)
 
   -- Slots.
+  st._hover_slot_id = nil
   for i, slot in ipairs(st.slots) do
     ss_slot_row(st, slot, i, avail_w)
   end
+  ss_handle_row_keys(st)
   if st._remove_id then
     for i, slot in ipairs(st.slots) do
       if slot.id == st._remove_id then
@@ -2134,6 +2306,7 @@ function render_song_starter_window()
     ss_save_now()
   end
   ss_preview_update()
+  SS_WINDOW_HOT = false
   if not st.open then
     if SS_PLAY then ss_preview_stop() end
     return
@@ -2160,6 +2333,11 @@ function render_song_starter_window()
     ss_save()
   end
   if visible then
+    -- Hovered or focused: Sample Map's own key shortcuts stand down
+    -- (handle_script_keyboard_shortcuts) so S / M / Space act here only.
+    local flags_rc = r.ImGui_HoveredFlags_RootAndChildWindows and r.ImGui_HoveredFlags_RootAndChildWindows() or 0
+    local focus_rc = r.ImGui_FocusedFlags_RootAndChildWindows and r.ImGui_FocusedFlags_RootAndChildWindows() or 0
+    SS_WINDOW_HOT = (r.ImGui_IsWindowHovered(ctx, flags_rc) or r.ImGui_IsWindowFocused(ctx, focus_rc)) and true or false
     sm_mono_space_backdrop()
     local ok, err = pcall(ss_window_body, st)
     if not ok and sm_report_error then

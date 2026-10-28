@@ -193,6 +193,10 @@ function handle_script_keyboard_shortcuts()
     end
     return
   end
+  -- The Song Starter window handles its own keys (Space, S / M on rows).
+  if SS_WINDOW_HOT then
+    return
+  end
   if handle_seq_undo_keys() then
     return
   end
