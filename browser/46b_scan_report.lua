@@ -706,6 +706,10 @@ end
 local function draw_scaled_text(dl, x, y, color, text, scale)
   local font = r.ImGui_GetFont and r.ImGui_GetFont(ctx) or nil
   local base = (r.ImGui_GetFontSize and r.ImGui_GetFontSize(ctx)) or 13.0
+  if SM_MONO_SPACE and mono_title_text then
+    mono_title_text(dl, x, y, color, text, base * scale * 1.1)
+    return
+  end
   if r.ImGui_DrawList_AddTextEx then
     r.ImGui_DrawList_AddTextEx(dl, font, base * scale, x, y, color, text)
     r.ImGui_DrawList_AddTextEx(dl, font, base * scale, x + 0.6, y, color, text)

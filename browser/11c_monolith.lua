@@ -94,6 +94,9 @@ UI_METRICS_SPACE = { radius_panel = 0, radius_ctrl = 0 }
 -- Classic values, snapshotted on first apply so Monolith Space can switch back.
 local classic_theme, classic_metrics, classic_mono = nil, nil, nil
 
+-- Set up in the Fonts section below.
+local install_cond_wrappers
+
 -- Rect draws with rounding forced to 0 while Monolith Space is on.
 local orig_add_rect, orig_add_rect_filled = nil, nil
 
@@ -148,6 +151,7 @@ function sm_look_apply()
     copy_into(SS_COL, MONO_COL)
   end
   install_square_rects(on)
+  install_cond_wrappers(on)
   sm_look_applied = on
   if sm_mono_stars_reset then
     sm_mono_stars_reset()
@@ -183,11 +187,11 @@ function mono_corner_ticks(dl, x0, y0, x1, y1, col, k)
   add_line(dl, x1, y1, x1, y1 - k, col, 1)
 end
 
--- Uppercase caption in letter-spaced JetBrains Mono SemiBold. -> width drawn.
+-- Uppercase caption in letter-spaced Barlow Semi Condensed. -> width drawn.
 function mono_caps_text(dl, x, y, col, text, spacing)
   spacing = spacing or 1.5
   local s = string.upper(text or "")
-  local pushed = sm_mono_push_font("bold")
+  local pushed = sm_mono_push_font("cond")
   local cx = x
   local add_text, calc = r.ImGui_DrawList_AddText, r.ImGui_CalcTextSize
   for i = 1, #s do
@@ -205,7 +209,7 @@ end
 function mono_caps_width(text, spacing)
   spacing = spacing or 1.5
   local s = string.upper(text or "")
-  local pushed = sm_mono_push_font("bold")
+  local pushed = sm_mono_push_font("cond")
   local w = (r.ImGui_CalcTextSize(ctx, s) or (#s * 7)) + math.max(0, #s - 1) * spacing
   if pushed then
     r.ImGui_PopFont(ctx)
@@ -213,10 +217,38 @@ function mono_caps_width(text, spacing)
   return w
 end
 
+-- Big title in Anton at `size` (default the title font size). Falls back to
+-- the current font, drawn twice for weight. -> width, height.
+function mono_title_text(dl, x, y, col, text, size)
+  local f = SM_MONO_SPACE and SM_MONO_FONTS.title
+  local spec = SM_FONT_SPECS.title
+  size = size or spec[2]
+  if f and r.ImGui_DrawList_AddTextEx then
+    r.ImGui_DrawList_AddTextEx(dl, f, size, x, y, col, text)
+    local pushed = sm_mono_push_font("title")
+    local w, h = r.ImGui_CalcTextSize(ctx, text)
+    if pushed then
+      r.ImGui_PopFont(ctx)
+    end
+    local k = size / spec[2]
+    return (w or 0) * k, (h or size) * k
+  end
+  r.ImGui_DrawList_AddText(dl, x, y, col, text)
+  r.ImGui_DrawList_AddText(dl, x + 0.5, y, col, text)
+  return r.ImGui_CalcTextSize(ctx, text)
+end
+
 -- --- Fonts --------------------------------------------------------------------
--- JetBrains Mono (assets/fonts) for Monolith Space; created and attached at
--- startup next to the Classic font, pushed per frame only while the look is on.
-SM_MONO_FONT_SIZE = 13
+-- Monolith Space type (assets/fonts): Inter Tight for body text, Barlow Semi
+-- Condensed for tight places (tag chips, top bar, toolbars, Song Starter,
+-- map labels, small caps), Anton for big titles. Created and attached at
+-- startup next to the Classic font; used only while the look is on.
+SM_FONT_SPECS = {
+  body  = { "InterTight-VariableFont_wght.ttf", 14 },
+  bold  = { "InterTight-SemiBold.ttf", 14 },
+  cond  = { "BarlowSemiCondensed-Medium.ttf", 14 },
+  title = { "Anton-Regular.ttf", 20 },
+}
 SM_MONO_FONTS = {}
 
 local function reaimgui_ge(major, minor)
@@ -244,7 +276,7 @@ local function create_font(file, size)
     ok, f = pcall(r.ImGui_CreateFont, path, size)
   end
   if not (ok and f) then
-    ok, f = pcall(r.ImGui_CreateFont, "monospace", size)
+    ok, f = pcall(r.ImGui_CreateFont, "sans-serif", size)
   end
   return ok and f or nil
 end
@@ -255,29 +287,62 @@ function sm_mono_fonts_create(ctx_)
   if not (ctx_ and r.ImGui_Attach) then
     return
   end
-  for key, file in pairs({ body = "JetBrainsMono-Medium.ttf", bold = "JetBrainsMono-SemiBold.ttf" }) do
-    local f = create_font(file, SM_MONO_FONT_SIZE)
+  for key, spec in pairs(SM_FONT_SPECS) do
+    local f = create_font(spec[1], spec[2])
     if f and pcall(r.ImGui_Attach, ctx_, f) then
       SM_MONO_FONTS[key] = f
     end
   end
 end
 
--- Push a Monolith Space font ("body" or "bold"). -> true when pushed (then PopFont).
+-- Push a Monolith Space font ("body", "bold", "cond" or "title").
+-- -> true when pushed (then PopFont).
 function sm_mono_push_font(kind)
   if not SM_MONO_SPACE or not r.ImGui_PushFont then
     return false
   end
-  local f = SM_MONO_FONTS[kind or "body"]
+  kind = kind or "body"
+  local f = SM_MONO_FONTS[kind]
   if not f then
     return false
   end
   if SM_IMGUI_FONT_SIZE_ARG then
-    r.ImGui_PushFont(ctx, f, SM_MONO_FONT_SIZE)
+    r.ImGui_PushFont(ctx, f, SM_FONT_SPECS[kind][2])
   else
     r.ImGui_PushFont(ctx, f)
   end
   return true
+end
+
+-- Tight places drawn by whole functions: run them under Barlow while the
+-- look is on (wrappers installed by sm_look_apply, removed when it is off).
+SM_COND_FUNCS = {
+  "render_view_tab_switcher", "render_map_y_axis_segmented", "render_map_layout_toggle",
+  "render_sample_map_tab_bar", "render_sample_path_line", "render_seq_top_toolbar",
+  "render_seq_gmd_toolbar", "draw_map_atlas_labels", "render_song_starter_window",
+}
+local cond_orig = {}
+
+local function pop_after(pushed, ...)
+  if pushed then
+    r.ImGui_PopFont(ctx)
+  end
+  return ...
+end
+
+install_cond_wrappers = function(on)
+  for _, name in ipairs(SM_COND_FUNCS) do
+    local cur = _G[name]
+    if on and type(cur) == "function" and not cond_orig[name] then
+      cond_orig[name] = cur
+      _G[name] = function(...)
+        return pop_after(sm_mono_push_font("cond"), cur(...))
+      end
+    elseif not on and cond_orig[name] then
+      _G[name] = cond_orig[name]
+      cond_orig[name] = nil
+    end
+  end
 end
 
 -- --- Space recolour -----------------------------------------------------------

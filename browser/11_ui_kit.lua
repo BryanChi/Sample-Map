@@ -95,6 +95,13 @@ function ui_popup_header(icon, title, meta)
   local x, y = r.ImGui_GetCursorScreenPos(ctx)
   local avail = r.ImGui_GetContentRegionAvail(ctx) or 0
   local tw, th = r.ImGui_CalcTextSize(ctx, title or "")
+  if SM_MONO_SPACE and SM_MONO_FONTS and SM_MONO_FONTS.title then
+    local pushed = sm_mono_push_font("title")
+    tw, th = r.ImGui_CalcTextSize(ctx, title or "")
+    if pushed then
+      r.ImGui_PopFont(ctx)
+    end
+  end
   local h = math.max(24, th + 8)
   local text_x = x
   if icon then
@@ -104,8 +111,12 @@ function ui_popup_header(icon, title, meta)
     text_x = x + h + 9
   end
   local ty = y + (h - th) * 0.5
-  r.ImGui_DrawList_AddText(dl, text_x, ty, UI_THEME.text, title or "")
-  r.ImGui_DrawList_AddText(dl, text_x + 0.5, ty, UI_THEME.text, title or "")
+  if SM_MONO_SPACE then
+    mono_title_text(dl, text_x, ty, UI_THEME.text, title or "")
+  else
+    r.ImGui_DrawList_AddText(dl, text_x, ty, UI_THEME.text, title or "")
+    r.ImGui_DrawList_AddText(dl, text_x + 0.5, ty, UI_THEME.text, title or "")
+  end
   if meta and meta ~= "" then
     local mw, mh = r.ImGui_CalcTextSize(ctx, meta)
     local mx = math.max(text_x + tw + 12, x + avail - mw)
@@ -330,15 +341,15 @@ function ui_push_theme()
   var1(r.ImGui_StyleVar_PopupBorderSize, 1)
   var1(r.ImGui_StyleVar_FrameBorderSize, mono and 1 or 0)
   var2(r.ImGui_StyleVar_WindowPadding, 10, 8)
-  var2(r.ImGui_StyleVar_FramePadding, mono and 6 or 8, 4)
-  var2(r.ImGui_StyleVar_ItemSpacing, mono and 5 or 6, 5)
-  var2(r.ImGui_StyleVar_ItemInnerSpacing, mono and 5 or 6, 4)
+  var2(r.ImGui_StyleVar_FramePadding, 8, 4)
+  var2(r.ImGui_StyleVar_ItemSpacing, 6, 5)
+  var2(r.ImGui_StyleVar_ItemInnerSpacing, 6, 4)
   var1(r.ImGui_StyleVar_GrabMinSize, 10)
   var1(r.ImGui_StyleVar_ScrollbarSize, 10)
 
   state._ui_theme_cols = n_col
   state._ui_theme_vars = n_var
-  -- Monolith Space: JetBrains Mono for every window this frame.
+  -- Monolith Space: Inter Tight for every window this frame.
   state._ui_theme_font = sm_mono_push_font and sm_mono_push_font("body") or false
 end
 
@@ -1343,12 +1354,23 @@ end
 -- Tighter padding for the Sample Map tag band and the search field pills.
 -- Every push must be matched by tag_chips_compact_pop().
 TAG_CHIP_COMPACT_PAD_Y = 1
+-- Monolith Space also draws the chips in Barlow Semi Condensed.
+TAG_CHIP_FONT_STACK = {}
+
 function tag_chips_compact_push()
   local fpx = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
   r.ImGui_PushStyleVar(ctx, r.ImGui_StyleVar_FramePadding(), math.max(4, (fpx or 5) - 1), TAG_CHIP_COMPACT_PAD_Y)
+  TAG_CHIP_FONT_STACK[#TAG_CHIP_FONT_STACK + 1] = sm_mono_push_font and sm_mono_push_font("cond") or false
 end
 
 function tag_chips_compact_pop()
+  local n = #TAG_CHIP_FONT_STACK
+  if n > 0 then
+    if TAG_CHIP_FONT_STACK[n] then
+      r.ImGui_PopFont(ctx)
+    end
+    TAG_CHIP_FONT_STACK[n] = nil
+  end
   r.ImGui_PopStyleVar(ctx)
 end
 

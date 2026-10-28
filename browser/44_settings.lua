@@ -177,7 +177,8 @@ function settings_section(label, default_open)
   ui_button_draw_icon(dl, open and "chev_down" or "chev_right", x0 + 16, cy, 14, open and UI_THEME.accent_hvr or UI_THEME.text_dim)
   local tw, th = r.ImGui_CalcTextSize(ctx, label)
   if SM_MONO_SPACE then
-    mono_caps_text(dl, x0 + 30, cy - th * 0.5, open and UI_THEME.text or UI_THEME.text_dim, label, 1.2)
+    -- Anton at 17px; its line box is about 1.45x the size.
+    mono_title_text(dl, x0 + 30, cy - 17 * 0.72, open and UI_THEME.text or UI_THEME.text_dim, label, 17)
   else
     r.ImGui_DrawList_AddText(dl, x0 + 30, cy - th * 0.5, open and UI_THEME.text or UI_THEME.text_dim, label)
   end

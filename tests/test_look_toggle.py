@@ -151,7 +151,8 @@ def test_fonts_pushed_only_in_space():
       reaper.ImGui_PushFont = function() n = n + 1 end
       reaper.ImGui_PopFont = function() end
       sm_mono_fonts_create(ctx)
-      assert(SM_MONO_FONTS.body and SM_MONO_FONTS.bold, "fonts not created")
+      assert(SM_MONO_FONTS.body and SM_MONO_FONTS.bold and SM_MONO_FONTS.cond and SM_MONO_FONTS.title,
+        "fonts not created")
       ui_push_theme(); ui_pop_theme()
       local classic = n
       sm_look_set(true)
@@ -173,3 +174,26 @@ def test_space_tone_and_ui_tc():
     cyan = g.ui_tc(0x1EFF5E80)
     rr, gg, bb, a = (cyan >> 24) & 0xFF, (cyan >> 16) & 0xFF, (cyan >> 8) & 0xFF, cyan & 0xFF
     assert bb > gg > rr and a == 0x80                 # accent green turns cyan
+
+
+def test_tight_places_use_condensed_font_only_in_space():
+    L = _runtime()
+    got = L.execute("""
+      local pushed = {}
+      reaper.ImGui_CreateFont = function(name, sz) return { name = name } end
+      reaper.ImGui_CreateFontFromFile = function(name) return { name = name } end
+      reaper.ImGui_Attach = function() end
+      reaper.ImGui_PushFont = function(_, f) pushed[#pushed + 1] = f end
+      reaper.ImGui_PopFont = function() end
+      sm_mono_fonts_create(ctx)
+      local inner = render_view_tab_switcher
+      render_view_tab_switcher = function() end
+      sm_look_set(true)
+      render_view_tab_switcher()
+      local on = pushed[#pushed] == SM_MONO_FONTS.cond
+      sm_look_set(false)
+      local n = #pushed
+      render_view_tab_switcher()
+      return on, #pushed == n
+    """)
+    assert got == (True, True)

@@ -1790,8 +1790,12 @@ local function ss_window_body(st)
 
   -- Title row.
   local tx, ty = r.ImGui_GetCursorScreenPos(ctx)
-  ss_text(dl, tx, ty, SS_COL.text, "SONG STARTER")
-  ss_text(dl, tx + 0.5, ty, SS_COL.text, "SONG STARTER")
+  if SM_MONO_SPACE and mono_title_text then
+    mono_title_text(dl, tx, ty - 3, SS_COL.text, "SONG STARTER", 16)
+  else
+    ss_text(dl, tx, ty, SS_COL.text, "SONG STARTER")
+    ss_text(dl, tx + 0.5, ty, SS_COL.text, "SONG STARTER")
+  end
   local meta = SS_PLAY and "PLAYING" or "STOPPED"
   local mw = r.ImGui_CalcTextSize(ctx, meta)
   ss_text(dl, tx + avail_w - (mw or 0), ty, SS_PLAY and SS_COL.accent or SS_COL.mute, meta)
