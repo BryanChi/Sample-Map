@@ -154,24 +154,27 @@ function sm_draw_feedback_pill()
   local label = SM_MONO_SPACE and "SEND FEEDBACK" or "Send feedback"
   local tw, th = r.ImGui_CalcTextSize(ctx, label)
   local _, fpy = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_FramePadding())
-  local py = math.min(3, fpy or 3)
+  -- BeginMenuBar leaves the cursor at the bar's top edge and draws labels
+  -- FramePadding.y below it: take the bar's height and put the label there.
+  fpy = fpy or 4
+  local h = th + 2 * fpy
   local dl = r.ImGui_GetWindowDrawList(ctx)
 
-  local dot_click = r.ImGui_InvisibleButton(ctx, "##sm_fb_rec", FB_DOT_W, th)
+  local dot_click = r.ImGui_InvisibleButton(ctx, "##sm_fb_rec", FB_DOT_W, h)
   local dot_hov, dot_held = r.ImGui_IsItemHovered(ctx), r.ImGui_IsItemActive(ctx)
   local L, T = r.ImGui_GetItemRectMin(ctx)
   local M = r.ImGui_GetItemRectMax(ctx)
   fb_tip(recording and "Bug recording is on.\nClick to stop and send it with a report."
     or "Start bug recording now.\nRepeat the problem, then click the dot again to stop and send it.")
   r.ImGui_SameLine(ctx, 0, 0) -- the two halves share one frame
-  local lbl_click = r.ImGui_InvisibleButton(ctx, "##sm_fb", 7 + tw + 7 + (saved > 0 and FB_COUNT_W or 0), th)
+  local lbl_click = r.ImGui_InvisibleButton(ctx, "##sm_fb", 7 + tw + 7 + (saved > 0 and FB_COUNT_W or 0), h)
   local lbl_hov, lbl_held = r.ImGui_IsItemHovered(ctx), r.ImGui_IsItemActive(ctx)
   local R, B = r.ImGui_GetItemRectMax(ctx)
   fb_tip(recording and "Bug recording is on. Open the feedback window."
     or (saved > 0 and (saved .. (saved == 1 and " bug recording waits" or " bug recordings wait") .. " to be sent. Open the feedback window."))
     or "Report a bug or suggest an idea.\nYou can add pictures and the usage log; it goes to the developer on GitHub.")
 
-  T, B = T - py, B + py
+  T, B = T + 1, B - 1 -- the border stays inside the bar
   local round = SM_MONO_SPACE and 0 or 4
   local function plate(x0, x1, hov, held, flags)
     if hov then
@@ -193,7 +196,7 @@ function sm_draw_feedback_pill()
     r.ImGui_DrawList_AddCircleFilled(dl, cx, cy, 4, dot_hov and 0xFF7A7AFF or fb_alpha(FB_RED, 0xCC))
   end
   local lx = M + 7
-  r.ImGui_DrawList_AddText(dl, lx, cy - th / 2, lbl_hov and UI_THEME.text or UI_THEME.text_dim, label)
+  r.ImGui_DrawList_AddText(dl, lx, T - 1 + fpy, lbl_hov and UI_THEME.text or UI_THEME.text_dim, label)
   if saved > 0 then
     local n = saved > 9 and "9+" or tostring(saved)
     local nw, nh = r.ImGui_CalcTextSize(ctx, n)
