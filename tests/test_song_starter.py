@@ -1539,3 +1539,143 @@ def test_playhead_backdrop_only_in_the_name_column():
     ''')
     ok, n, n_err, mapped = got
     assert ok and n >= 5 and n_err == 0 and mapped
+
+
+# --- Drag samples in and out ----------------------------------------------------
+
+def test_sample_map_drag_drops_into_hovered_row():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key, st.open = 120, 0.0, false, "Am", true
+      ss_do_reroll("batch")
+      local target = st.slots[2]
+      target.locked = true
+      local s = find_sample_by_path("/lib/Drums/Break 90bpm.wav")
+      state.pending_waveform_drop = s
+      reaper.ImGui_IsMouseDown = function() return false end
+      st._drop_hover_id = target.id
+      local took = ss_take_sample_drop(st)
+      -- through the window: hovering a row while dragging marks it, release drops
+      local other = st.slots[4]
+      state.pending_waveform_drop = find_sample_by_path("/lib/Bass/Bassline 118 bpm Cm.wav")
+      reaper.ImGui_IsMouseHoveringRect = function() return true end
+      reaper.ImGui_IsWindowHovered = function() return true end
+      imgui_text_input_active = function() return false end   -- the stub has no ImGui IO
+      is_shift_down, is_ctrl_down, is_alt_down, is_cmd_down = function() return false end, function() return false end,
+        function() return false end, function() return false end
+      render_song_starter_window()
+      local last = st.slots[#st.slots]
+      return took, target.path, target.locked, state.pending_waveform_drop == nil, #ERRORS, last.path
+    ''')
+    took, path, locked, cleared, n_err, last_path = got
+    assert took and path == "/lib/Drums/Break 90bpm.wav" and locked is True and cleared
+    assert n_err == 0
+    # the stub draws every row on one rect, so the drop zone (hovered too) wins: a new slot
+    assert last_path == "/lib/Bass/Bassline 118 bpm Cm.wav"
+
+
+def test_finder_files_swap_and_add_slots():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 0.0, false, "Am"
+      ss_do_reroll("batch")
+      reaper.PCM_Source_CreateFromFile = function(p) return { path = p } end
+      reaper.GetMediaSourceLength = function() return 8.0, false end
+      reaper.PCM_Source_Destroy = function() end
+      local files = { "/new/Sub Bass Line 120bpm.wav", "/new/notes.txt", "/new/Shaker Top 120bpm.wav", "/new/Pad Wash.wav" }
+      reaper.ImGui_BeginDragDropTarget = function() return true end
+      reaper.ImGui_EndDragDropTarget = function() end
+      reaper.ImGui_AcceptDragDropPayloadFiles = function() return true, #files end
+      reaper.ImGui_GetDragDropPayloadFile = function(_, i) return true, files[i + 1] end
+      local n0 = #st.slots
+      -- onto the 5th row: 3 audio files -> rows 5, 6, then a new slot
+      local hovering = ss_os_drop_target(st, st.slots[5])
+      local r5, r6, r7 = st.slots[5].path, st.slots[6].path, st.slots[7] and st.slots[7].path
+      local new_role = st.slots[7] and st.slots[7].role
+      -- onto the add zone: all new slots, roles guessed
+      files = { "/new/Sub Bass Line 120bpm.wav" }
+      ss_os_drop_target(st, nil)
+      local added = st.slots[#st.slots]
+      return hovering, n0, r5, r6, r7, new_role, #st.slots, added.role, added.dur
+    ''')
+    hovering, n0, r5, r6, r7, new_role, n_slots, added_role, dur = got
+    assert hovering and n0 == 6
+    assert r5 == "/new/Sub Bass Line 120bpm.wav" and r6 == "/new/Shaker Top 120bpm.wav" and r7 == "/new/Pad Wash.wav"
+    assert new_role == "texture" and n_slots == 8
+    assert added_role == "bass" and dur == 8.0
+
+
+def test_drag_out_inserts_stretched_item_at_drop_and_raw_with_shift():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key, st.bars = 124, 0.0, false, "Am", 8
+      ss_do_reroll("batch")
+      local slot = st.slots[3]
+      local TR = { depth = 0, items = {}, P_NAME = "Arrange track" }
+      reaper.ValidatePtr = function(p) return p ~= nil end
+      reaper.ValidatePtr2 = function(_, p) return p ~= nil end
+      reaper.DeleteTrackMediaItem = function() end
+      reaper.ImGui_IsMouseDown = function() return DOWN == true end
+      reaper.CountSelectedMediaItems = function() return 0 end
+      DOWN = true
+      ss_begin_drag_out(st, slot, false)
+      local provisional_seen = false
+      update_provisional_drop = function(s) provisional_seen = s.path == slot.path and math.abs(s.duration - 8 * 240 / 124) < 1e-9 end
+      local a = ss_drag_out_update(st)
+      -- release over the arrange: the preview sat on TR at 6.0 s
+      DOWN = false
+      state.provisional_drop = { item = {}, track = TR, time = 6.0 }
+      local b = ss_drag_out_update(st)
+      local it = ITEMS[#ITEMS]
+      local stretched = { it.tr == TR, it.D_POSITION, it.D_LENGTH, it.B_LOOPSRC, it.take.B_PPITCH,
+        math.abs(it.take.D_PLAYRATE - slot.rate) < 1e-9, it.take.D_PITCH == slot.shift }
+      -- Shift: the plain file, its own length, no stretch
+      DOWN = true
+      ss_begin_drag_out(st, slot, true)
+      DOWN = false
+      state.provisional_drop = { item = {}, track = TR, time = 2.0 }
+      ss_drag_out_update(st)
+      local raw = ITEMS[#ITEMS]
+      return a, provisional_seen, b, UNDO[#UNDO], stretched[1], stretched[2], stretched[3], stretched[4],
+             stretched[5], stretched[6], stretched[7], raw.D_LENGTH == slot.dur, raw.take.D_PLAYRATE, raw.B_LOOPSRC,
+             SS_DRAG == nil
+    ''')
+    (a, prov, b, undo, on_tr, pos, length, loopsrc, ppitch, rate_ok, pitch_ok, raw_len, raw_rate, raw_loop,
+     done) = got
+    assert a == "drag" and prov and b == "inserted" and undo == "Song Starter: insert loop"
+    assert on_tr and pos == 6.0 and abs(length - 8 * 240 / 124) < 1e-9 and loopsrc == 1 and ppitch == 1
+    assert rate_ok and pitch_ok
+    assert raw_len and raw_rate is None and raw_loop == 0 and done
+
+
+def test_drag_out_does_not_audition_and_needs_threshold():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key, st.open = 120, 0.0, false, "Am", true
+      ss_do_reroll("batch")
+      local auditioned = {}
+      preview_sample = function(smp) auditioned[smp.path] = true end
+      reaper.ImGui_IsItemActive = function() return true end
+      DRAGGING = false
+      reaper.ImGui_IsMouseDragging = function(_, b, th) return DRAGGING and th == 6.0 end
+      reaper.ImGui_IsMouseDown = function() return true end
+      render_song_starter_window()
+      local before = SS_DRAG ~= nil
+      DRAGGING = true
+      render_song_starter_window()
+      local started = SS_DRAG ~= nil
+      -- release over the name: no audition after a drag
+      reaper.ImGui_IsMouseDown = function() return false end
+      reaper.ImGui_InvisibleButton = function(_, id) return id == "##name" end
+      reaper.ImGui_IsItemActive = function() return false end
+      render_song_starter_window()
+      -- every row reports a click in this stub; only the dragged one must not audition
+      local dragged = st.slots[1]
+      return before, started, auditioned[dragged.path] == true, #ERRORS
+    ''')
+    assert got == (False, True, False, 0)

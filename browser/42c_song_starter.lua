@@ -1203,6 +1203,235 @@ function ss_folder_step(st, slot, dir)
 end
 
 ---------------------------------------------------------------------------
+-- Drag and drop: samples / files in, loops out to the arrange
+---------------------------------------------------------------------------
+
+-- Role a dropped file most looks like (tags, name and folder words).
+function ss_role_guess(s)
+  local best, best_v = "texture", 0
+  local scores = ss_role_scores(s)
+  for _, role in ipairs(SS_ROLES) do
+    local v = scores[role.key] or 0
+    if v > best_v then best, best_v = role.key, v end
+  end
+  return best
+end
+
+-- Library sample for path, or a bare table for a file the library hasn't got.
+function ss_sample_for_path(path)
+  local s = find_sample_by_path and find_sample_by_path(path)
+  if s then return s end
+  return { path = path, name = tostring(path):match("([^/\\]+)$") or path, unscanned = true }
+end
+
+-- Drop files: the first into `slot` (nil = a new slot), the rest into the
+-- following rows, past the end into new slots with a guessed role. -> count.
+function ss_drop_files(st, paths, slot)
+  local start = nil
+  for i, s in ipairs(st.slots) do
+    if s == slot then start = i end
+  end
+  local n = 0
+  for k, p in ipairs(paths) do
+    local s = ss_sample_for_path(p)
+    local target = start and st.slots[start + k - 1] or nil
+    if not target then
+      target = ss_new_slot(st, ss_role_guess(s))
+      st.slots[#st.slots + 1] = target
+    end
+    ss_slot_swap_to(st, target, s)
+    n = n + 1
+  end
+  return n
+end
+
+-- Audio paths in the OS drop payload (Finder / Explorer).
+function ss_payload_audio_files(count)
+  local out = {}
+  for i = 0, (count or 0) - 1 do
+    local ok, f = r.ImGui_GetDragDropPayloadFile(ctx, i)
+    local ext = type(f) == "string" and (f:match("(%.[^.]+)$") or ""):lower() or ""
+    if ok and AUDIO_EXTS and AUDIO_EXTS[ext] then
+      out[#out + 1] = f
+    end
+  end
+  return out
+end
+
+-- Make the last item a target for OS file drops. -> true while files hover it.
+function ss_os_drop_target(st, slot)
+  if not (r.ImGui_BeginDragDropTarget and r.ImGui_AcceptDragDropPayloadFiles) then
+    return false
+  end
+  if not r.ImGui_BeginDragDropTarget(ctx) then
+    return false
+  end
+  local peek = 0
+  if r.ImGui_DragDropFlags_AcceptBeforeDelivery then peek = peek | r.ImGui_DragDropFlags_AcceptBeforeDelivery() end
+  if r.ImGui_DragDropFlags_AcceptNoDrawDefaultRect then peek = peek | r.ImGui_DragDropFlags_AcceptNoDrawDefaultRect() end
+  local hovering, count = r.ImGui_AcceptDragDropPayloadFiles(ctx, peek)
+  if hovering then
+    local delivered, dcount = r.ImGui_AcceptDragDropPayloadFiles(ctx)
+    if delivered then
+      local files = ss_payload_audio_files(dcount or count)
+      if #files > 0 then
+        ss_drop_files(st, files, slot)
+      end
+    end
+  end
+  r.ImGui_EndDragDropTarget(ctx)
+  return hovering and true or false
+end
+
+-- Clear Sample Map's own sample drag (map / explorer / waveform) after we took it.
+function ss_clear_sample_drag()
+  if remove_provisional_drop then remove_provisional_drop() end
+  if clear_drag_tooltip then clear_drag_tooltip() end
+  state.pending_waveform_drop = nil
+  state.waveform_drag_armed = nil
+  state.last_mouse_time_pos = nil
+  state.last_mouse_track = nil
+  state.seq_drop_target_idx = nil
+  state.seq_candidate_drop = nil
+  state.seq_drum_drop = nil
+  state.seq_timeline_drop_track_idx = nil
+  state.seq_timeline_drop_time = nil
+  state.is_left_dragging = false
+  state.last_dragged_sample_path = nil
+  state.map_press_x = nil
+  state.map_press_y = nil
+  state.map_press_pending = false
+  state.map_audition_rearm = false
+  if seq_clear_candidate_drag_state then seq_clear_candidate_drag_state() end
+end
+
+-- A Sample Map drag released over a row (or the add zone): take it.
+-- Runs before Sample Map completes the drag later in the frame.
+function ss_take_sample_drop(st)
+  if not (sample_drag_active and sample_drag_active()) or SS_DRAG then
+    return false
+  end
+  if r.ImGui_IsMouseDown(ctx, 0) then
+    return false
+  end
+  local target_id, new = st._drop_hover_id, st._drop_new_hover
+  if not target_id and not new then
+    return false
+  end
+  local sample = get_active_dragged_sample and get_active_dragged_sample()
+  if not sample or not sample.path or sample.is_layering_mix then
+    return false
+  end
+  local slot
+  for _, s in ipairs(st.slots) do
+    if s.id == target_id then slot = s end
+  end
+  ss_drop_files(st, { sample.path }, slot)
+  ss_clear_sample_drag()
+  return true
+end
+
+-- --- Drag a row's loop out into the arrange ---------------------------------
+
+SS_DRAG = nil -- { slot_id, raw, sample = { path, name, duration } }
+
+-- Length of the item a drag-out inserts: the bar setting at the target tempo
+-- (raw: the file's own length).
+function ss_drag_item_len(st, slot, raw)
+  if raw then
+    return tonumber(slot.dur) or 1.0
+  end
+  return (st.bars or 8) * 240.0 / (st.target_bpm or 120)
+end
+
+function ss_begin_drag_out(st, slot, raw)
+  if SS_DRAG or not slot.path then
+    return false
+  end
+  SS_DRAG = { slot_id = slot.id, raw = raw and true or false,
+    sample = { path = slot.path, name = slot.name, duration = ss_drag_item_len(st, slot, raw) } }
+  slot._drag_press = true
+  if r.ImGui_SetMouseCursor and r.ImGui_MouseCursor_Hand then
+    r.ImGui_SetMouseCursor(ctx, r.ImGui_MouseCursor_Hand())
+  end
+  return true
+end
+
+-- Insert the slot's loop on `track` at `time`: the slot's stretch (playrate,
+-- preserve pitch), pitch, volume and loop source, the bar setting long; raw =
+-- the plain file. -> item.
+function ss_insert_slot_item(st, slot, time, track, raw)
+  local item = r.AddMediaItemToTrack(track)
+  if not item then return nil end
+  local take = r.AddTakeToMediaItem(item)
+  local src = r.PCM_Source_CreateFromFile(slot.path)
+  if take and src then
+    r.SetMediaItemTake_Source(take, src)
+    if not raw then
+      r.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", tonumber(slot.rate) or 1.0)
+      r.SetMediaItemTakeInfo_Value(take, "B_PPITCH", 1)
+      r.SetMediaItemTakeInfo_Value(take, "D_PITCH", tonumber(slot.shift) or 0)
+      r.SetMediaItemTakeInfo_Value(take, "D_VOL", tonumber(slot.vol) or 1.0)
+    end
+    r.GetSetMediaItemTakeInfo_String(take, "P_NAME", slot.name or "", true)
+  end
+  r.SetMediaItemInfo_Value(item, "D_POSITION", time)
+  r.SetMediaItemInfo_Value(item, "D_LENGTH", ss_drag_item_len(st, slot, raw))
+  r.SetMediaItemInfo_Value(item, "B_LOOPSRC", raw and 0 or 1)
+  ss_rebuild_peaks({ item })
+  return item
+end
+
+-- Each frame while a drag-out runs: REAPER's own drop preview under the
+-- mouse; on release, insert at the previewed track / time (snapped like
+-- Sample Map's drops). Escape cancels.
+function ss_drag_out_update(st)
+  local d = SS_DRAG
+  if not d then return nil end
+  local slot
+  for _, s in ipairs(st.slots) do
+    if s.id == d.slot_id then slot = s end
+  end
+  if not slot or not slot.path then
+    SS_DRAG = nil
+    if remove_provisional_drop then remove_provisional_drop() end
+    return nil
+  end
+  if r.ImGui_IsMouseDown(ctx, 0) then
+    if r.ImGui_Key_Escape and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
+      SS_DRAG = nil
+      slot._drag_press = nil
+      if remove_provisional_drop then remove_provisional_drop() end
+      return "cancel"
+    end
+    if update_provisional_drop then update_provisional_drop(d.sample) end
+    return "drag"
+  end
+  SS_DRAG = nil
+  local time, track
+  local p = state.provisional_drop
+  if p and p.item and r.ValidatePtr(p.item, "MediaItem*") then
+    time, track = p.time, p.track
+  end
+  if not time and get_drop_position then
+    local t, tr = get_drop_position()
+    if t then time, track = maybe_snap_drop_time and maybe_snap_drop_time(t) or t, tr end
+  end
+  if remove_provisional_drop then remove_provisional_drop() end
+  if clear_drag_tooltip then clear_drag_tooltip() end
+  if not (time and track) then
+    return "none"
+  end
+  r.Undo_BeginBlock2(0)
+  r.PreventUIRefresh(1)
+  local item = ss_insert_slot_item(st, slot, time, track, d.raw)
+  r.PreventUIRefresh(-1)
+  r.UpdateArrange()
+  r.Undo_EndBlock2(0, "Song Starter: insert loop", -1)
+  return item and "inserted" or "none"
+end
+
+---------------------------------------------------------------------------
 -- Preview: all audible slots looped together through SWS CF_Preview
 ---------------------------------------------------------------------------
 
@@ -2119,6 +2348,17 @@ local function ss_slot_row(st, slot, i, row_w)
     st._hover_slot_id = slot.id
   end
   r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, SS_COL.line, 0, 0, 1)
+  -- a Sample Map sample dragged over the row: it drops here
+  if sample_drag_active and sample_drag_active() and not SS_DRAG
+      and r.ImGui_IsMouseHoveringRect and r.ImGui_IsMouseHoveringRect(ctx, x0, y0, x1, y1)
+      and r.ImGui_IsWindowHovered(ctx, (r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem
+        and r.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem() or 0)
+        | (r.ImGui_HoveredFlags_ChildWindows and r.ImGui_HoveredFlags_ChildWindows() or 0)) then
+    st._drop_hover_id = slot.id
+  end
+  if st._drop_hover_id == slot.id or st._os_drop_id == slot.id then
+    r.ImGui_DrawList_AddRect(dl, x0 + 1, y0 + 1, x1 - 1, y1 - 1, SS_COL.accent, 0, 0, 1.5)
+  end
   if playing or selected then
     ss_corner_ticks(dl, x0, y0, x1, y1, SS_COL.accent)
   end
@@ -2179,7 +2419,21 @@ local function ss_slot_row(st, slot, i, row_w)
 
 
   r.ImGui_SetCursorScreenPos(ctx, name_x - 4, y0 + 1)
-  if r.ImGui_InvisibleButton(ctx, "##name", name_w + 4, row_h - 2) and slot.path then
+  local name_clicked = r.ImGui_InvisibleButton(ctx, "##name", name_w + 4, row_h - 2)
+  -- drag the name out into the arrange (past a 6 px threshold; Shift = plain file)
+  if slot.path and r.ImGui_IsItemActive(ctx) and r.ImGui_IsMouseDragging(ctx, 0, 6.0) and not SS_DRAG then
+    ss_begin_drag_out(st, slot, is_shift_down and is_shift_down())
+  end
+  if ss_os_drop_target(st, slot) then
+    st._os_drop_next = slot.id
+  end
+  if name_clicked and slot._drag_press then
+    name_clicked = false
+  end
+  if not r.ImGui_IsMouseDown(ctx, 0) then
+    slot._drag_press = nil
+  end
+  if name_clicked and slot.path then
     st.selected_id = slot.id
     local s = find_sample_by_path and find_sample_by_path(slot.path)
     if s then
@@ -2196,8 +2450,9 @@ local function ss_slot_row(st, slot, i, row_w)
   if r.ImGui_IsItemClicked(ctx, 1) and slot.path then
     r.ImGui_OpenPopup(ctx, "ss_name_menu")
   end
-  if name_hover and slot.path then
-    r.ImGui_SetTooltip(ctx, tostring(slot.path) .. "\nClick: hear it alone and show it on the map\nRight-click: more")
+  if name_hover and slot.path and not SS_DRAG then
+    r.ImGui_SetTooltip(ctx, tostring(slot.path) .. "\nClick: hear it alone and show it on the map"
+      .. "\nDrag: into the arrange, stretched to " .. tostring(st.bars or 8) .. " bars (Shift: plain file)\nRight-click: more")
   end
   if r.ImGui_BeginPopup(ctx, "ss_name_menu") then
     if r.ImGui_Selectable(ctx, "Show in Finder / Explorer") then
@@ -2733,6 +2988,8 @@ local function ss_window_body(st)
 
   -- Slots.
   st._hover_slot_id = nil
+  st._drop_hover_id, st._drop_new_hover = nil, nil
+  st._os_drop_id, st._os_drop_next = st._os_drop_next, nil
   for i, slot in ipairs(st.slots) do
     ss_slot_row(st, slot, i, avail_w)
   end
@@ -2751,6 +3008,22 @@ local function ss_window_body(st)
   if ss_btn("##ss_add_slot", "+ SLOT", 70, 20, false, "Add a slot") then
     r.ImGui_OpenPopup(ctx, "ss_add_slot_menu")
   end
+  -- drop zone: samples or files dropped here become new slots
+  r.ImGui_SameLine(ctx, 0, 6)
+  local zw = math.max(40, avail_w - 76)
+  r.ImGui_InvisibleButton(ctx, "##ss_drop_new", zw, 20)
+  local zx, zy = r.ImGui_GetItemRectMin(ctx)
+  local dragging_in = sample_drag_active and sample_drag_active() and not SS_DRAG
+  if dragging_in and r.ImGui_IsMouseHoveringRect(ctx, zx, zy, zx + zw, zy + 20) then
+    st._drop_new_hover = true
+  end
+  local os_hover = ss_os_drop_target(st, nil)
+  if dragging_in or os_hover then
+    local hot = st._drop_new_hover or os_hover
+    r.ImGui_DrawList_AddRect(dl, zx, zy, zx + zw, zy + 20, hot and SS_COL.accent or SS_COL.line, 0, 0, 1)
+    ss_text(dl, zx + 8, zy + 3, hot and SS_COL.accent or SS_COL.mute, "DROP HERE FOR A NEW SLOT")
+  end
+  ss_take_sample_drop(st)
   if r.ImGui_BeginPopup(ctx, "ss_add_slot_menu") then
     for _, ro in ipairs(SS_ROLES) do
       if r.ImGui_Selectable(ctx, ro.label) then
@@ -2854,6 +3127,7 @@ function render_song_starter_window()
     ss_save_now()
   end
   ss_preview_update()
+  ss_drag_out_update(st)
   SS_WINDOW_HOT = false
   if not st.open then
     if SS_PLAY then ss_preview_stop() end
