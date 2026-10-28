@@ -182,7 +182,114 @@ function seq_pattern_confirm_capture(region)
     pattern_id = region.pattern_id,
     proj = seq_pattern_confirm_current_proj(),
     snapshot = clone_table_deep(state.seq_patterns[key]),
+    -- Samples before the audition, so the samples toggle and X can put them back.
+    kit_original = collect_seq_kit_elements(),
+    swapped = false,
   }
+end
+
+-- What a click on a pattern does by default: apply the pattern only, or also
+-- swap every sample for one fitting the pattern's genre. Saved across sessions.
+function seq_pattern_swap_default()
+  if state.seq_pattern_swap_samples == nil then
+    local saved = r.GetExtState and r.GetExtState(SEQ_PATTERN_EXT_SECTION, "pattern_swap_samples") or ""
+    state.seq_pattern_swap_samples = saved == "1"
+  end
+  return state.seq_pattern_swap_samples
+end
+
+function seq_pattern_set_swap_default(on)
+  state.seq_pattern_swap_samples = on == true
+  if r.SetExtState then
+    r.SetExtState(SEQ_PATTERN_EXT_SECTION, "pattern_swap_samples", on and "1" or "0", true)
+  end
+end
+
+-- Set by the Patterns window right before it applies a pattern (nil = use the
+-- setting); read once by seq_pattern_finish_apply. Other callers leave it nil
+-- and never swap samples.
+function seq_pattern_request_swap(swap)
+  if swap == nil then
+    swap = seq_pattern_swap_default()
+  end
+  state.seq_pattern_swap_next = swap == true
+end
+
+function seq_pattern_genres_text(genres)
+  if type(genres) ~= "table" or #genres == 0 then
+    return nil
+  end
+  return table.concat(genres, ", ")
+end
+
+-- Roll every sequencer track from samples matching the region's genre.
+function seq_pattern_swap_genre_kit(region)
+  local c = state.seq_pattern_confirm
+  local genres = get_seq_region_kit_genres(region)
+  if #genres == 0 then
+    sm_notify("No genre known for this pattern, samples kept", "warn")
+    return 0
+  end
+  local changed = randomize_seq_kit(genres)
+  if c and changed > 0 then
+    c.swapped = true
+    c.kit_swapped = collect_seq_kit_elements()
+    c.swapped_genres = seq_pattern_genres_text(genres)
+  end
+  return changed
+end
+
+function seq_pattern_apply_kit_elements(elements)
+  local changed = 0
+  for _, element in ipairs(elements or {}) do
+    if apply_seq_kit_history_element(element, { undo = false, preview = false, silent = true }) then
+      changed = changed + 1
+    end
+  end
+  return changed
+end
+
+-- Called inside the apply undo, after the pattern is written.
+function seq_pattern_finish_apply(region)
+  local swap = state.seq_pattern_swap_next
+  state.seq_pattern_swap_next = nil
+  local c = state.seq_pattern_confirm
+  if not (region and c and c.active and tostring(c.pattern_id) == tostring(region.pattern_id)) then
+    return
+  end
+  -- Tracks the pattern just added count as original with the sample they got.
+  c.kit_original = c.kit_original or {}
+  local have = {}
+  for _, element in ipairs(c.kit_original) do
+    have[tostring(element.role)] = true
+  end
+  for _, element in ipairs(collect_seq_kit_elements()) do
+    if not have[tostring(element.role)] then
+      c.kit_original[#c.kit_original + 1] = element
+    end
+  end
+  if swap then
+    seq_pattern_swap_genre_kit(region)
+  end
+end
+
+-- Keep pattern bar toggle: flip between the original and the genre samples.
+function seq_pattern_confirm_toggle_samples()
+  local c = state.seq_pattern_confirm
+  if not c then return end
+  local region = get_seq_region_by_id(c.region_id)
+  local label = begin_seq_undo("Swap pattern samples")
+  if c.swapped then
+    seq_pattern_apply_kit_elements(c.kit_original)
+    c.swapped = false
+  elseif c.kit_swapped and c.swapped_genres == seq_pattern_genres_text(get_seq_region_kit_genres(region)) then
+    seq_pattern_apply_kit_elements(c.kit_swapped)
+    c.swapped = true
+  elseif region then
+    seq_pattern_swap_genre_kit(region)
+  end
+  save_config()
+  end_seq_undo(label)
 end
 
 function seq_pattern_confirm_current_proj()
@@ -212,6 +319,9 @@ function seq_pattern_confirm_restore()
     state.seq_patterns[key] = clone_table_deep(c.snapshot)
   end
   state.selected_seq_note = nil
+  if c.swapped then
+    seq_pattern_apply_kit_elements(c.kit_original)
+  end
   save_config()
   sync_seq_pattern_regions(c.pattern_id)
   end_seq_undo(label)
@@ -224,14 +334,42 @@ function render_seq_pattern_confirm_bar(dl, x0, y0, x1, y1)
   r.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, 0x0E2A18F8, 8.0)
   r.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, UI_THEME.accent, 8.0, 0, 1.5)
 
-  local txt = "Keep pattern?"
-  local _, th = r.ImGui_CalcTextSize(ctx, txt)
-  r.ImGui_DrawList_AddText(dl, x0 + 12.0, cy - th * 0.5, UI_THEME.text, txt)
-
   local btn = 24.0
   local gap = 6.0
   local bx = x1 - 12.0 - btn * 2.0 - gap
   local by = cy - btn * 0.5
+
+  -- Samples toggle: lit while the genre samples are in, click flips back.
+  local c = state.seq_pattern_confirm or {}
+  local sw_label = "Genre samples"
+  local sw_w = select(1, r.ImGui_CalcTextSize(ctx, sw_label)) + 34.0
+  local sw_h = 22.0
+  local sw_x = bx - 10.0 - sw_w
+  local txt = "Keep pattern?"
+  local tw, th = r.ImGui_CalcTextSize(ctx, txt)
+  if sw_x - (x0 + 12.0) >= tw + 8.0 or sw_x < x0 + 8.0 then
+    r.ImGui_DrawList_AddText(dl, x0 + 12.0, cy - th * 0.5, UI_THEME.text, txt)
+  end
+  if sw_x >= x0 + 8.0 then
+    r.ImGui_SetCursorScreenPos(ctx, sw_x, cy - sw_h * 0.5)
+    if draw_ui_button("seq_pattern_confirm_samples", sw_label, sw_w, sw_h, {
+      compact = true, pill = true, selected = c.swapped == true, lead_icon = "audio",
+    }) then
+      seq_pattern_confirm_toggle_samples()
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      local genres = seq_pattern_genres_text(get_seq_region_kit_genres(get_seq_region_by_id(c.region_id)))
+      local tip
+      if c.swapped then
+        tip = "Using samples picked for " .. tostring(c.swapped_genres or genres or "this genre") .. "\nClick: back to the original samples"
+      elseif genres then
+        tip = "Using the original samples\nClick: swap to samples fitting " .. genres
+      else
+        tip = "Using the original samples\nNo genre known for this pattern"
+      end
+      r.ImGui_SetTooltip(ctx, tip)
+    end
+  end
   r.ImGui_SetCursorScreenPos(ctx, bx, by)
   if draw_ui_button("seq_pattern_confirm_apply", nil, btn, btn, { icon = "check", style = "success", compact = true }) then
     seq_pattern_confirm_commit()
@@ -269,7 +407,9 @@ function run_seq_pattern_preset(region, style_key, strength)
       local bars = seq_template_cycle_bars(SEQ_GEN_TEMPLATES[style])
       seq_record_pattern_variation(style, strength, seed, seq_collect_preview_positions(region, bars))
     end
+    seq_pattern_finish_apply(region)
   end
+  state.seq_pattern_swap_next = nil
   end_seq_undo(label)
   save_config()
 end
@@ -296,7 +436,9 @@ function seq_apply_pattern_variation(region, style_key, variation)
     else
       generate_seq_pattern(region, style, { random_strength = variation.strength, random_seed = variation.seed })
     end
+    seq_pattern_finish_apply(region)
   end
+  state.seq_pattern_swap_next = nil
   end_seq_undo(label)
   save_config()
 end
@@ -1202,6 +1344,7 @@ function seq_gmd_apply_result(region, result)
     end
   end
   if #roles == 0 then
+    state.seq_pattern_swap_next = nil
     log("Groove MIDI pattern had no mappable drum hits")
     return false
   end
@@ -1238,6 +1381,7 @@ function seq_gmd_apply_result(region, result)
     "gmd",
     seq_library_genres_from_text(gmd_style_label ~= "" and gmd_style_label or primary)
   )
+  seq_pattern_finish_apply(region)
   local style_label = seq_gmd_pretty_label(meta.style or meta.style_primary or state.seq_gmd_selected_style)
   local bpm = tonumber(meta.bpm)
   local beat = tostring(meta.beat_type or "")
@@ -1258,8 +1402,10 @@ end
 -- bar_offset picks the bar to load (the one shown in the list preview);
 -- without it the sidecar picks a random bar.
 function run_seq_gmd_load_id(region, entry_id, bar_offset)
-  if not region or not entry_id then return false end
-  if not seq_gmd_ensure(false) then return false end
+  if not region or not entry_id or not seq_gmd_ensure(false) then
+    state.seq_pattern_swap_next = nil
+    return false
+  end
   local result, err = seq_call_gmd({
     action = "get",
     id = entry_id,
@@ -1268,6 +1414,7 @@ function run_seq_gmd_load_id(region, entry_id, bar_offset)
     seed = seq_new_seed(),
   })
   if not result then
+    state.seq_pattern_swap_next = nil
     log("Groove MIDI load failed: " .. tostring(err))
     state.seq_gmd_status_msg = tostring(err)
     return false
@@ -1276,13 +1423,16 @@ function run_seq_gmd_load_id(region, entry_id, bar_offset)
 end
 
 function run_seq_gmd_preset(region, group, strength)
-  if not region or type(group) ~= "table" then return false end
-  if not seq_gmd_ensure(false) then return false end
+  if not region or type(group) ~= "table" or not seq_gmd_ensure(false) then
+    state.seq_pattern_swap_next = nil
+    return false
+  end
   state.seq_pattern_source = "gmd"
   state.seq_gmd_selected_style = group.name
   local item = seq_gmd_pick_item(group, strength)
   if not item then
     state.seq_gmd_status_msg = "No variations in this preset"
+    state.seq_pattern_swap_next = nil
     return false
   end
   return run_seq_gmd_load_id(region, item.id)
@@ -1495,6 +1645,74 @@ local function seq_pattern_point_in(mx, my, x0, y0, x1, y1)
   return mx >= x0 and mx <= x1 and my >= y0 and my <= y1
 end
 
+SEQ_PATTERN_ACTION_S = 18.0
+SEQ_PATTERN_ACTION_GAP = 3.0
+SEQ_PATTERN_ACTIONS_W = SEQ_PATTERN_ACTION_S * 2 + SEQ_PATTERN_ACTION_GAP
+
+-- Hover actions on a pattern row: pattern only, or pattern + genre samples.
+-- The one a plain click does is lit. Returns "pattern", "swap" or nil.
+function seq_pattern_draw_apply_actions(dl, x, y, mx, my)
+  local s = SEQ_PATTERN_ACTION_S
+  local default_swap = seq_pattern_swap_default()
+  local over = nil
+  for i, item in ipairs({ { key = "pattern", icon = "steps" }, { key = "swap", icon = "audio" } }) do
+    local bx = x + (i - 1) * (s + SEQ_PATTERN_ACTION_GAP)
+    local hot = seq_pattern_point_in(mx, my, bx, y, bx + s, y + s)
+    local is_default = (item.key == "swap") == default_swap
+    local bg, _, text_col, border = ui_button_colors(is_default and "primary" or "default", hot, false, false)
+    ui_draw_panel(dl, bx, y, bx + s, y + s, 4.0, bg, border, hot, false)
+    ui_button_draw_icon(dl, item.icon, bx + s * 0.5, y + s * 0.5, s, hot and 0xFFFFFFFF or text_col)
+    if hot then over = item.key end
+  end
+  return over
+end
+
+function seq_pattern_apply_action_tip(action, genres)
+  local default_swap = seq_pattern_swap_default()
+  local tip
+  if action == "swap" then
+    local g = seq_pattern_genres_text(genres)
+    tip = g and ("Apply pattern and swap all samples for " .. g .. " ones") or "Apply pattern and swap samples (no genre known, samples kept)"
+  else
+    tip = "Apply pattern only, keep the samples"
+  end
+  if (action == "swap") == default_swap then
+    tip = tip .. "\n(what a click on the row does)"
+  end
+  return tip
+end
+
+-- Setting row: what a plain click on a pattern does.
+function seq_pattern_render_click_mode()
+  local swap = seq_pattern_swap_default()
+  local caption = "Click applies"
+  local cw, ch = r.ImGui_CalcTextSize(ctx, caption)
+  local x, y = r.ImGui_GetCursorScreenPos(ctx)
+  local h = 22
+  r.ImGui_DrawList_AddText(r.ImGui_GetWindowDrawList(ctx), x, y + (h - ch) * 0.5, UI_THEME.text_mute, caption)
+  local bx = x + cw + 8
+  local items = {
+    { swap = false, label = "Pattern only", icon = "steps", tip = "Click a pattern to change the notes only" },
+    { swap = true, label = "Pattern + genre samples", icon = "audio", tip = "Click a pattern to also swap every sample for one fitting its genre" },
+  }
+  for _, item in ipairs(items) do
+    local w = select(1, r.ImGui_CalcTextSize(ctx, item.label)) + 32
+    r.ImGui_SetCursorScreenPos(ctx, bx, y)
+    local is_cur = swap == item.swap
+    if draw_ui_button("seq_pattern_click_mode_" .. tostring(item.swap), item.label, w, h, {
+      compact = true, pill = true, selected = is_cur, lead_icon = item.icon,
+    }) and not is_cur then
+      seq_pattern_set_swap_default(item.swap)
+    end
+    if r.ImGui_IsItemHovered(ctx) then
+      r.ImGui_SetTooltip(ctx, item.tip .. "\nHover a pattern for both choices")
+    end
+    bx = bx + w + 4
+  end
+  r.ImGui_SetCursorScreenPos(ctx, x, y + h)
+  r.ImGui_Dummy(ctx, 1, 4)
+end
+
 function seq_pattern_query_matches(query, haystack)
   if not query or query == "" then return true end
   return tostring(haystack or ""):lower():find(query, 1, true) ~= nil
@@ -1693,9 +1911,15 @@ function render_seq_pattern_preset_row(region, style_def)
   local star_col = fav and SEQ_PATTERN_FAV_COLOR or (over_star and UI_THEME.text or UI_THEME.text_mute)
   ui_button_draw_icon(dl, fav and "star_fill" or "star", star_x + star_s * 0.5, star_y + star_s * 0.5, star_s, star_col)
 
-  -- Name.
+  -- Name, with the two apply actions after it on hover.
+  local name_right = grid_x0 - 10.0
+  local action_hit = nil
+  if hovered and can_generate then
+    name_right = name_right - SEQ_PATTERN_ACTIONS_W - 6.0
+    action_hit = seq_pattern_draw_apply_actions(dl, grid_x0 - 10.0 - SEQ_PATTERN_ACTIONS_W, y0 + 4.0, mx, my)
+  end
   local label_col = selected and 0xFFFFFFFF or (can_generate and UI_THEME.text or UI_THEME.text_dim)
-  local label = seq_truncate_text_to_width(style_def.label or style_key, grid_x0 - text_x - 10.0)
+  local label = seq_truncate_text_to_width(style_def.label or style_key, name_right - text_x)
   r.ImGui_DrawList_AddText(dl, text_x, y0 + 6.0, label_col, label)
 
   -- Second line: dice on hover, otherwise BPM / bars / saved variations.
@@ -1735,24 +1959,32 @@ function render_seq_pattern_preset_row(region, style_def)
     tip[#tip + 1] = "Drums: " .. table.concat(roles, ", ")
     if over_star then
       tip = { fav and "Click to remove from favorites" or "Click to add to favorites" }
+    elseif action_hit then
+      tip = { seq_pattern_apply_action_tip(action_hit, seq_style_to_library_genres(style_key)) }
     elseif not can_generate then
       tip[#tip + 1] = "No matching samples in the library for these drums."
     else
-      tip[#tip + 1] = "Click: apply to " .. get_seq_region_display_name(region) .. " · Right-click: favorite"
+      tip[#tip + 1] = "Click: apply to " .. get_seq_region_display_name(region)
+        .. (seq_pattern_swap_default() and " with genre samples" or "") .. " · Right-click: favorite"
     end
     r.ImGui_SetTooltip(ctx, table.concat(tip, "\n"))
   end
 
   if rclicked or (clicked and over_star) then
     seq_pattern_toggle_favorite(style_key)
+  elseif clicked and action_hit then
+    seq_pattern_request_swap(action_hit == "swap")
+    run_seq_pattern_preset(region, style_key, nil)
   elseif clicked and dice_hit then
     if can_generate then
+      seq_pattern_request_swap(nil)
       run_seq_pattern_preset(region, style_key, dice_hit)
     end
   elseif clicked and over_list then
     state.seq_pattern_variations_open_key = style_key
     state.seq_pattern_variations_request_open = true
   elseif clicked and can_generate then
+    seq_pattern_request_swap(nil)
     run_seq_pattern_preset(region, style_key, nil)
   elseif clicked then
     state.seq_pattern_source = "template"
@@ -1815,6 +2047,7 @@ function render_seq_gmd_preset_row(region, group)
     end
 
     if clicked and dice_hit then
+      seq_pattern_request_swap(nil)
       run_seq_gmd_preset(region, group, dice_hit)
     elseif clicked then
       state.seq_gmd_selected_style = group.name
@@ -1823,6 +2056,7 @@ function render_seq_gmd_preset_row(region, group)
         expanded = state.seq_gmd_expanded[group.name] == true
       elseif region and item_count > 0 then
         state.seq_pattern_source = "gmd"
+        seq_pattern_request_swap(nil)
         run_seq_gmd_load_id(region, group.items[1].id, group.items[1].preview_bar)
       end
     end
@@ -1867,12 +2101,18 @@ function render_seq_gmd_pattern_row(region, child, parent_id_safe)
   local bpm = tonumber(item.bpm)
   local bpm_text = bpm and (tostring(bpm) .. " BPM") or nil
   local label_col = selected and 0xFFFFFFFF or UI_THEME.text
+  local mx, my = r.ImGui_GetMousePos(ctx)
+  local action_hit = nil
+  local actions_w = (hovered and region) and (SEQ_PATTERN_ACTIONS_W + 8.0) or 0.0
   if preview then
     -- Name over BPM on the left, one bar of the groove on the right.
     local grid_w = math.floor(math.min(130.0, row_w * 0.42))
     local grid_x1 = x1 - 9.0
     local grid_x0 = grid_x1 - grid_w
-    local text_w = grid_x0 - (x0 + 10.0) - 10.0
+    local text_w = grid_x0 - (x0 + 10.0) - 10.0 - actions_w
+    if actions_w > 0 then
+      action_hit = seq_pattern_draw_apply_actions(dl, grid_x0 - 8.0 - SEQ_PATTERN_ACTIONS_W, cy - SEQ_PATTERN_ACTION_S * 0.5, mx, my)
+    end
     r.ImGui_DrawList_AddText(dl, x0 + 10.0, y0 + 3.0, label_col, seq_truncate_text_to_width(child.label or "Groove", text_w))
     if bpm_text then
       r.ImGui_DrawList_AddText(dl, x0 + 10.0, y0 + 19.0, UI_THEME.text_mute, seq_truncate_text_to_width(bpm_text, text_w))
@@ -1880,6 +2120,10 @@ function render_seq_gmd_pattern_row(region, child, parent_id_safe)
     seq_pattern_draw_step_preview(dl, grid_x0, y0 + 6.0, grid_x1, y1 - 6.0, preview, 1.0)
   else
     local right = x1 - 10.0
+    if actions_w > 0 then
+      action_hit = seq_pattern_draw_apply_actions(dl, right - SEQ_PATTERN_ACTIONS_W, cy - SEQ_PATTERN_ACTION_S * 0.5, mx, my)
+      right = right - actions_w
+    end
     if bpm_text then
       local bw, bh = r.ImGui_CalcTextSize(ctx, bpm_text)
       r.ImGui_DrawList_AddText(dl, right - bw, cy - bh * 0.5, UI_THEME.text_mute, bpm_text)
@@ -1895,9 +2139,17 @@ function render_seq_gmd_pattern_row(region, child, parent_id_safe)
     if item.drummer then tip[#tip + 1] = "Drummer " .. tostring(item.drummer) end
     if preview and item.preview_bar then tip[#tip + 1] = "Preview shows bar " .. tostring(math.floor(item.preview_bar) + 1) end
     tip[#tip + 1] = "Click: load " .. (preview and "this bar " or "") .. "into " .. get_seq_region_display_name(region)
+    if action_hit then
+      tip = { seq_pattern_apply_action_tip(action_hit, seq_library_genres_from_text(item.style or child.subgenre or "")) }
+    end
     r.ImGui_SetTooltip(ctx, table.concat(tip, "\n"))
   end
   if clicked and region then
+    if action_hit then
+      seq_pattern_request_swap(action_hit == "swap")
+    else
+      seq_pattern_request_swap(nil)
+    end
     run_seq_gmd_load_id(region, id, item.preview_bar)
   end
   r.ImGui_SetCursorScreenPos(ctx, x_base, y1 + 2.0)
@@ -2037,6 +2289,7 @@ function render_seq_pattern_popup(region)
     end
     r.ImGui_Dummy(ctx, 1, 2)
     seq_pattern_render_category_chips()
+    seq_pattern_render_click_mode()
     seq_pattern_render_ai_strip(region, can_generate)
     if not region then
       r.ImGui_TextColored(ctx, 0xFFB870FF, "Select a region in the sequencer to apply patterns.")
@@ -2044,6 +2297,7 @@ function render_seq_pattern_popup(region)
 
     local entries = seq_pattern_browser_entries()
     if submitted and region and entries.first_template and seq_preset_can_generate(entries.first_template.key) then
+      seq_pattern_request_swap(nil)
       run_seq_pattern_preset(region, entries.first_template.key, nil)
     end
 
@@ -2143,6 +2397,7 @@ function render_seq_pattern_variation_row(region, style_key, entry)
     r.ImGui_SetTooltip(ctx, "Click: apply this variation again")
   end
   if clicked then
+    seq_pattern_request_swap(nil)
     seq_apply_pattern_variation(region, style_key, entry)
     r.ImGui_CloseCurrentPopup(ctx)
   end
