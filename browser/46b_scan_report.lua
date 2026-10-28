@@ -39,7 +39,7 @@ SM_SCAN_CAUSES = {
     id = "analyzer", label = "Analyzer", color = 0xB48CFFFF, retry = true,
     title = "Analyzer stopped",
     explain = "The analyzer timed out or crashed on these files. The files may be fine.",
-    fix = "Press Retry. If they keep failing, send a report from Help > Send Feedback.",
+    fix = "Press Retry. If they keep failing, send a report with Send feedback in the menu bar.",
   },
   {
     id = "partial", label = "Partial", color = 0xE8C060FF, retry = true,

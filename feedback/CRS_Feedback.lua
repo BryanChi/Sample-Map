@@ -1781,7 +1781,7 @@ local function start_send()
   local temps = { payload_path }
   local parts = {
     sh_quote(is_windows() and "curl" or "/usr/bin/curl"),
-    "-sS", "--connect-timeout", "10", "--max-time", "120",
+    "-sS", "--connect-timeout", "4", "--max-time", "120",
     "-H", sh_quote("X-CRS-Feedback: 1"),
     "-F", sh_quote("payload=<" .. payload_path .. ";type=application/json"),
   }
