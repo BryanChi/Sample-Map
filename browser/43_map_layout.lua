@@ -707,9 +707,12 @@ function render_header()
   if not r.ImGui_BeginMenuBar(ctx) then
     return
   end
+  -- Monolith Space: Barlow caps on the bar, Inter Tight in the dropdowns.
+  local bar_font = ui_push_font("cond")
 
   -- Library: scanning and the index itself.
-  if r.ImGui_BeginMenu(ctx, "Library") then
+  if r.ImGui_BeginMenu(ctx, ui_menu_label("Library")) then
+    local menu_font = ui_push_font("body")
     if state.scan_running then
       if r.ImGui_MenuItem(ctx, "Stop Scan") then
         stop_scan()
@@ -786,11 +789,13 @@ function render_header()
     if r.ImGui_MenuItem(ctx, "Clear All Folders and Samples…") then
       clear_all_folders_and_samples()
     end
+    ui_pop_font(menu_font)
     r.ImGui_EndMenu(ctx)
   end
 
   -- View: which panels are visible and how tags are laid out.
-  if r.ImGui_BeginMenu(ctx, "View") then
+  if r.ImGui_BeginMenu(ctx, ui_menu_label("View")) then
+    local menu_font = ui_push_font("body")
     local map_floating = state.sample_map_floating
     local seq_floating = state.sequencer_floating
     if r.ImGui_MenuItem(ctx, "Sample Map", nil, state.active_view == "sample_map" and not map_floating) then
@@ -871,11 +876,13 @@ function render_header()
       end
       r.ImGui_EndMenu(ctx)
     end
+    ui_pop_font(menu_font)
     r.ImGui_EndMenu(ctx)
   end
 
   -- Tools: diagnostics.
-  if r.ImGui_BeginMenu(ctx, "Tools") then
+  if r.ImGui_BeginMenu(ctx, ui_menu_label("Tools")) then
+    local menu_font = ui_push_font("body")
     if r.ImGui_MenuItem(ctx, "Copy Scan Logs") then
       local logs_text = get_scan_logs_text()
       if logs_text and logs_text ~= "" then
@@ -891,19 +898,20 @@ function render_header()
       end
       r.ImGui_EndMenu(ctx)
     end
+    ui_pop_font(menu_font)
     r.ImGui_EndMenu(ctx)
   end
 
-  if r.ImGui_MenuItem(ctx, "Song Starter", nil, state.song_starter and state.song_starter.open) then
+  if r.ImGui_MenuItem(ctx, ui_menu_label("Song Starter"), nil, state.song_starter and state.song_starter.open) then
     ss_toggle_window()
   end
   menu_item_tooltip("Pick loops for drums, bass, chords... matched to one key and tempo.\nPreview them together, re-roll parts, add them to the project.")
 
-  if r.ImGui_MenuItem(ctx, "Settings", nil, state.settings_open) then
+  if r.ImGui_MenuItem(ctx, ui_menu_label("Settings"), nil, state.settings_open) then
     state.settings_open = not state.settings_open
   end
 
-  if r.ImGui_MenuItem(ctx, "Feedback") then
+  if r.ImGui_MenuItem(ctx, ui_menu_label("Feedback")) then
     sm_open_feedback()
   end
   -- green count on its corner: bug recordings waiting to be sent
@@ -957,6 +965,7 @@ function render_header()
   r.ImGui_SameLine(ctx, 0, knob_gap)
   render_seq_midi_arm_icon_button("seq_midi_arm_menubar", midi_h)
 
+  ui_pop_font(bar_font)
   r.ImGui_EndMenuBar(ctx)
 end
 

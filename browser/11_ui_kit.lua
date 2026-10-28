@@ -243,6 +243,25 @@ function ui_tc(c)
   return v
 end
 
+-- Monolith Space menu bar: caps labels ("###" keeps the ID) and a
+-- font push/pop that are no-ops in Classic. Pop in the window that pushed.
+function ui_menu_label(s)
+  if SM_MONO_SPACE then
+    return string.upper(s) .. "###" .. s
+  end
+  return s
+end
+
+function ui_push_font(kind)
+  return sm_mono_push_font and sm_mono_push_font(kind) or false
+end
+
+function ui_pop_font(pushed)
+  if pushed then
+    r.ImGui_PopFont(ctx)
+  end
+end
+
 -- ImGui enum getter -> value. Enum values are constants, so each getter is
 -- called once instead of ~60 times per frame by ui_push_theme.
 SM_ENUM_VALUE = {}
