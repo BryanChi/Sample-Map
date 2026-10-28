@@ -1669,7 +1669,11 @@ end
 
 -- Arrange mode Add to project: folder + a track per slot that plays, an item
 -- per section, regions per section. One undo step.
-function ss_add_arrangement()
+-- opts (both Add paths): pos = start time (default edit cursor), index =
+-- track index to insert at (default above the selected track, else the end),
+-- folder = false for plain tracks without the folder track.
+function ss_add_arrangement(opts)
+  opts = opts or {}
   local st = ss_state()
   local arr = ss_arrangement(st)
   local bpm = st.target_bpm or ss_project_bpm()
@@ -1688,7 +1692,7 @@ function ss_add_arrangement()
     t[#t + 1] = it
   end
   local proj = 0
-  local base = r.GetCursorPosition()
+  local base = opts.pos or r.GetCursorPosition()
   local key = st.target_key
   local tmpl = SS_TEMPLATE[arr.template or st.template]
   r.Undo_BeginBlock2(proj)
@@ -1698,15 +1702,25 @@ function ss_add_arrangement()
   end
   local idx = r.CountTracks(proj)
   local sel = r.GetSelectedTrack(proj, 0)
-  if sel then
+  if opts.index then
+    idx = math.max(0, math.min(r.CountTracks(proj), opts.index))
+  elseif sel then
     idx = math.max(0, math.floor(r.GetMediaTrackInfo_Value(sel, "IP_TRACKNUMBER") + 0.5) - 1)
   end
-  r.InsertTrackAtIndex(idx, true)
-  local folder = r.GetTrack(proj, idx)
+  local use_folder = opts.folder ~= false
+  local folder
+  if use_folder then
+    r.InsertTrackAtIndex(idx, true)
+    folder = r.GetTrack(proj, idx)
+  else
+    idx = idx - 1 -- children go from idx on
+  end
   local title = string.format("Song Starter %s%.0f%s", key and (key .. " ") or "", bpm,
     tmpl and (" " .. tmpl.label) or "")
-  r.GetSetMediaTrackInfo_String(folder, "P_NAME", title, true)
-  r.SetMediaTrackInfo_Value(folder, "I_FOLDERDEPTH", 1)
+  if folder then
+    r.GetSetMediaTrackInfo_String(folder, "P_NAME", title, true)
+    r.SetMediaTrackInfo_Value(folder, "I_FOLDERDEPTH", 1)
+  end
   local last
   local added = {}
   for i, slot in ipairs(list) do
@@ -1744,7 +1758,9 @@ function ss_add_arrangement()
     end
     last = tr
   end
-  r.SetMediaTrackInfo_Value(last, "I_FOLDERDEPTH", -1)
+  if folder then
+    r.SetMediaTrackInfo_Value(last, "I_FOLDERDEPTH", -1)
+  end
   local bar_s = 240.0 / bpm
   for _, sec in ipairs(arr.sections) do
     local def = SS_SECTION_TYPES[sec.type] or {}
@@ -1761,10 +1777,11 @@ function ss_add_arrangement()
   return true
 end
 
-function ss_add_to_project()
+function ss_add_to_project(opts)
+  opts = opts or {}
   local st = ss_state()
   if st.mode == "arrange" then
-    return ss_add_arrangement()
+    return ss_add_arrangement(opts)
   end
   local list = {}
   for _, slot in ipairs(st.slots) do
@@ -1777,7 +1794,7 @@ function ss_add_to_project()
   local bpm = st.target_bpm or ss_project_bpm()
   local key = st.target_key
   local proj = 0
-  local pos = r.GetCursorPosition()
+  local pos = opts.pos or r.GetCursorPosition()
   local length = (st.bars or 8) * 240.0 / bpm
   r.Undo_BeginBlock2(proj)
   r.PreventUIRefresh(1)
@@ -1786,14 +1803,24 @@ function ss_add_to_project()
   end
   local idx = r.CountTracks(proj)
   local sel = r.GetSelectedTrack(proj, 0)
-  if sel then
+  if opts.index then
+    idx = math.max(0, math.min(r.CountTracks(proj), opts.index))
+  elseif sel then
     idx = math.max(0, math.floor(r.GetMediaTrackInfo_Value(sel, "IP_TRACKNUMBER") + 0.5) - 1)
   end
-  r.InsertTrackAtIndex(idx, true)
-  local folder = r.GetTrack(proj, idx)
+  local use_folder = opts.folder ~= false
+  local folder
+  if use_folder then
+    r.InsertTrackAtIndex(idx, true)
+    folder = r.GetTrack(proj, idx)
+  else
+    idx = idx - 1 -- children go from idx on
+  end
   local title = string.format("Song Starter %s%.0f", key and (key .. " ") or "", bpm)
-  r.GetSetMediaTrackInfo_String(folder, "P_NAME", title, true)
-  r.SetMediaTrackInfo_Value(folder, "I_FOLDERDEPTH", 1)
+  if folder then
+    r.GetSetMediaTrackInfo_String(folder, "P_NAME", title, true)
+    r.SetMediaTrackInfo_Value(folder, "I_FOLDERDEPTH", 1)
+  end
   local last
   local added = {}
   for i, slot in ipairs(list) do
@@ -1819,7 +1846,9 @@ function ss_add_to_project()
     r.SetMediaItemInfo_Value(item, "B_LOOPSRC", 1)
     last = tr
   end
-  r.SetMediaTrackInfo_Value(last, "I_FOLDERDEPTH", -1)
+  if folder then
+    r.SetMediaTrackInfo_Value(last, "I_FOLDERDEPTH", -1)
+  end
   ss_rebuild_peaks(added)
   r.PreventUIRefresh(-1)
   if r.TrackList_AdjustWindows then r.TrackList_AdjustWindows(false) end
@@ -1828,6 +1857,191 @@ function ss_add_to_project()
   ss_history_push(st, false)
   sm_notify(string.format("Added %s: %d track%s, %d bars.", title, #list, #list == 1 and "" or "s", st.bars or 8))
   return true
+end
+
+---------------------------------------------------------------------------
+-- Drag ADD TO PROJECT into the arrange
+---------------------------------------------------------------------------
+
+SS_ADD_DRAG = nil -- { target = { kind = "track" | "folder", time, index, track } }
+SS_NEW_FOLDER_H = 26 -- px: the NEW FOLDER strip along the top of the arrange
+
+-- Start of the bar nearest t.
+function ss_snap_bar(t)
+  if not (r.TimeMap2_timeToBeats and r.TimeMap2_beatsToTime) then
+    return t
+  end
+  local beats, measure, cml = r.TimeMap2_timeToBeats(0, t)
+  beats, measure, cml = tonumber(beats) or 0, tonumber(measure) or 0, tonumber(cml) or 4
+  if beats >= cml * 0.5 then
+    measure = measure + 1
+  end
+  return r.TimeMap2_beatsToTime(0, 0, measure)
+end
+
+-- Tracks the starter adds (audible slots that will get items).
+function ss_add_track_count(st)
+  local n = 0
+  if st.mode == "arrange" and ss_arr_valid(st.arr) then
+    local seen = {}
+    for _, it in ipairs(ss_arrangement_items(st, st.arr, st.target_bpm or 120)) do
+      if not seen[it.slot] then seen[it.slot] = true; n = n + 1 end
+    end
+    return n
+  end
+  for _, slot in ipairs(st.slots) do
+    if ss_slot_audible(st.slots, slot) then n = n + 1 end
+  end
+  return n
+end
+
+-- Length of what Add puts in, in bars.
+function ss_add_bars(st)
+  if st.mode == "arrange" and ss_arr_valid(st.arr) then
+    return st.arr.total
+  end
+  return st.bars or 8
+end
+
+-- Where a release now would put the starter: the NEW FOLDER strip (ruler, or
+-- the top strip of the arrange) or a track lane (or below the last track).
+-- -> { kind, time, index, track, mx_client, my_client } or nil.
+function ss_add_drag_target()
+  if not r.BR_GetMouseCursorContext then
+    return nil
+  end
+  local window = r.BR_GetMouseCursorContext()
+  if window ~= "arrange" and window ~= "ruler" then
+    return nil
+  end
+  local t = r.BR_GetMouseCursorContext_Position()
+  if not t or t < 0 then
+    return nil
+  end
+  local time = ss_snap_bar(t)
+  local hwnd = seq_get_arrange_hwnd and seq_get_arrange_hwnd()
+  local cy = nil
+  if hwnd and r.GetMousePosition and r.JS_Window_ScreenToClient then
+    local mx, my = r.GetMousePosition()
+    local _, y = r.JS_Window_ScreenToClient(hwnd, mx, my)
+    cy = tonumber(y)
+  end
+  if window == "ruler" or (cy and cy < SS_NEW_FOLDER_H) then
+    return { kind = "folder", time = time, index = r.CountTracks(0) }
+  end
+  local track = r.BR_GetMouseCursorContext_Track()
+  local index = r.CountTracks(0)
+  if track then
+    index = math.max(0, math.floor(r.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER") + 0.5) - 1)
+  end
+  return { kind = "track", time = time, index = index, track = track }
+end
+
+-- Rects (arrange client coords) for the overlay: the NEW FOLDER strip and the
+-- block where the starter lands. -> list of { x0, y0, x1, y1, kind, text }.
+function ss_add_drag_rects(st, target, geo, t0, t1)
+  local out = {}
+  local w, h = geo.view_w or 0, geo.view_h or 0
+  if w <= 0 or h <= 0 or not t0 or not t1 or t1 <= t0 then
+    return out
+  end
+  local hot_folder = target and target.kind == "folder"
+  out[#out + 1] = { x0 = 0, y0 = 0, x1 = w, y1 = SS_NEW_FOLDER_H, kind = "strip", hot = hot_folder, text = "NEW FOLDER" }
+  if not target then
+    return out
+  end
+  local bpm = st.target_bpm or 120
+  local bars = ss_add_bars(st)
+  local len = bars * 240.0 / bpm
+  local x0 = (target.time - t0) / (t1 - t0) * w
+  local x1 = (target.time + len - t0) / (t1 - t0) * w
+  local n = math.max(1, ss_add_track_count(st))
+  local secs = math.floor(len + 0.5)
+  local label = string.format("%d TRACKS · %d BARS · %d:%02d", n, bars, secs // 60, secs % 60)
+  if target.kind == "folder" then
+    out[#out + 1] = { x0 = x0, y0 = 0, x1 = x1, y1 = SS_NEW_FOLDER_H, kind = "block", text = label }
+    return out
+  end
+  -- one lane per added track, using the real lane heights below the target
+  local y = nil
+  local ntr = r.CountTracks(0)
+  local last_bottom = SS_NEW_FOLDER_H
+  if ntr > 0 then
+    local tr = r.GetTrack(0, ntr - 1)
+    last_bottom = (r.GetMediaTrackInfo_Value(tr, "I_TCPY") or 0) + (r.GetMediaTrackInfo_Value(tr, "I_WNDH") or 28)
+  end
+  for i = 0, n - 1 do
+    local tr = (target.index + i < ntr) and r.GetTrack(0, target.index + i) or nil
+    local ly, lh
+    if tr then
+      ly = r.GetMediaTrackInfo_Value(tr, "I_TCPY") or 0
+      lh = r.GetMediaTrackInfo_Value(tr, "I_WNDH") or 28
+    else
+      ly = math.max(last_bottom, y or last_bottom)
+      lh = 28
+    end
+    y = ly + lh
+    out[#out + 1] = { x0 = x0, y0 = ly, x1 = x1, y1 = ly + lh, kind = "lane", text = (i == 0) and label or nil }
+  end
+  return out
+end
+
+-- Called from seq_arrange_hl_flush (17_seq_arrange_overlay.lua) each frame.
+function ss_arrange_overlay_add()
+  local d = SS_ADD_DRAG
+  if not d then
+    return
+  end
+  local geo = seq_get_arrange_geometry and seq_get_arrange_geometry()
+  if not geo or not geo.view_w then
+    return
+  end
+  local t0, t1 = get_arrange_view_range()
+  local green = seq_lice_color(0x49, 0xCC, 0x85)
+  for _, rc in ipairs(ss_add_drag_rects(ss_state(), d.target, geo, t0, t1)) do
+    local a = (rc.kind == "strip") and (rc.hot and 0.32 or 0.12) or 0.22
+    seq_arrange_hl_add(rc.x0, rc.y0, rc.x1, rc.y1, green, a, green)
+    local pend = seq_arrange_hl_pending
+    if pend and rc.text then
+      pend[#pend].text = rc.text
+    end
+  end
+end
+
+function ss_add_drag_begin()
+  SS_ADD_DRAG = { target = nil }
+end
+
+function ss_add_drag_cancel()
+  SS_ADD_DRAG = nil
+end
+
+-- Each frame while dragging ADD TO PROJECT: follow the target; on release
+-- add there (track lane: plain tracks from that track on; NEW FOLDER: a
+-- folder at the end of the project), anywhere else cancels.
+-- -> "drag" | "added" | "cancel".
+function ss_add_drag_update(st)
+  local d = SS_ADD_DRAG
+  if not d then return nil end
+  if r.ImGui_IsMouseDown(ctx, 0) then
+    if r.ImGui_Key_Escape and r.ImGui_IsKeyPressed(ctx, r.ImGui_Key_Escape(), false) then
+      ss_add_drag_cancel()
+      return "cancel"
+    end
+    d.target = ss_add_drag_target()
+    return "drag"
+  end
+  local target = ss_add_drag_target() or d.target
+  SS_ADD_DRAG = nil
+  if not target then
+    return "cancel"
+  end
+  if target.kind == "folder" then
+    ss_add_to_project({ pos = target.time, index = r.CountTracks(0), folder = true })
+  else
+    ss_add_to_project({ pos = target.time, index = target.index, folder = false })
+  end
+  return "added"
 end
 
 ---------------------------------------------------------------------------
@@ -3066,10 +3280,20 @@ local function ss_window_body(st)
   end
   ss_draw_heart(dl, lkx + 15, lky + 13, 11, liked_now and SS_COL.accent or SS_COL.dim, liked_now)
   r.ImGui_SameLine(ctx, 0, 6)
-  if ss_btn("##ss_add", "ADD TO PROJECT", nil, 26, false, st.mode == "arrange"
+  local add_clicked = ss_btn("##ss_add", "ADD TO PROJECT", nil, 26, SS_ADD_DRAG ~= nil, (st.mode == "arrange"
       and "Folder track with one track per unmuted slot, an item per section and a region per section, at the edit cursor"
-      or "Folder track with one track per unmuted slot, at the edit cursor") then
+      or "Folder track with one track per unmuted slot, at the edit cursor")
+      .. "\nDrag into the arrange: drop on a track (tracks from there on) or on NEW FOLDER at the top")
+  -- press and drag past 6 px: drag-to-arrange mode instead of a click
+  if r.ImGui_IsItemActive(ctx) and r.ImGui_IsMouseDragging(ctx, 0, 6.0) and not SS_ADD_DRAG and not st._add_dragged then
+    st._add_dragged = true
+    ss_add_drag_begin()
+  end
+  if add_clicked and not st._add_dragged then
     ss_add_to_project()
+  end
+  if not r.ImGui_IsMouseDown(ctx, 0) then
+    st._add_dragged = nil
   end
   r.ImGui_SameLine(ctx, 0, 10)
   local tc, tv = r.ImGui_Checkbox(ctx, "Set project tempo", st.set_tempo == true)
@@ -3128,6 +3352,7 @@ function render_song_starter_window()
   end
   ss_preview_update()
   ss_drag_out_update(st)
+  ss_add_drag_update(st)
   SS_WINDOW_HOT = false
   if not st.open then
     if SS_PLAY then ss_preview_stop() end

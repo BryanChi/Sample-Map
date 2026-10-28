@@ -1679,3 +1679,159 @@ def test_drag_out_does_not_audition_and_needs_threshold():
       return before, started, auditioned[dragged.path] == true, #ERRORS
     ''')
     assert got == (False, True, False, 0)
+
+
+# --- Drag ADD TO PROJECT into the arrange ---------------------------------------
+
+ARRANGE = r"""
+  -- 120 bpm 4/4: a bar is 2 s
+  reaper.TimeMap2_timeToBeats = function(_, t)
+    local m = math.floor(t / 2)
+    return (t - m * 2) / 0.5, m, 4
+  end
+  reaper.TimeMap2_beatsToTime = function(_, beats, measure) return (measure or 0) * 2 + beats * 0.5 end
+  reaper.GetMediaTrackInfo_Value = function(tr, k)
+    if k == "IP_TRACKNUMBER" then
+      for i, t in ipairs(TRACKS) do if t == tr then return i end end
+      return 0
+    end
+    if k == "I_TCPY" then
+      for i, t in ipairs(TRACKS) do if t == tr then return 26 + (i - 1) * 40 end end
+    end
+    if k == "I_WNDH" then return 40 end
+    return 0
+  end
+  CTX = { window = "arrange", pos = 5.3, track = nil }
+  reaper.BR_GetMouseCursorContext = function() return CTX.window, "", "" end
+  reaper.BR_GetMouseCursorContext_Position = function() return CTX.pos end
+  reaper.BR_GetMouseCursorContext_Track = function() return CTX.track end
+  reaper.GetMousePosition = function() return 500, 300 end
+  reaper.JS_Window_ScreenToClient = function(_, x, y) return x, CTX.cy or 120 end
+  reaper.CountSelectedMediaItems = function() return 0 end
+  seq_get_arrange_hwnd = function() return {} end
+  reaper.ImGui_IsMouseDown = function() return DOWN == true end
+  TRACKS[1] = { depth = 0, items = {}, P_NAME = "Old 1" }
+  TRACKS[2] = { depth = 0, items = {}, P_NAME = "Old 2" }
+  local st = ss_state()
+  st.target_bpm, st.chaos, st.key_auto, st.target_key, st.bars, st.mode = 120, 0.0, false, "Am", 8, "loop"
+  ss_do_reroll("batch")
+  NSLOTS = 0
+  for _, s in ipairs(st.slots) do if s.path then NSLOTS = NSLOTS + 1 end end
+"""
+
+
+def test_add_drag_drop_on_track_inserts_plain_tracks_at_snapped_time():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    L.execute(ARRANGE)
+    got = L.execute(r'''
+      local st = ss_state()
+      CTX.track = TRACKS[2]
+      DOWN = true
+      ss_add_drag_begin()
+      local a = ss_add_drag_update(st)
+      local tgt = SS_ADD_DRAG.target
+      DOWN = false
+      local b = ss_add_drag_update(st)
+      local names, depths = {}, {}
+      for i, t in ipairs(TRACKS) do names[i] = t.P_NAME; depths[i] = t.depth end
+      local pos = ITEMS[1].D_POSITION
+      local any_folder = false
+      for _, d in ipairs(depths) do if d ~= 0 then any_folder = true end end
+      return a, tgt.kind, tgt.time, tgt.index, b, #TRACKS, names[1], names[2], names[#TRACKS], pos, any_folder, SS_ADD_DRAG == nil
+    ''')
+    a, kind, time, index, b, n_tracks, n1, n2, nlast, pos, any_folder, done = got
+    n = L.globals().NSLOTS
+    assert a == "drag" and kind == "track" and time == 6.0 and index == 1
+    assert b == "added" and n_tracks == 2 + n
+    assert n1 == "Old 1" and n2 == "Drums" and nlast == "Old 2"
+    assert pos == 6.0 and not any_folder and done
+
+
+def test_add_drag_drop_on_new_folder_strip():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    L.execute(ARRANGE)
+    got = L.execute(r'''
+      local st = ss_state()
+      CTX.window, CTX.pos = "ruler", 9.1   -- over the ruler: NEW FOLDER, snapped to the nearest bar (10 s)
+      DOWN = true
+      ss_add_drag_begin()
+      ss_add_drag_update(st)
+      local kind = SS_ADD_DRAG.target.kind
+      DOWN = false
+      ss_add_drag_update(st)
+      local folder = TRACKS[3]
+      -- the strip along the top of the arrange works too
+      return kind, folder.P_NAME, folder.depth, TRACKS[#TRACKS].depth, ITEMS[1].D_POSITION, TRACKS[1].P_NAME
+    ''')
+    kind, fname, fdepth, last_depth, pos, first = got
+    assert kind == "folder" and fname == "Song Starter Am 120" and fdepth == 1 and last_depth == -1
+    assert pos == 10.0 and first == "Old 1"
+
+
+def test_add_drag_top_strip_and_cancel_paths():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    L.execute(ARRANGE)
+    got = L.execute(r'''
+      local st = ss_state()
+      CTX.cy = 10                           -- inside the NEW FOLDER strip at the top of the arrange
+      local t1 = ss_add_drag_target()
+      CTX.cy = 120
+      -- Escape cancels
+      DOWN = true
+      ss_add_drag_begin()
+      PRESSED_ESC = true
+      reaper.ImGui_Key_Escape = function() return 27 end
+      reaper.ImGui_IsKeyPressed = function(_, k) return k == 27 and PRESSED_ESC end
+      local c1 = ss_add_drag_update(st)
+      PRESSED_ESC = false
+      -- released over the TCP (not the arrange): cancel
+      ss_add_drag_begin()
+      CTX.window = "tcp"
+      DOWN = false
+      local c2 = ss_add_drag_update(st)
+      return t1.kind, c1, c2, #TRACKS, SS_ADD_DRAG == nil
+    ''')
+    assert got == ("folder", "cancel", "cancel", 2, True)
+
+
+def test_add_button_click_vs_drag_threshold_and_overlay_rects():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    L.execute(ARRANGE)
+    got = L.execute(r'''
+      local st = ss_state()
+      st.open = true
+      local adds = 0
+      local real_add = ss_add_to_project
+      ss_add_to_project = function(o) adds = adds + 1 end
+      -- press and drag past the threshold on ADD TO PROJECT: drag mode, no add
+      DOWN = true
+      reaper.ImGui_IsItemActive = function() return true end
+      DRAGGING = true
+      reaper.ImGui_IsMouseDragging = function(_, b, th) return DRAGGING and th == 6.0 end
+      render_song_starter_window()
+      local dragging = SS_ADD_DRAG ~= nil
+      ss_add_drag_cancel()
+      -- release over the button after that drag: still no click-add
+      DOWN = false
+      reaper.ImGui_IsItemActive = function() return false end
+      reaper.ImGui_InvisibleButton = function(_, id) return id == "##ss_add" end
+      render_song_starter_window()
+      local after_drag = adds
+      -- a plain click: adds
+      render_song_starter_window()
+      local clicked = adds
+      ss_add_to_project = real_add
+      -- overlay: strip + one lane per slot, label on the first
+      local rects = ss_add_drag_rects(st, { kind = "track", time = 6.0, index = 1 }, { view_w = 1000, view_h = 600 }, 0, 20)
+      return dragging, after_drag, clicked, #rects, rects[1].text, rects[2].text, rects[2].x0, rects[2].x1, rects[2].y0
+    ''')
+    dragging, after_drag, clicked, n_rects, strip, label, x0, x1, y0 = got
+    n = L.globals().NSLOTS
+    assert dragging and after_drag == 0 and clicked == 1
+    assert n_rects == 1 + n and strip == "NEW FOLDER"
+    assert label == "%d TRACKS · 8 BARS · 0:16" % n
+    assert x0 == 300 and x1 == 1100 and y0 == 66   # 6..22 s on a 0..20 s view of 1000 px; lane of track 2

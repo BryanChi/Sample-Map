@@ -366,9 +366,38 @@ function seq_arrange_hl_draw_rect(bm, rect)
     r.JS_LICE_Line(bm, x2, y2, x, y2, rect.edge_rgb, 1.0, "COPY", true)
     r.JS_LICE_Line(bm, x, y2, x, y, rect.edge_rgb, 1.0, "COPY", true)
   end
+  if rect.text and r.JS_LICE_DrawText then
+    local font = seq_arrange_hl_font()
+    if font then
+      if r.JS_LICE_SetFontColor then r.JS_LICE_SetFontColor(font, rect.edge_rgb or 0xFFFFFFFF) end
+      r.JS_LICE_DrawText(bm, font, rect.text, #rect.text, x + 8, y + 6, x + w - 4, y + h - 2)
+    end
+  end
+end
+
+-- LICE font for overlay labels (created once).
+function seq_arrange_hl_font()
+  if seq_arrange_hl_font_obj ~= nil then
+    return seq_arrange_hl_font_obj or nil
+  end
+  seq_arrange_hl_font_obj = false
+  if r.JS_LICE_CreateFont and r.JS_GDI_CreateFont and r.JS_LICE_SetFontFromGDI then
+    local ok, lf = pcall(function()
+      local gdi = r.JS_GDI_CreateFont(14, 600, 0, false, false, false, "Arial")
+      local f = r.JS_LICE_CreateFont()
+      r.JS_LICE_SetFontFromGDI(f, gdi, "")
+      return f
+    end)
+    if ok and lf then seq_arrange_hl_font_obj = lf end
+  end
+  return seq_arrange_hl_font_obj or nil
 end
 
 function seq_arrange_hl_flush()
+  if ss_arrange_overlay_add then
+    -- Song Starter's drag-to-arrange highlight and NEW FOLDER strip
+    pcall(ss_arrange_overlay_add)
+  end
   local pending = seq_arrange_hl_pending
   seq_arrange_hl_pending = nil
   if not pending or #pending == 0 then
@@ -416,7 +445,7 @@ function seq_arrange_hl_flush()
     sig_parts[#sig_parts + 1] = string.format("%s,%s,%s,%s,%s,%s,%s",
       math.floor(p.x0 + 0.5), math.floor(p.y0 + 0.5),
       math.floor(p.x1 - p.x0 + 0.5), math.floor(p.y1 - p.y0 + 0.5),
-      tostring(p.fill_rgb), tostring(p.fill_a), tostring(p.edge_rgb))
+      tostring(p.fill_rgb), tostring(p.fill_a), tostring(p.edge_rgb)) .. tostring(p.text or "")
   end
   local sig = table.concat(sig_parts, ";")
   if seq_arrange_hl_linked and seq_arrange_hl_hwnd == hwnd and state.seq_arrange_hl_last_sig == sig then
