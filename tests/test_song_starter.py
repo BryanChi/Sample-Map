@@ -1134,3 +1134,48 @@ def test_hover_in_window_marks_row_and_blocks_sample_map_shortcuts():
     assert muted is True and hot is True
     assert blocked == 0
     assert ran >= 1  # not hot: Space reaches Sample Map's play_stop (REAPER transport)
+
+
+def test_every_voice_meters_despite_sws_loop_flag_bug():
+    # SWS CF_Preview: setLoop hands the OLD loop state to its source, so after a
+    # single B_LOOP=1 the source isn't looping, the first block at time 0 counts
+    # as a wrap-around and GetPeak reads 0 forever after. Model that and check
+    # every voice still meters.
+    L = _runtime()
+    L.execute(FAKE_CF)
+    got = L.execute(r'''
+      reaper.CF_CreatePreview = function(src) return { vals = {}, loop = false, src_looping = false } end
+      reaper.CF_Preview_SetValue = function(o, k, v)
+        if k == "B_LOOP" then
+          o.src_looping = o.loop      -- the SWS bug: old value
+          o.loop = v == 1 or v == true
+        end
+        o.vals[k] = v
+        return true
+      end
+      reaper.CF_Preview_Play = function(o)
+        o.wrapped = not o.src_looping and not o.vals.D_POSITION   -- first block at 0 = "wrap"
+        return true
+      end
+      reaper.CF_Preview_GetPeak = function(o, ch)
+        if o.wrapped or (o.vals.D_VOLUME or 0) <= 0 then return true, 0 end
+        return true, 0.5
+      end
+      local st = ss_state()
+      ss_preview_play()
+      ss_preview_update()
+      local metering, total = 0, 0
+      for _, v in pairs(SS_PLAY.voices) do
+        total = total + 1
+        if v.meter and v.meter[1] > 0 then metering = metering + 1 end
+      end
+      -- a re-rolled slot swapped in while playing meters too
+      NOW = NOW + 1.0
+      ss_do_reroll(BY.chords)
+      ss_preview_update()
+      local swapped = SS_PLAY.voices[BY.chords.id]
+      return metering, total, swapped and swapped.meter and swapped.meter[1] or -1
+    ''')
+    metering, total, swapped = got
+    assert total >= 5 and metering == total
+    assert swapped == 0.5

@@ -1101,6 +1101,11 @@ local function ss_voice_make(st, slot, elapsed)
     if r.PCM_Source_Destroy then pcall(r.PCM_Source_Destroy, src) end
     return nil
   end
+  -- B_LOOP twice: SWS's setLoop passes the *old* loop state to its source,
+  -- so one call leaves the source "not looping"; its first block at time 0
+  -- then counts as a wrap and CF_Preview_GetPeak reads 0 from then on
+  -- (only some voices metered). The second call sets it for real.
+  r.CF_Preview_SetValue(obj, "B_LOOP", 1)
   r.CF_Preview_SetValue(obj, "B_LOOP", 1)
   r.CF_Preview_SetValue(obj, "B_PPITCH", 1)
   r.CF_Preview_SetValue(obj, "D_PLAYRATE", tonumber(slot.rate) or 1.0)
