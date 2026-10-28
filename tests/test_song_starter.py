@@ -491,3 +491,279 @@ def test_window_renders_without_errors_and_balances_style():
     n_err, colors_ok, vars_ok, ids, first = out
     assert n_err == 0, first
     assert colors_ok and vars_ok and ids == 0
+
+
+# --- Arrangement mode -----------------------------------------------------------
+
+FAKE_PROJECT = r'''
+  TRACKS, ITEMS, UNDO, REGIONS = {}, {}, {}, {}
+  reaper.CountTracks = function() return #TRACKS end
+  reaper.GetSelectedTrack = function() return nil end
+  reaper.InsertTrackAtIndex = function(i) table.insert(TRACKS, i + 1, { depth = 0, items = {} }) end
+  reaper.GetTrack = function(_, i) return TRACKS[i + 1] end
+  reaper.GetSetMediaTrackInfo_String = function(tr, k, v, set) if set then tr[k] = v end return true, tr[k] or "" end
+  reaper.SetMediaTrackInfo_Value = function(tr, k, v) if k == "I_FOLDERDEPTH" then tr.depth = v end end
+  reaper.AddMediaItemToTrack = function(tr) local it = { tr = tr }; tr.items[#tr.items + 1] = it; ITEMS[#ITEMS + 1] = it; return it end
+  reaper.AddTakeToMediaItem = function(it) it.take = {}; return it.take end
+  reaper.PCM_Source_CreateFromFile = function(p) return { path = p } end
+  reaper.SetMediaItemTake_Source = function(t, s) t.src = s end
+  reaper.SetMediaItemTakeInfo_Value = function(t, k, v) t[k] = v end
+  reaper.GetSetMediaItemTakeInfo_String = function(t, k, v) t[k] = v end
+  reaper.SetMediaItemInfo_Value = function(it, k, v) it[k] = v end
+  reaper.GetCursorPosition = function() return 10.0 end
+  reaper.Undo_BeginBlock2 = function() UNDO[#UNDO + 1] = "begin" end
+  reaper.Undo_EndBlock2 = function(_, name) UNDO[#UNDO + 1] = name end
+  reaper.SetCurrentBPM = function(_, bpm) SET_BPM = bpm end
+  reaper.ColorToNative = function(r, g, b) return r | (g << 8) | (b << 16) end
+  reaper.AddProjectMarker2 = function(_, isrgn, a, b, name, idx, color)
+    REGIONS[#REGIONS + 1] = { rgn = isrgn, a = a, b = b, name = name, color = color }
+    return #REGIONS
+  end
+'''
+
+
+def _sections(L, template, chaos):
+    arr = L.globals().ss_build_arrangement(template, chaos)
+    out = []
+    for i in range(1, len(arr.sections) + 1):
+        s = arr.sections[i]
+        out.append((s.type, s.bars, s.start, s.name))
+    return arr, out
+
+
+def test_templates_expand_in_order_with_bar_positions():
+    L = _runtime()
+    arr, secs = _sections(L, "club", 0.0)
+    assert [(t, b) for t, b, _, _ in secs] == [("intro", 8), ("build", 8), ("drop", 16), ("breakdown", 8),
+                                               ("build", 8), ("drop", 16), ("outro", 8)]
+    assert [s for _, _, s, _ in secs] == [0, 8, 16, 32, 40, 48, 64]
+    assert arr.total == 72
+    assert [n for _, _, _, n in secs] == ["Intro", "Build 1", "Drop 1", "Breakdown", "Build 2", "Drop 2", "Outro"]
+    for key, total in (("pop", 48), ("hiphop", 56), ("short", 20)):
+        arr, _ = _sections(L, key, 0.0)
+        assert arr.total == total
+
+
+def test_safe_presence_is_textbook_and_repeatable():
+    L = _runtime()
+    got = L.execute(r'''
+      local a = ss_build_arrangement("club", 0)
+      local b = ss_build_arrangement("club", 0)
+      local function roles(sec)
+        local t = {}
+        for k in pairs(sec.parts) do t[#t + 1] = k end
+        table.sort(t)
+        return table.concat(t, ",")
+      end
+      local same = true
+      for i, s in ipairs(a.sections) do if roles(s) ~= roles(b.sections[i]) then same = false end end
+      local intro, build, drop, brk, outro = a.sections[1], a.sections[2], a.sections[3], a.sections[4], a.sections[7]
+      return same, roles(intro), intro.parts.top.from, roles(build), build.parts.drums.rise, build.parts.lead.vol,
+             roles(drop), roles(brk), outro.parts.drums.to, outro.parts.chords.to, outro.parts.texture.to
+    ''')
+    same, intro, top_from, build, rise, lead_vol, drop, brk, drums_to, chords_to, tex_to = got
+    assert same
+    assert intro == "chords,texture,top" and top_from == 4
+    assert build == "chords,drums,lead,texture,top" and rise is True and abs(lead_vol - 0.6) < 1e-9
+    assert drop == "bass,chords,drums,lead,texture,top"
+    assert brk == "chords,lead,texture"
+    assert (drums_to, chords_to, tex_to) == (4, 6, 8)
+
+
+def test_gap_before_drop_cuts_drums_bass_top():
+    L = _runtime()
+    got = L.execute(r'''
+      local a = ss_build_arrangement("club", 0)
+      local build = a.sections[2]
+      local s = ss_build_arrangement("short", 0)
+      local b4 = s.sections[2]  -- 4-bar build before the drop: half-bar gap
+      local p = ss_build_arrangement("pop", 0)
+      local pre = p.sections[3]
+      return build.gap, build.parts.drums.to, build.parts.top.to, build.parts.chords.to,
+             b4.gap, b4.parts.drums.to, pre.gap, pre.parts.bass.to,
+             ss_arr_gain(a, "drums", 15.5), ss_arr_gain(a, "chords", 15.5), ss_arr_gain(a, "drums", 16.2)
+    ''')
+    gap, drums_to, top_to, chords_to, gap4, drums4, pre_gap, pre_bass, g_gap, g_chords, g_drop = got
+    assert gap == 1 and drums_to == 7 and top_to == 7 and chords_to == 8
+    assert gap4 == 0.5 and drums4 == 3.5
+    assert pre_gap == 0.5 and pre_bass == 3.5
+    assert g_gap == 0 and g_chords == 1 and g_drop == 1
+
+
+def test_chaos_and_random_vary():
+    L = _runtime()
+    got = L.execute(r'''
+      local function sig(a)
+        local t = {}
+        for _, s in ipairs(a.sections) do
+          local r = {}
+          for k, p in pairs(s.parts) do r[#r + 1] = k .. p.from .. "-" .. p.to end
+          table.sort(r)
+          t[#t + 1] = s.type .. s.bars .. "[" .. table.concat(r, ",") .. "]"
+        end
+        return table.concat(t, " ")
+      end
+      local safe, wild, rnd, rnd_ok = {}, {}, {}, true
+      for i = 1, 12 do
+        safe[sig(ss_build_arrangement("club", 0))] = true
+        wild[sig(ss_build_arrangement("club", 1))] = true
+        local a = ss_build_arrangement("random", 0.2)
+        rnd[sig(a)] = true
+        if a.sections[#a.sections].type ~= "outro" or a.total < 16 then rnd_ok = false end
+        local has_peak = false
+        for _, s in ipairs(a.sections) do if SS_SECTION_TYPES[s.type].drop then has_peak = true end end
+        if not has_peak then rnd_ok = false end
+      end
+      local n = function(t) local c = 0; for _ in pairs(t) do c = c + 1 end; return c end
+      return n(safe), n(wild), n(rnd), rnd_ok
+    ''')
+    n_safe, n_wild, n_rnd, rnd_ok = got
+    assert n_safe == 1
+    assert n_wild >= 4
+    assert n_rnd >= 4
+    assert rnd_ok
+
+
+def test_add_arrangement_places_items_on_grid_with_regions():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key, st.set_tempo = 120, 0.0, false, "Am", false
+      ss_do_reroll("batch")
+      st.mode, st.template = "arrange", "club"
+      ss_arrangement(st, true)
+      -- give the drums loop an odd length so start offsets matter
+      local drums
+      for _, s in ipairs(st.slots) do if s.role == "drums" then drums = s end end
+      drums.dur, drums.rate = 6.0, 1.0
+      ss_add_to_project()
+      local bar = 2.0  -- seconds at 120 bpm
+      local on_grid, offs_ok, fades_ok, rise_ok = true, true, true, false
+      local drum_items = 0
+      for _, it in ipairs(ITEMS) do
+        local rel = (it.D_POSITION - 10.0) / bar
+        if math.abs(rel * 2 - math.floor(rel * 2 + 0.5)) > 1e-6 then on_grid = false end
+        if it.tr.P_NAME == "Drums" then
+          drum_items = drum_items + 1
+          if math.abs(it.take.D_STARTOFFS - ((it.D_POSITION - 10.0) % 6.0)) > 1e-9 then offs_ok = false end
+        end
+        if not it.D_FADEOUTLEN or it.D_FADEOUTLEN <= 0 or it.D_FADEOUTLEN > 0.05 then fades_ok = false end
+        if it.D_FADEINLEN and math.abs(it.D_FADEINLEN - it.D_LENGTH) < 1e-9 and it.C_FADEINSHAPE == 1 then rise_ok = true end
+        if it.B_LOOPSRC ~= 1 then on_grid = false end
+      end
+      local rnames = {}
+      for _, g in ipairs(REGIONS) do rnames[#rnames + 1] = g.name end
+      local r3 = REGIONS[3]
+      return #REGIONS, table.concat(rnames, "|"), r3.a, r3.b, r3.rgn, r3.color == (0x85CC49 | 0x1000000),
+             on_grid, offs_ok, fades_ok, rise_ok, drum_items, UNDO[2], TRACKS[1].P_NAME, TRACKS[#TRACKS].depth
+    ''')
+    (n_reg, names, a, b, is_rgn, color_ok, on_grid, offs_ok, fades_ok, rise_ok, drum_items, undo, folder,
+     last_depth) = got
+    assert n_reg == 7
+    assert names == "Intro|Build 1|Drop 1|Breakdown|Build 2|Drop 2|Outro"
+    assert a == 10.0 + 16 * 2.0 and b == 10.0 + 32 * 2.0 and is_rgn and color_ok
+    assert on_grid and offs_ok and fades_ok and rise_ok
+    # drums: build 1, drop 1, build 2, drop 2, outro (not intro, not breakdown)
+    assert drum_items == 5
+    assert undo == "Song Starter: arrange"
+    assert folder == "Song Starter Am 120 Club" and last_depth == -1
+
+
+def test_muted_slot_stays_out_of_arrangement():
+    L = _runtime()
+    L.execute(FAKE_PROJECT)
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 0.0, false, "Am"
+      ss_do_reroll("batch")
+      st.mode = "arrange"
+      for _, s in ipairs(st.slots) do if s.role == "bass" then s.muted = true end end
+      ss_add_to_project()
+      local bass = false
+      for _, t in ipairs(TRACKS) do if t.P_NAME == "Bass" then bass = true end end
+      return bass, #TRACKS > 2
+    ''')
+    assert got == (False, True)
+
+
+def test_arrange_preview_follows_sections_and_jumps():
+    L = _runtime()
+    got = L.execute(r'''
+      VOICES = {}
+      reaper.PCM_Source_CreateFromFile = function(p) return { path = p } end
+      reaper.PCM_Source_Destroy = function() end
+      reaper.CF_CreatePreview = function(src) local v = { src = src, vals = {} }; VOICES[#VOICES + 1] = v; return v end
+      reaper.CF_Preview_SetValue = function(o, k, v) o.vals[k] = v; return true end
+      reaper.CF_Preview_GetValue = function(o, k) return true, o.vals[k] or 0 end
+      reaper.CF_Preview_Play = function(o) o.playing = true; return true end
+      reaper.CF_Preview_Stop = function(o) o.playing = false end
+      reaper.CF_Preview_StopAll = function() end
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 0.0, false, "Am"
+      ss_do_reroll("batch")
+      st.mode, st.template = "arrange", "club"
+      ss_arrangement(st, true)
+      local by = {}
+      for _, s in ipairs(st.slots) do by[s.role] = s end
+      ss_preview_play()
+      local function vol(role) return SS_PLAY.voices[by[role].id].obj.vals.D_VOLUME end
+      -- bar 1 (intro): chords on, drums out
+      NOW = NOW + 2.0
+      ss_preview_update()
+      local intro_chords, intro_drums = vol("chords"), vol("drums")
+      -- jump to Drop 1 (bar 16): everything on, loops join at that phase
+      ss_preview_play(16)
+      local drums_pos = SS_PLAY.voices[by.drums.id].obj.vals.D_POSITION
+      local expect = ss_loop_phase(by.drums, 32.0)
+      NOW = NOW + 0.5
+      ss_preview_update()
+      return intro_chords, intro_drums, vol("drums"), vol("bass"), math.abs((drums_pos or 0) - expect) < 1e-9,
+             math.floor(ss_arr_bar_at(st, NOW - SS_PLAY.t0))
+    ''')
+    intro_chords, intro_drums, drop_drums, drop_bass, phase_ok, bar = got
+    assert intro_chords > 0 and intro_drums == 0
+    assert drop_drums > 0 and drop_bass > 0
+    assert phase_ok
+    assert bar == 16
+
+
+def test_mode_template_and_arrangement_persist_and_ride_in_history():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos, st.key_auto, st.target_key = 120, 0.0, false, "Am"
+      ss_do_reroll("batch")
+      st.mode, st.template = "arrange", "hiphop"
+      ss_arrangement(st, true)
+      local h = ss_history_push(st, true)
+      ss_save_now()
+      state.song_starter = nil
+      local st2 = ss_state()
+      local mode, tmpl, total = st2.mode, st2.template, st2.arr and st2.arr.total
+      st2.mode, st2.template, st2.arr = "loop", "club", nil
+      ss_history_recall(st2, st2.history[1])
+      return mode, tmpl, total, h.mode, h.template, st2.mode, st2.template, st2.arr and st2.arr.total
+    ''')
+    assert got == ("arrange", "hiphop", 56, "arrange", "hiphop", "arrange", "hiphop", 56)
+
+
+def test_window_draws_arrangement_strip():
+    L = _runtime()
+    got = L.execute(r'''
+      local st = ss_state()
+      st.target_bpm, st.chaos = 120, 0.0
+      ss_do_reroll("batch")
+      st.open, st.mode, st.template = true, "arrange", "club"
+      local rects, texts = 0, {}
+      reaper.ImGui_DrawList_AddRect = function() rects = rects + 1 end
+      reaper.ImGui_DrawList_AddText = function(_, x, y, c, s) texts[#texts + 1] = s end
+      render_song_starter_window()
+      local strip = ss_draw_arrangement_strip(st, 720)
+      local joined = table.concat(texts, "|")
+      return #ERRORS, ERRORS[1], strip.h > SS_STRIP_HEAD_H, #strip.roles, joined:find("DROP 1", 1, true) ~= nil,
+             rects > 7
+    ''')
+    n_err, first, tall, n_roles, has_drop, rects = got
+    assert n_err == 0, first
+    assert tall and n_roles >= 4 and has_drop and rects

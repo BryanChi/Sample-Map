@@ -545,6 +545,208 @@ function ss_loop_phase(slot, elapsed)
 end
 
 ---------------------------------------------------------------------------
+-- Arrangement: song sections and which roles play in each
+---------------------------------------------------------------------------
+
+-- Section types. color: region / strip tick (0xRRGGBB). drop: everything plays
+-- and the section before it gets a gap for impact.
+SS_SECTION_TYPES = {
+  intro     = { label = "Intro",     color = 0x4A6FA5 },
+  verse     = { label = "Verse",     color = 0x5A8FBF },
+  pre       = { label = "Pre",       color = 0xD9A441, rise = true },
+  build     = { label = "Build",     color = 0xD9A441, rise = true },
+  chorus    = { label = "Chorus",    color = 0x49CC85, drop = true },
+  hook      = { label = "Hook",      color = 0x49CC85, drop = true },
+  drop      = { label = "Drop",      color = 0x49CC85, drop = true },
+  breakdown = { label = "Breakdown", color = 0x8E6CC9 },
+  outro     = { label = "Outro",     color = 0x6B6B6B },
+}
+
+SS_TEMPLATES = {
+  { key = "club", label = "Club", sections = { { "intro", 8 }, { "build", 8 }, { "drop", 16 }, { "breakdown", 8 },
+    { "build", 8 }, { "drop", 16 }, { "outro", 8 } } },
+  { key = "pop", label = "Pop", sections = { { "intro", 4 }, { "verse", 8 }, { "pre", 4 }, { "chorus", 8 },
+    { "verse", 8 }, { "pre", 4 }, { "chorus", 8 }, { "outro", 4 } } },
+  { key = "hiphop", label = "Hip-hop", sections = { { "intro", 4 }, { "verse", 16 }, { "hook", 8 }, { "verse", 16 },
+    { "hook", 8 }, { "outro", 4 } } },
+  { key = "short", label = "Short", sections = { { "intro", 4 }, { "build", 4 }, { "drop", 8 }, { "outro", 4 } } },
+  { key = "random", label = "Random" },
+}
+SS_TEMPLATE = {}
+for _, t in ipairs(SS_TEMPLATES) do SS_TEMPLATE[t.key] = t end
+
+-- Textbook role presence per section type. Per role: from / to as fractions
+-- of the section (enter late / leave early), vol, rise (volume rises to the
+-- next section). Roles not listed are out. "*" = every role.
+SS_PRESENCE = {
+  intro     = { texture = {}, chords = {}, top = { from = 0.5 } },
+  build     = { drums = { rise = true }, top = { rise = true }, texture = { rise = true }, chords = {},
+                lead = { from = 0.5, vol = 0.6 } },
+  pre       = { drums = { rise = true }, top = { rise = true }, texture = { rise = true }, chords = {}, bass = {},
+                lead = { from = 0.5, vol = 0.6 } },
+  verse     = { drums = {}, top = {}, bass = {}, chords = {} },
+  chorus    = { ["*"] = {} },
+  hook      = { ["*"] = {} },
+  drop      = { ["*"] = {} },
+  breakdown = { chords = {}, lead = {}, texture = {} },
+  outro     = { texture = {}, chords = { to = 0.75 }, top = { to = 0.75 }, drums = { to = 0.5 }, bass = { to = 0.5 } },
+}
+SS_GAP_ROLES = { drums = true, bass = true, top = true }
+
+-- Section list { {type, bars}, ... } for a template; Random builds one
+-- (more unusual with chaos).
+function ss_template_sections(template_key, chaos)
+  local t = SS_TEMPLATE[template_key] or SS_TEMPLATE.club
+  if t.sections then
+    local out = {}
+    for i, s in ipairs(t.sections) do out[i] = { s[1], s[2] } end
+    return out
+  end
+  chaos = tonumber(chaos) or 0
+  local function pick(list) return list[math.floor(ss_rand() * #list) + 1] end
+  local function len(a, b) return (ss_rand() < 0.5) and a or b end
+  local out = {}
+  if ss_rand() >= chaos * 0.4 then out[#out + 1] = { "intro", len(4, 8) } end
+  local style = pick({ "club", "song" })
+  local cycles = (ss_rand() < 0.3 + chaos * 0.3) and 3 or 2
+  for c = 1, cycles do
+    if style == "club" then
+      out[#out + 1] = { "build", len(4, 8) }
+      out[#out + 1] = { "drop", len(8, 16) }
+    else
+      out[#out + 1] = { "verse", len(8, 16) }
+      if ss_rand() < 0.6 then out[#out + 1] = { "pre", 4 } end
+      out[#out + 1] = { pick({ "chorus", "hook" }), 8 }
+    end
+    if c < cycles and ss_rand() < 0.45 then out[#out + 1] = { "breakdown", len(4, 8) } end
+  end
+  out[#out + 1] = { "outro", len(4, 8) }
+  -- Chaos: swap some sections for another type, odd lengths.
+  if chaos > 0 then
+    local types = { "intro", "verse", "pre", "build", "chorus", "drop", "breakdown" }
+    for i = 2, #out - 1 do
+      if ss_rand() < chaos * 0.3 then out[i][1] = pick(types) end
+      if ss_rand() < chaos * 0.25 then out[i][2] = pick({ 2, 6, 12 }) end
+    end
+  end
+  return out
+end
+
+-- Arrangement for the role list: { template, sections = { { type, name, bars,
+-- start, parts = { [role] = { from, to, vol, rise } } } }, total }. Bars are
+-- 4/4 bars; from / to are bars into the section. Safe (chaos 0) is textbook;
+-- chaos adds random entries, dropouts and gap changes.
+function ss_build_arrangement(template_key, chaos, roles)
+  chaos = math.max(0, math.min(1, tonumber(chaos) or 0))
+  local list = ss_template_sections(template_key, chaos)
+  local p = chaos * 0.4
+  local function roll(prob) return prob > 0 and ss_rand() < prob end
+  roles = roles or SS_DEFAULT_ROLES
+  local counts, seen = {}, {}
+  for _, s in ipairs(list) do counts[s[1]] = (counts[s[1]] or 0) + 1 end
+  local arr = { template = template_key, sections = {}, total = 0 }
+  local start = 0
+  for i, s in ipairs(list) do
+    local typ, bars = s[1], s[2]
+    local def = SS_SECTION_TYPES[typ] or SS_SECTION_TYPES.verse
+    seen[typ] = (seen[typ] or 0) + 1
+    local name = def.label .. ((counts[typ] or 0) > 1 and (" " .. seen[typ]) or "")
+    local rules = SS_PRESENCE[typ] or {}
+    local parts = {}
+    for _, role in ipairs(roles) do
+      local rule = rules[role] or rules["*"]
+      if def.drop then
+        -- Chaos: one part sits out the first half of a drop now and then.
+        if rule and roll(p * 0.3) and role ~= "drums" then
+          rule = { from = 0.5 }
+        end
+      elseif roll(p * 0.5) then
+        -- Chaos: flip a part in or out.
+        rule = (not rule) and { vol = 0.8 } or nil
+      end
+      if rule then
+        local from = math.floor((rule.from or 0) * bars + 0.5)
+        local to = math.floor((rule.to or 1) * bars + 0.5)
+        if from == 0 and bars >= 8 and not def.drop and roll(p) then
+          from = math.floor(bars / 2)
+        end
+        local vol = rule.vol or 1.0
+        if typ == "verse" and role == "lead" then vol = 0.5 end
+        if to > from then
+          parts[role] = { from = from, to = to, vol = vol, rise = rule.rise or nil }
+        end
+      end
+    end
+    if typ == "verse" and not parts.lead and roll(p) then
+      parts.lead = { from = 0, to = bars, vol = 0.5 }
+    end
+    if next(parts) == nil then
+      parts[roles[1] or "drums"] = { from = 0, to = bars, vol = 1.0 }
+    end
+    arr.sections[i] = { type = typ, name = name, bars = bars, start = start, parts = parts }
+    start = start + bars
+  end
+  -- Pre-drop gap: drums / bass / top drop out at the end of the section
+  -- before a drop / chorus / hook.
+  for i = 1, #arr.sections - 1 do
+    local sec, nxt = arr.sections[i], arr.sections[i + 1]
+    local ndef = SS_SECTION_TYPES[nxt.type]
+    if ndef and ndef.drop and not (SS_SECTION_TYPES[sec.type] or {}).drop and not roll(p * 0.3) then
+      local gap = sec.bars >= 8 and 1 or 0.5
+      if roll(p * 0.5) then gap = (ss_rand() < 0.5) and 0.5 or 2 end
+      gap = math.min(gap, sec.bars / 2)
+      sec.gap = gap
+      for role, part in pairs(sec.parts) do
+        if SS_GAP_ROLES[role] and part.to > sec.bars - gap then
+          part.to = sec.bars - gap
+          if part.to <= part.from then sec.parts[role] = nil end
+        end
+      end
+    end
+  end
+  arr.total = start
+  return arr
+end
+
+-- Section holding bar (0-based bars from the start), and its index.
+function ss_arr_section_at(arr, bar)
+  for i, sec in ipairs(arr and arr.sections or {}) do
+    if bar >= sec.start and bar < sec.start + sec.bars then
+      return sec, i
+    end
+  end
+  return nil
+end
+
+-- Gain of role at `bar` in the arrangement (0 = out). A rising part climbs
+-- from silence like the item fade-in it becomes (fast-start curve).
+function ss_arr_gain(arr, role, bar)
+  local sec = ss_arr_section_at(arr, bar)
+  local part = sec and sec.parts[role]
+  if not part then
+    return 0.0
+  end
+  local rel = bar - sec.start
+  if rel < part.from or rel >= part.to then
+    return 0.0
+  end
+  local g = part.vol or 1.0
+  if part.rise then
+    g = g * math.sqrt(math.max(0, (rel - part.from) / math.max(0.001, part.to - part.from)))
+  end
+  return g
+end
+
+-- Arrangement for st, rebuilt when missing or for another template.
+function ss_arrangement(st, rebuild)
+  if rebuild or type(st.arr) ~= "table" or type(st.arr.sections) ~= "table" or #st.arr.sections == 0
+      or st.arr.template ~= st.template then
+    st.arr = ss_build_arrangement(st.template or "club", st.chaos, SS_DEFAULT_ROLES)
+  end
+  return st.arr
+end
+
+---------------------------------------------------------------------------
 -- State and persistence
 ---------------------------------------------------------------------------
 
@@ -572,6 +774,7 @@ function ss_state()
   st = {
     open = false, target_bpm = nil, target_key = nil, key_auto = true, chaos = 0.25, scope = "library",
     bars = 8, set_tempo = false, slots = {}, history = {}, next_id = 0,
+    mode = "loop", template = "club", arr = nil,
   }
   state.song_starter = st
   local content = sm_read_nonempty_file and sm_read_nonempty_file(SS_FILE)
@@ -588,6 +791,9 @@ function ss_state()
     st.scope = (cfg.scope == "map") and "map" or "library"
     st.bars = (cfg.bars == 4 or cfg.bars == 16) and cfg.bars or 8
     st.set_tempo = cfg.set_tempo == true
+    st.mode = (cfg.mode == "arrange") and "arrange" or "loop"
+    st.template = SS_TEMPLATE[cfg.template] and cfg.template or "club"
+    if ss_arr_valid(cfg.arr) then st.arr = cfg.arr end
     for _, sl in ipairs(type(cfg.slots) == "table" and cfg.slots or {}) do
       if type(sl) == "table" and SS_ROLE[sl.role] then
         local slot = ss_new_slot(st, sl.role)
@@ -626,6 +832,7 @@ function ss_save_now()
     v = 1, open = st.open == true, target_bpm = st.target_bpm, target_key = st.target_key,
     key_auto = st.key_auto ~= false, chaos = st.chaos, scope = st.scope, bars = st.bars,
     set_tempo = st.set_tempo == true, slots = slots, history = st.history,
+    mode = st.mode, template = st.template, arr = st.arr,
   }
   local ok, json = pcall(json_encode, cfg)
   if ok and type(json) == "string" then
@@ -650,11 +857,31 @@ function ss_snapshot(st)
   if #slots == 0 then
     return nil
   end
-  return { t = os.time(), bpm = st.target_bpm, key = st.target_key, slots = slots }
+  local h = { t = os.time(), bpm = st.target_bpm, key = st.target_key, slots = slots, mode = st.mode,
+    template = st.template }
+  if st.mode == "arrange" and ss_arr_valid(st.arr) then
+    h.arr = st.arr
+  end
+  return h
+end
+
+-- Saved arrangement looks usable (from the settings file or history).
+function ss_arr_valid(arr)
+  if type(arr) ~= "table" or type(arr.sections) ~= "table" or #arr.sections == 0 then
+    return false
+  end
+  for _, sec in ipairs(arr.sections) do
+    if type(sec) ~= "table" or not SS_SECTION_TYPES[sec.type] or type(sec.bars) ~= "number"
+        or type(sec.start) ~= "number" or type(sec.parts) ~= "table" then
+      return false
+    end
+  end
+  return true
 end
 
 local function ss_snapshot_sig(h)
-  local parts = { tostring(h.key), string.format("%.2f", tonumber(h.bpm) or 0) }
+  local parts = { tostring(h.key), string.format("%.2f", tonumber(h.bpm) or 0), tostring(h.mode),
+    tostring(h.template) }
   for _, s in ipairs(h.slots or {}) do parts[#parts + 1] = tostring(s.role) .. "=" .. tostring(s.path) end
   return table.concat(parts, "|")
 end
@@ -706,6 +933,15 @@ function ss_history_recall(st, h)
   st.target_bpm = tonumber(h.bpm) or st.target_bpm
   st.target_key = ss_norm_key(h.key)
   st.key_auto = false
+  if h.mode == "arrange" or h.mode == "loop" then
+    st.mode = h.mode
+  end
+  if SS_TEMPLATE[h.template] then
+    st.template = h.template
+  end
+  if ss_arr_valid(h.arr) then
+    st.arr = h.arr
+  end
   ss_retarget_all(st)
   ss_save()
 end
@@ -791,11 +1027,25 @@ function ss_preview_available()
   return r.CF_CreatePreview and r.CF_Preview_SetValue and r.CF_Preview_Play and true or false
 end
 
-local function ss_voice_volume(st, slot)
+-- Arrange preview: bar position `elapsed` seconds in, wrapping at the end.
+function ss_arr_bar_at(st, elapsed)
+  local arr = st.arr
+  if not arr or (arr.total or 0) <= 0 then
+    return 0
+  end
+  local bar = math.max(0, elapsed or 0) * (st.target_bpm or 120) / 240.0
+  return bar % arr.total
+end
+
+local function ss_voice_volume(st, slot, elapsed)
   if not ss_slot_audible(st.slots, slot) then
     return 0.0
   end
-  return (state.preview_volume or 1.0) * (tonumber(slot.vol) or 1.0)
+  local g = (state.preview_volume or 1.0) * (tonumber(slot.vol) or 1.0)
+  if st.mode == "arrange" and ss_arr_valid(st.arr) then
+    g = g * ss_arr_gain(st.arr, slot.role, ss_arr_bar_at(st, elapsed))
+  end
+  return g
 end
 
 local function ss_voice_stop(v)
@@ -822,7 +1072,7 @@ local function ss_voice_make(st, slot, elapsed)
   r.CF_Preview_SetValue(obj, "B_PPITCH", 1)
   r.CF_Preview_SetValue(obj, "D_PLAYRATE", tonumber(slot.rate) or 1.0)
   r.CF_Preview_SetValue(obj, "D_PITCH", tonumber(slot.shift) or 0)
-  r.CF_Preview_SetValue(obj, "D_VOLUME", ss_voice_volume(st, slot))
+  r.CF_Preview_SetValue(obj, "D_VOLUME", ss_voice_volume(st, slot, elapsed or 0))
   local pos = ss_loop_phase(slot, elapsed or 0)
   if pos > 0 then
     r.CF_Preview_SetValue(obj, "D_POSITION", pos)
@@ -838,7 +1088,8 @@ function ss_preview_stop()
   end
 end
 
-function ss_preview_play()
+-- start_bar: arrange mode starts there (loops join at that bar's phase).
+function ss_preview_play(start_bar)
   local st = ss_state()
   if not ss_preview_available() then
     sm_notify("Song Starter preview needs the SWS extension (CF_Preview).", "warn")
@@ -850,8 +1101,9 @@ function ss_preview_play()
     state.preview_paused = false
   end
   local voices, order = {}, {}
+  local into = (tonumber(start_bar) or 0) * 240.0 / (st.target_bpm or 120)
   for _, slot in ipairs(st.slots) do
-    local v = ss_voice_make(st, slot, 0)
+    local v = ss_voice_make(st, slot, into)
     if v then
       voices[slot.id] = v
       order[#order + 1] = v
@@ -865,7 +1117,7 @@ function ss_preview_play()
   for _, v in ipairs(order) do
     r.CF_Preview_Play(v.obj)
   end
-  SS_PLAY = { t0 = r.time_precise(), voices = voices,
+  SS_PLAY = { t0 = r.time_precise() - into, voices = voices,
     transport = r.GetPlayState and (r.GetPlayState() & 1) == 1 or false }
   return true
 end
@@ -907,6 +1159,7 @@ function ss_preview_update()
   end
   play.transport = transport
   local alive = false
+  local elapsed = r.time_precise() - play.t0
   for _, slot in ipairs(st.slots) do
     local v = play.voices[slot.id]
     if v and v.obj then
@@ -914,7 +1167,7 @@ function ss_preview_update()
       if r.CF_Preview_GetValue and ok_get and ret ~= false then
         alive = true
       end
-      local vol = ss_voice_volume(st, slot)
+      local vol = ss_voice_volume(st, slot, elapsed)
       if v.vol ~= vol then
         pcall(r.CF_Preview_SetValue, v.obj, "D_VOLUME", vol)
         v.vol = vol
@@ -939,8 +1192,133 @@ end
 -- Add to project
 ---------------------------------------------------------------------------
 
+SS_EDGE_FADE = 0.008 -- seconds, item edges in arrangements
+
+-- Native region colour from 0xRRGGBB.
+local function ss_native_color(rgb)
+  local rr, gg, bb = (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
+  local c = r.ColorToNative and r.ColorToNative(rr, gg, bb) or ((bb << 16) | (gg << 8) | rr)
+  return c | 0x1000000
+end
+
+-- Items of an arrangement: one per section and part that plays, for each
+-- audible slot. -> { { slot, sec, t0, t1 (seconds from the start), offs
+-- (source seconds at t0, so the loop stays on the bar grid), rise } }.
+function ss_arrangement_items(st, arr, bpm)
+  local bar_s = 240.0 / bpm
+  local out = {}
+  for _, slot in ipairs(st.slots) do
+    if ss_slot_audible(st.slots, slot) then
+      for _, sec in ipairs(arr.sections) do
+        local part = sec.parts[slot.role]
+        if part then
+          local t0 = (sec.start + part.from) * bar_s
+          local t1 = (sec.start + part.to) * bar_s
+          out[#out + 1] = { slot = slot, sec = sec, part = part, t0 = t0, t1 = t1,
+            offs = ss_loop_phase(slot, t0), rise = part.rise }
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- Arrange mode Add to project: folder + a track per slot that plays, an item
+-- per section, regions per section. One undo step.
+function ss_add_arrangement()
+  local st = ss_state()
+  local arr = ss_arrangement(st)
+  local bpm = st.target_bpm or ss_project_bpm()
+  local items = ss_arrangement_items(st, arr, bpm)
+  if #items == 0 then
+    sm_notify("Song Starter: nothing to arrange (all slots empty or muted).", "warn")
+    return false
+  end
+  local list, by_slot = {}, {}
+  for _, it in ipairs(items) do
+    if not by_slot[it.slot] then
+      by_slot[it.slot] = {}
+      list[#list + 1] = it.slot
+    end
+    local t = by_slot[it.slot]
+    t[#t + 1] = it
+  end
+  local proj = 0
+  local base = r.GetCursorPosition()
+  local key = st.target_key
+  local tmpl = SS_TEMPLATE[arr.template or st.template]
+  r.Undo_BeginBlock2(proj)
+  r.PreventUIRefresh(1)
+  if st.set_tempo and r.SetCurrentBPM then
+    r.SetCurrentBPM(proj, bpm, true)
+  end
+  local idx = r.CountTracks(proj)
+  local sel = r.GetSelectedTrack(proj, 0)
+  if sel then
+    idx = math.max(0, math.floor(r.GetMediaTrackInfo_Value(sel, "IP_TRACKNUMBER") + 0.5) - 1)
+  end
+  r.InsertTrackAtIndex(idx, true)
+  local folder = r.GetTrack(proj, idx)
+  local title = string.format("Song Starter %s%.0f%s", key and (key .. " ") or "", bpm,
+    tmpl and (" " .. tmpl.label) or "")
+  r.GetSetMediaTrackInfo_String(folder, "P_NAME", title, true)
+  r.SetMediaTrackInfo_Value(folder, "I_FOLDERDEPTH", 1)
+  local last
+  for i, slot in ipairs(list) do
+    r.InsertTrackAtIndex(idx + i, true)
+    local tr = r.GetTrack(proj, idx + i)
+    local role = SS_ROLE[slot.role]
+    r.GetSetMediaTrackInfo_String(tr, "P_NAME", role and role.label or slot.role, true)
+    r.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH", 0)
+    for _, it in ipairs(by_slot[slot]) do
+      local item = r.AddMediaItemToTrack(tr)
+      local take = r.AddTakeToMediaItem(item)
+      local src = r.PCM_Source_CreateFromFile(slot.path)
+      local len = it.t1 - it.t0
+      if take and src then
+        r.SetMediaItemTake_Source(take, src)
+        r.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", tonumber(slot.rate) or 1.0)
+        r.SetMediaItemTakeInfo_Value(take, "B_PPITCH", 1)
+        r.SetMediaItemTakeInfo_Value(take, "D_PITCH", tonumber(slot.shift) or 0)
+        r.SetMediaItemTakeInfo_Value(take, "D_VOL", (tonumber(slot.vol) or 1.0) * (it.part.vol or 1.0))
+        r.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", it.offs)
+        r.GetSetMediaItemTakeInfo_String(take, "P_NAME", (slot.name or "") .. " - " .. it.sec.name, true)
+      end
+      r.SetMediaItemInfo_Value(item, "D_POSITION", base + it.t0)
+      r.SetMediaItemInfo_Value(item, "D_LENGTH", len)
+      r.SetMediaItemInfo_Value(item, "B_LOOPSRC", 1)
+      if it.rise then
+        -- Build: the part rises from silence across the item (fast-start curve).
+        r.SetMediaItemInfo_Value(item, "D_FADEINLEN", len)
+        r.SetMediaItemInfo_Value(item, "C_FADEINSHAPE", 1)
+      else
+        r.SetMediaItemInfo_Value(item, "D_FADEINLEN", SS_EDGE_FADE)
+      end
+      r.SetMediaItemInfo_Value(item, "D_FADEOUTLEN", SS_EDGE_FADE)
+    end
+    last = tr
+  end
+  r.SetMediaTrackInfo_Value(last, "I_FOLDERDEPTH", -1)
+  local bar_s = 240.0 / bpm
+  for _, sec in ipairs(arr.sections) do
+    local def = SS_SECTION_TYPES[sec.type] or {}
+    r.AddProjectMarker2(proj, true, base + sec.start * bar_s, base + (sec.start + sec.bars) * bar_s, sec.name, -1,
+      ss_native_color(def.color or 0x808080))
+  end
+  r.PreventUIRefresh(-1)
+  if r.TrackList_AdjustWindows then r.TrackList_AdjustWindows(false) end
+  r.UpdateArrange()
+  r.Undo_EndBlock2(proj, "Song Starter: arrange", -1)
+  ss_history_push(st, false)
+  sm_notify(string.format("Arranged %s: %d tracks, %d sections, %d bars.", title, #list, #arr.sections, arr.total))
+  return true
+end
+
 function ss_add_to_project()
   local st = ss_state()
+  if st.mode == "arrange" then
+    return ss_add_arrangement()
+  end
   local list = {}
   for _, slot in ipairs(st.slots) do
     if ss_slot_audible(st.slots, slot) then list[#list + 1] = slot end
@@ -1308,6 +1686,104 @@ local function ss_history_list(st)
   end
 end
 
+SS_STRIP_HEAD_H = 18
+SS_STRIP_ROW_H = 5
+
+-- Section strip: a hairline box per section (width by bars), a lane per role
+-- showing where it plays, green playhead in arrange preview. Click a section
+-- to play from there. -> rect for tests.
+function ss_draw_arrangement_strip(st, w)
+  local arr = ss_arrangement(st)
+  local roles = {}
+  local have = {}
+  for _, slot in ipairs(st.slots) do
+    if slot.path and not slot.muted and not have[slot.role] then
+      have[slot.role] = true
+      roles[#roles + 1] = slot.role
+    end
+  end
+  local h = SS_STRIP_HEAD_H + math.max(1, #roles) * SS_STRIP_ROW_H + 6
+  local x0, y0 = r.ImGui_GetCursorScreenPos(ctx)
+  local clicked = r.ImGui_InvisibleButton(ctx, "##ss_arr_strip", math.max(1, w), h)
+  local hovered = r.ImGui_IsItemHovered(ctx)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local total = math.max(1, arr.total or 1)
+  local px = w / total
+  local bar_s = 240.0 / (st.target_bpm or 120)
+  local mx = hovered and r.ImGui_GetMousePos(ctx) or nil
+  for _, sec in ipairs(arr.sections) do
+    local sx0 = x0 + sec.start * px
+    local sx1 = x0 + (sec.start + sec.bars) * px
+    local def = SS_SECTION_TYPES[sec.type] or {}
+    local over = mx and mx >= sx0 and mx < sx1
+    if over then
+      r.ImGui_DrawList_AddRectFilled(dl, sx0, y0, sx1, y0 + h, 0xFFFFFF0C, 0)
+      r.ImGui_SetTooltip(ctx, string.format("%s  ·  %d bars  ·  %.1f s\nClick: play from here", sec.name, sec.bars,
+        sec.bars * bar_s))
+    end
+    r.ImGui_DrawList_AddRect(dl, sx0, y0, sx1, y0 + h, SS_COL.line, 0, 0, 1)
+    r.ImGui_DrawList_AddLine(dl, sx0 + 1, y0 + 1, sx1 - 1, y0 + 1, ((def.color or 0x808080) << 8) | 0xFF, 2)
+    local label = string.upper(sec.name)
+    local lw = r.ImGui_CalcTextSize(ctx, label) or 0
+    if lw > sx1 - sx0 - 6 then
+      label = string.upper((def.label or sec.type):sub(1, 1)) .. (sec.name:match("%d+$") or "")
+      lw = r.ImGui_CalcTextSize(ctx, label) or 0
+    end
+    if lw <= sx1 - sx0 - 4 then
+      ss_text(dl, sx0 + 4, y0 + 3, over and SS_COL.text or SS_COL.dim, label)
+    end
+    for ri, role in ipairs(roles) do
+      local part = sec.parts[role]
+      if part then
+        local ly = y0 + SS_STRIP_HEAD_H + (ri - 1) * SS_STRIP_ROW_H
+        local col = part.rise and SS_COL.accent_m or ((part.vol or 1) < 0.9 and SS_COL.accent_d or SS_COL.accent_m)
+        r.ImGui_DrawList_AddRectFilled(dl, x0 + (sec.start + part.from) * px + 1, ly,
+          x0 + (sec.start + part.to) * px - 1, ly + SS_STRIP_ROW_H - 1, col, 0)
+      end
+    end
+  end
+  local playing_arr = SS_PLAY and st.mode == "arrange"
+  if playing_arr then
+    local bar = ss_arr_bar_at(st, r.time_precise() - SS_PLAY.t0)
+    local hx = x0 + bar * px
+    r.ImGui_DrawList_AddLine(dl, hx, y0 - 2, hx, y0 + h + 2, SS_COL.accent, 1)
+    local sec = ss_arr_section_at(arr, bar)
+    if sec then
+      ss_corner_ticks(dl, x0 + sec.start * px, y0, x0 + (sec.start + sec.bars) * px, y0 + h, SS_COL.accent)
+    end
+  end
+  if clicked and mx then
+    local bar = math.max(0, math.min(total - 0.001, (mx - x0) / px))
+    local sec = ss_arr_section_at(arr, bar)
+    if sec then
+      ss_preview_play(sec.start)
+    end
+  end
+  return { x0 = x0, y0 = y0, w = w, h = h, roles = roles }
+end
+
+local function ss_template_combo(st)
+  local t = SS_TEMPLATE[st.template] or SS_TEMPLATE.club
+  r.ImGui_SetNextItemWidth(ctx, 92)
+  if r.ImGui_BeginCombo(ctx, "##ss_template", t.label) then
+    for _, tp in ipairs(SS_TEMPLATES) do
+      local desc = tp.label
+      if tp.sections then
+        local bars = 0
+        for _, s in ipairs(tp.sections) do bars = bars + s[2] end
+        desc = string.format("%s  (%d bars)", tp.label, bars)
+      end
+      if r.ImGui_Selectable(ctx, desc .. "##tp_" .. tp.key, tp.key == st.template) then
+        st.template = tp.key
+        ss_arrangement(st, true)
+        if SS_PLAY then ss_preview_play(0) end
+        ss_save()
+      end
+    end
+    r.ImGui_EndCombo(ctx)
+  end
+end
+
 local function ss_window_body(st)
   local avail_w = r.ImGui_GetContentRegionAvail(ctx) or 600
   local dl = r.ImGui_GetWindowDrawList(ctx)
@@ -1429,6 +1905,12 @@ local function ss_window_body(st)
   r.ImGui_Dummy(ctx, 1, 2)
   local ax, ay = r.ImGui_GetCursorScreenPos(ctx)
   r.ImGui_DrawList_AddLine(dl, ax, ay, ax + avail_w, ay, SS_COL.line, 1)
+  -- Arrangement strip.
+  if st.mode == "arrange" then
+    r.ImGui_Dummy(ctx, 1, 4)
+    ss_draw_arrangement_strip(st, avail_w)
+  end
+
   r.ImGui_Dummy(ctx, avail_w, 2)
   if ss_btn("##ss_play", SS_PLAY and "STOP" or "PLAY", 70, 26, SS_PLAY ~= nil, "Play all slots together, looped (Space in this window)") then
     if SS_PLAY then ss_preview_stop() else ss_preview_play() end
@@ -1446,7 +1928,9 @@ local function ss_window_body(st)
     if ss_history_push(st, true) then sm_notify("Song Starter saved.") end
   end
   r.ImGui_SameLine(ctx, 0, 6)
-  if ss_btn("##ss_add", "ADD TO PROJECT", nil, 26, false, "Folder track with one track per unmuted slot, at the edit cursor") then
+  if ss_btn("##ss_add", "ADD TO PROJECT", nil, 26, false, st.mode == "arrange"
+      and "Folder track with one track per unmuted slot, an item per section and a region per section, at the edit cursor"
+      or "Folder track with one track per unmuted slot, at the edit cursor") then
     ss_add_to_project()
   end
   r.ImGui_SameLine(ctx, 0, 10)
@@ -1460,6 +1944,36 @@ local function ss_window_body(st)
   r.ImGui_Dummy(ctx, 1, 4)
   ss_label("Recent")
   local _, rest_h = r.ImGui_GetContentRegionAvail(ctx)
+  -- Mode: LOOP (every slot for N bars) or ARRANGE (sections).
+  ss_label("Mode")
+  r.ImGui_SameLine(ctx, 0, 6)
+  for _, m in ipairs({ { "loop", "LOOP", "Play / add every slot as one loop of N bars" },
+                       { "arrange", "ARRANGE", "Build a song: sections where parts come and go" } }) do
+    if ss_btn("##ss_mode_" .. m[1], m[2], nil, 22, st.mode == m[1], m[3]) and st.mode ~= m[1] then
+      st.mode = m[1]
+      if m[1] == "arrange" then ss_arrangement(st) end
+      if SS_PLAY then ss_preview_play(0) end
+      ss_save()
+    end
+    r.ImGui_SameLine(ctx, 0, 4)
+  end
+  if st.mode == "arrange" then
+    r.ImGui_SameLine(ctx, 0, 10)
+    ss_template_combo(st)
+    r.ImGui_SameLine(ctx, 0, 4)
+    if ss_btn("##ss_arr_reroll", "VARY", nil, 22, false, "Rebuild the arrangement (Chaos sets how unusual)") then
+      ss_arrangement(st, true)
+      if SS_PLAY then ss_preview_play(0) end
+      ss_save()
+    end
+    local arr = ss_arrangement(st)
+    local secs = math.floor((arr.total or 0) * 240.0 / (st.target_bpm or 120) + 0.5)
+    r.ImGui_SameLine(ctx, 0, 10)
+    r.ImGui_TextColored(ctx, SS_COL.dim, string.format("%d BARS  ·  %d:%02d", arr.total or 0, secs // 60, secs % 60))
+  else
+    r.ImGui_NewLine(ctx)
+  end
+
   if r.ImGui_BeginChild(ctx, "##ss_history", 0, math.max(60, tonumber(rest_h) or 120), 0) then
     ss_history_list(st)
     r.ImGui_EndChild(ctx)
