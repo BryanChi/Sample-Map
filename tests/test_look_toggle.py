@@ -197,3 +197,31 @@ def test_tight_places_use_condensed_font_only_in_space():
       return on, #pushed == n
     """)
     assert got == (True, True)
+
+
+def test_custom_title_bar_in_space():
+    L = _runtime()
+    got = L.execute("""
+      local seen_flags
+      local plain = reaper.ImGui_Begin
+      reaper.ImGui_WindowFlags_NoTitleBar = function() return 1 end
+      sm_look_set(false)
+      local orig = function(c, name, p_open, flags) seen_flags = flags; return true, true end
+      reaper.ImGui_Begin = orig
+      -- reinstall around the stub Begin
+      sm_look_set(false)
+      local clicks = 0
+      reaper.ImGui_InvisibleButton = function(_, id) if id:find("close") then clicks = clicks + 1; return true end return false end
+      sm_look_set(true)
+      local v, open = reaper.ImGui_Begin(ctx, "Settings", true, 0)
+      local bar_flags = seen_flags
+      local v2, open2 = reaper.ImGui_Begin(ctx, "##popup", nil, 0)
+      local popup_flags = seen_flags
+      sm_look_set(false)
+      local v3, open3 = reaper.ImGui_Begin(ctx, "Settings", true, 0)
+      return bar_flags, open, popup_flags, seen_flags, open3, reaper.ImGui_Begin == orig
+    """)
+    bar_flags, open_, popup_flags, classic_flags, open3, restored = got
+    assert bar_flags == 1 and open_ is False      # NoTitleBar added; X click closes
+    assert popup_flags == 0                        # "##" windows untouched
+    assert classic_flags == 0 and open3 is True and restored

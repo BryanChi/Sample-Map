@@ -94,8 +94,8 @@ UI_METRICS_SPACE = { radius_panel = 0, radius_ctrl = 0 }
 -- Classic values, snapshotted on first apply so Monolith Space can switch back.
 local classic_theme, classic_metrics, classic_mono = nil, nil, nil
 
--- Set up in the Fonts section below.
-local install_cond_wrappers
+-- Set up in the Fonts and Title bar sections below.
+local install_cond_wrappers, install_title_bars
 
 -- Rect draws with rounding forced to 0 while Monolith Space is on.
 local orig_add_rect, orig_add_rect_filled = nil, nil
@@ -152,6 +152,7 @@ function sm_look_apply()
   end
   install_square_rects(on)
   install_cond_wrappers(on)
+  install_title_bars(on)
   sm_look_applied = on
   if sm_mono_stars_reset then
     sm_mono_stars_reset()
@@ -461,6 +462,149 @@ function mono_knob(dl, cx, cy, rad, t, o)
   local ca, sa = math.cos(a), math.sin(a)
   add_line(dl, cx + ca * cap_r * 0.2, cy + sa * cap_r * 0.2, cx + ca * (cap_r - 1.5), cy + sa * (cap_r - 1.5),
     o.hovered and 0xFFFFFFFF or MONO_COL.text, rad >= 16 and 1.8 or 1.5)
+end
+
+-- --- Title bar ---------------------------------------------------------------
+-- Monolith Space replaces ReaImGui's title bar on every titled Sample Map
+-- window (as Vertical FX List's Settings window): Anton title, hairline under
+-- it, square X on the right, drag the bar to move. ImGui_Begin and
+-- ImGui_BeginPopupModal are wrapped while the look is on; windows that already
+-- have NoTitleBar, or a "##..." name, are left alone, and docked windows keep
+-- their dock tab.
+SM_TITLE_BAR_H = 34
+local orig_begin, orig_begin_modal = nil, nil
+local modal_closed = {}
+
+local function title_of(name)
+  local s = tostring(name or "")
+  local t = s:match("^(.-)###") or s:match("^(.-)##") or s
+  return t
+end
+
+-- Draws the bar in the current window. -> true when its X was clicked.
+function sm_title_bar(title, closable, id)
+  local dl = r.ImGui_GetWindowDrawList(ctx)
+  local x, y = r.ImGui_GetWindowPos(ctx)
+  local w = r.ImGui_GetWindowSize(ctx)
+  if not (dl and x and w) then
+    return false
+  end
+  local h = SM_TITLE_BAR_H
+  local pad_x, pad_y = 10, 8
+  if r.ImGui_GetStyleVar and r.ImGui_StyleVar_WindowPadding then
+    pad_x, pad_y = r.ImGui_GetStyleVar(ctx, r.ImGui_StyleVar_WindowPadding())
+    pad_x, pad_y = pad_x or 10, pad_y or 8
+  end
+  r.ImGui_PushClipRect(ctx, x, y, x + w, y + h + 1, false)
+  r.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, MONO_COL.body, 0)
+  r.ImGui_DrawList_AddLine(dl, x, y + h, x + w, y + h, MONO_COL.line, 1)
+  local text = string.upper(title or "")
+  -- Anton 16: its line box is about 1.25x the size.
+  mono_title_text(dl, x + 14, y + (h - 16 * 1.25) * 0.5, MONO_COL.text, text, 16)
+
+  local clicked = false
+  local cs = 22
+  local cx, cy = x + w - 10 - cs, y + (h - cs) * 0.5
+  local drag_w = closable and (cx - x - 6) or (w - 2)
+  -- Drag area: the bar left of the X.
+  r.ImGui_SetCursorScreenPos(ctx, x + 1, y + 1)
+  r.ImGui_InvisibleButton(ctx, "##sm_title_drag" .. tostring(id or title), math.max(1, drag_w), h - 2)
+  if r.ImGui_IsItemActive(ctx) and r.ImGui_SetWindowPos then
+    local dx, dy = r.ImGui_GetMouseDelta(ctx)
+    if (dx and dx ~= 0) or (dy and dy ~= 0) then
+      r.ImGui_SetWindowPos(ctx, x + (dx or 0), y + (dy or 0))
+    end
+  end
+  if closable then
+    r.ImGui_SetCursorScreenPos(ctx, cx, cy)
+    clicked = r.ImGui_InvisibleButton(ctx, "##sm_title_close" .. tostring(id or title), cs, cs)
+    local hov = r.ImGui_IsItemHovered(ctx)
+    r.ImGui_DrawList_AddRect(dl, cx, cy, cx + cs, cy + cs, hov and 0xFFFFFF80 or MONO_COL.line_hi, 0, 0, 1)
+    local cc, k = hov and MONO_COL.text or MONO_COL.dim, 4.5
+    local mx, my = cx + cs * 0.5, cy + cs * 0.5
+    r.ImGui_DrawList_AddLine(dl, mx - k, my - k, mx + k, my + k, cc, 1.4)
+    r.ImGui_DrawList_AddLine(dl, mx + k, my - k, mx - k, my + k, cc, 1.4)
+    if hov then
+      r.ImGui_SetTooltip(ctx, "Close")
+    end
+  end
+  r.ImGui_PopClipRect(ctx)
+  -- Content starts under the bar.
+  r.ImGui_SetCursorScreenPos(ctx, x + pad_x, y + h + pad_y)
+  return clicked and true or false
+end
+
+local function wants_bar(name, flags)
+  if type(name) ~= "string" or name:sub(1, 2) == "##" or title_of(name) == "" then
+    return false
+  end
+  local ntb = r.ImGui_WindowFlags_NoTitleBar and r.ImGui_WindowFlags_NoTitleBar() or 0
+  return ntb ~= 0 and ((flags or 0) & ntb) == 0, ntb
+end
+
+local function docked()
+  return r.ImGui_IsWindowDocked and r.ImGui_IsWindowDocked(ctx) or false
+end
+
+local begin_wrapper, modal_wrapper = nil, nil
+
+install_title_bars = function(on)
+  if not on then
+    if begin_wrapper and r.ImGui_Begin == begin_wrapper then
+      r.ImGui_Begin = orig_begin
+    end
+    if modal_wrapper and r.ImGui_BeginPopupModal == modal_wrapper then
+      r.ImGui_BeginPopupModal = orig_begin_modal
+    end
+    return
+  end
+  if r.ImGui_Begin ~= begin_wrapper then
+    orig_begin = r.ImGui_Begin
+  end
+  if r.ImGui_BeginPopupModal ~= modal_wrapper then
+    orig_begin_modal = r.ImGui_BeginPopupModal
+  end
+  if not orig_begin then
+    return
+  end
+  local begin, begin_modal = orig_begin, orig_begin_modal
+  begin_wrapper = function(c, name, p_open, flags)
+    local bar, ntb = wants_bar(name, flags)
+    if not bar or c ~= ctx or not SM_MONO_SPACE then
+      return begin(c, name, p_open, flags)
+    end
+    local visible, open = begin(c, name, p_open, (flags or 0) | ntb)
+    if visible and not docked() then
+      if sm_title_bar(title_of(name), p_open ~= nil, name) then
+        open = false
+      end
+    end
+    return visible, open
+  end
+  r.ImGui_Begin = begin_wrapper
+  if begin_modal then
+    modal_wrapper = function(c, name, p_open, flags)
+      local bar, ntb = wants_bar(name, flags)
+      if not bar or c ~= ctx or not SM_MONO_SPACE then
+        return begin_modal(c, name, p_open, flags)
+      end
+      local visible, open = begin_modal(c, name, p_open, (flags or 0) | ntb)
+      if not visible then
+        if modal_closed[name] then
+          modal_closed[name] = nil
+          return false, false
+        end
+        return visible, open
+      end
+      if sm_title_bar(title_of(name), p_open ~= nil, name) then
+        modal_closed[name] = true
+        r.ImGui_CloseCurrentPopup(c)
+        open = false
+      end
+      return visible, open
+    end
+    r.ImGui_BeginPopupModal = modal_wrapper
+  end
 end
 
 -- --- Star dust backdrop -----------------------------------------------------
