@@ -2,6 +2,7 @@
 
 # Local sample index and UI config (machine-specific)
 SampleMapBrowser.json
+SampleMapSongStarter.json
 SampleMapData.json
 SampleMapData.cache.lua
 SampleMapData.cache.luac

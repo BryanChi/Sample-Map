@@ -85,6 +85,7 @@ SAMPLE_MAP_BROWSER_MODULES = {
   "41_explorer.lua",
   "42_map_tabs.lua",
   "42b_map_modules.lua",
+  "42c_song_starter.lua",
   "43_map_layout.lua",
   "44_settings.lua",
   "45_map_input.lua",

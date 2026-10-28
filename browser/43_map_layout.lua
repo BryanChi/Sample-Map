@@ -892,6 +892,11 @@ function render_header()
     r.ImGui_EndMenu(ctx)
   end
 
+  if r.ImGui_MenuItem(ctx, "Song Starter", nil, state.song_starter and state.song_starter.open) then
+    ss_toggle_window()
+  end
+  menu_item_tooltip("Pick loops for drums, bass, chords... matched to one key and tempo.\nPreview them together, re-roll parts, add them to the project.")
+
   if r.ImGui_MenuItem(ctx, "Settings", nil, state.settings_open) then
     state.settings_open = not state.settings_open
   end
