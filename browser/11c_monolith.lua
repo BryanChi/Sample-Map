@@ -239,12 +239,15 @@ function sm_mono_space_backdrop()
   end
   local add_circle = r.ImGui_DrawList_AddCircleFilled
   if add_circle then
-    -- Two soft glows: violet low-left, cyan high-right.
+    -- Two soft glows (violet low-left, cyan high-right): stacked circles at
+    -- alpha 1-2 so the edge fades out instead of showing a hard disc.
     local gx, gy, gr = wx + ww * 0.18, wy + wh * 0.82, math.max(ww, wh) * 0.45
-    add_circle(dl, gx, gy, gr, 0x8C7CFF0C, 48)
-    add_circle(dl, gx, gy, gr * 0.6, 0x8C7CFF08, 40)
     local hx, hy, hr = wx + ww * 0.86, wy + wh * 0.12, math.max(ww, wh) * 0.32
-    add_circle(dl, hx, hy, hr, 0x6FD3FF08, 40)
+    for k = 0, 13 do
+      local f = 1 - k / 14
+      add_circle(dl, gx, gy, gr * f, k < 7 and 0x8C7CFF01 or 0x8C7CFF02, 48)
+      add_circle(dl, hx, hy, hr * f, 0x6FD3FF01, 40)
+    end
     for i = 1, #stars do
       local s = stars[i]
       add_circle(dl, wx + s.x * ww, wy + s.y * wh, s.r, s.col, 6)
