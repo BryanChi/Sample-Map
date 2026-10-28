@@ -2101,7 +2101,19 @@ local function ss_slot_row(st, slot, i, row_w)
   local dl = r.ImGui_GetWindowDrawList(ctx)
   local playing = SS_PLAY and SS_PLAY.voices[slot.id] and ss_slot_audible(st.slots, slot)
   local selected = st.selected_id == slot.id
-  local ph = ss_draw_slot_playhead(st, slot, dl, x0, y0, x1, y1)
+  local role_w = 92
+  -- Volume on the right.
+  local ctrl_w = 92
+  local meter_w = ss_meter_available() and (SS_METER_W + 8) or 0
+  local cx = x1 - ctrl_w - 6 - meter_w
+  local name_x = x0 + role_w + 8
+  local name_w = math.max(40, cx - name_x - 8)
+  -- ◀ folder ▶ at the right end of the name column; text stops before it
+  local nav_w = slot.path and (3 * 18 + 2 * 3) or 0
+  local col_w = name_w
+  name_w = math.max(30, col_w - nav_w - (nav_w > 0 and 8 or 0))
+  -- playhead backdrop: the name column only (divider to just before ◀ folder ▶)
+  local ph = ss_draw_slot_playhead(st, slot, dl, x0 + role_w, y0, name_x + name_w + 4, y1)
   if r.ImGui_IsMouseHoveringRect and r.ImGui_IsMouseHoveringRect(ctx, x0, y0, x1, y1)
       and r.ImGui_IsWindowHovered(ctx, r.ImGui_HoveredFlags_ChildWindows and r.ImGui_HoveredFlags_ChildWindows() or 0) then
     st._hover_slot_id = slot.id
@@ -2113,7 +2125,6 @@ local function ss_slot_row(st, slot, i, row_w)
   r.ImGui_PushID(ctx, "ss_slot_" .. tostring(slot.id))
 
   -- Role label: click to change role or remove the slot.
-  local role_w = 92
   r.ImGui_SetCursorScreenPos(ctx, x0 + 1, y0 + 1)
   if r.ImGui_InvisibleButton(ctx, "##role", role_w - 2, 17) then
     r.ImGui_OpenPopup(ctx, "ss_role_menu")
@@ -2166,16 +2177,6 @@ local function ss_slot_row(st, slot, i, row_w)
     r.ImGui_EndPopup(ctx)
   end
 
-  -- Volume on the right.
-  local ctrl_w = 92
-  local meter_w = ss_meter_available() and (SS_METER_W + 8) or 0
-  local cx = x1 - ctrl_w - 6 - meter_w
-  local name_x = x0 + role_w + 8
-  local name_w = math.max(40, cx - name_x - 8)
-  -- ◀ folder ▶ at the right end of the name column; text stops before it
-  local nav_w = slot.path and (3 * 18 + 2 * 3) or 0
-  local col_w = name_w
-  name_w = math.max(30, col_w - nav_w - (nav_w > 0 and 8 or 0))
 
   r.ImGui_SetCursorScreenPos(ctx, name_x - 4, y0 + 1)
   if r.ImGui_InvisibleButton(ctx, "##name", name_w + 4, row_h - 2) and slot.path then

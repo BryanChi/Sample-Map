@@ -1514,3 +1514,28 @@ def test_folder_popup_lists_files_and_swaps_on_click():
     assert n2 == 1
     assert path == "/lib/Drums/Unscanned Loop 120bpm.wav" and dur == 8.0
     assert closed and cleared
+
+
+def test_playhead_backdrop_only_in_the_name_column():
+    L = _runtime()
+    L.execute(FAKE_CF)
+    got = L.execute(r'''
+      local st = ss_state()
+      ss_preview_play()
+      NOW = NOW + 21.0                       -- drums (16 bars) at bar 10.5
+      local fills = {}
+      reaper.ImGui_DrawList_AddRectFilled = function(_, x0, y0, x1, y1, col)
+        if col == 0x49CC851C or col == 0x49CC850A then fills[#fills + 1] = { x0, x1 } end
+      end
+      render_song_starter_window()
+      -- stub layout: row 52..788, role column 92, volume 92 + meter 19, nav 60
+      local left, right = 52 + 92, 52 + 92 + 8 + (788 - 92 - 6 - 19 - (52 + 92 + 8) - 8 - 68) + 4
+      local ok = #fills > 0
+      for _, f in ipairs(fills) do
+        if f[1] ~= left + 1 or f[2] > right + 1e-9 or f[2] < left then ok = false end
+      end
+      local dr = ss_draw_slot_playhead(st, BY.drums, {}, left, 0, right, 40)
+      return ok, #fills, #ERRORS, math.abs(dr.hx - (left + (right - left) * 10.5 / 16)) < 1e-9
+    ''')
+    ok, n, n_err, mapped = got
+    assert ok and n >= 5 and n_err == 0 and mapped
