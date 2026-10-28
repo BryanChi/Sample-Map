@@ -1818,22 +1818,6 @@ local function ss_window_body(st)
   local avail_w = r.ImGui_GetContentRegionAvail(ctx) or 600
   local dl = r.ImGui_GetWindowDrawList(ctx)
 
-  -- Title row.
-  local tx, ty = r.ImGui_GetCursorScreenPos(ctx)
-  if SM_MONO_SPACE and mono_title_text then
-    mono_title_text(dl, tx, ty - 3, SS_COL.text, "SONG STARTER", 16)
-  else
-    ss_text(dl, tx, ty, SS_COL.text, "SONG STARTER")
-    ss_text(dl, tx + 0.5, ty, SS_COL.text, "SONG STARTER")
-  end
-  local meta = SS_PLAY and "PLAYING" or "STOPPED"
-  local mw = r.ImGui_CalcTextSize(ctx, meta)
-  ss_text(dl, tx + avail_w - (mw or 0), ty, SS_PLAY and SS_COL.accent or SS_COL.mute, meta)
-  r.ImGui_Dummy(ctx, avail_w, 16)
-  local lx, ly = r.ImGui_GetCursorScreenPos(ctx)
-  r.ImGui_DrawList_AddLine(dl, lx, ly, lx + avail_w, ly, SS_COL.line, 1)
-  r.ImGui_Dummy(ctx, avail_w, 2)
-
   -- Target: key, tempo, bars, scope.
   ss_label("Key")
   r.ImGui_SameLine(ctx)
@@ -2007,8 +1991,11 @@ local function ss_window_body(st)
   -- History.
   r.ImGui_Dummy(ctx, 1, 4)
   ss_label("Recent")
+  -- The list takes exactly the room left (it scrolls itself): a fixed minimum
+  -- would overflow a short window, and the window scrollbar that brings
+  -- narrows the rows above, which then fit again: the scrollbar flickers.
   local _, rest_h = r.ImGui_GetContentRegionAvail(ctx)
-  if r.ImGui_BeginChild(ctx, "##ss_history", 0, math.max(60, tonumber(rest_h) or 120), 0) then
+  if r.ImGui_BeginChild(ctx, "##ss_history", 0, math.max(1, math.floor(tonumber(rest_h) or 120) - 1), 0) then
     ss_history_list(st)
     r.ImGui_EndChild(ctx)
   end

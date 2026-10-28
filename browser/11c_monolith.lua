@@ -505,14 +505,14 @@ function sm_title_bar(title, closable, id)
   local clicked = false
   local cs = 22
   local cx, cy = x + w - 10 - cs, y + (h - cs) * 0.5
-  local drag_w = closable and (cx - x - 6) or (w - 2)
+  local drag_w = closable and (cx - x - 6) or (w - 2 - pad_x)
   -- Drag area: the bar left of the X.
   r.ImGui_SetCursorScreenPos(ctx, x + 1, y + 1)
   r.ImGui_InvisibleButton(ctx, "##sm_title_drag" .. tostring(id or title), math.max(1, drag_w), h - 2)
   if r.ImGui_IsItemActive(ctx) and r.ImGui_SetWindowPos then
     local dx, dy = r.ImGui_GetMouseDelta(ctx)
     if (dx and dx ~= 0) or (dy and dy ~= 0) then
-      r.ImGui_SetWindowPos(ctx, x + (dx or 0), y + (dy or 0))
+      r.ImGui_SetWindowPos(ctx, math.floor(x + (dx or 0) + 0.5), math.floor(y + (dy or 0) + 0.5))
     end
   end
   if closable then
